@@ -90,7 +90,7 @@
       <span class="log-state muted"></span>
     </div>
     <pre class="console log-out" style="height: {{ '45vh' if instances | length == 1 else '38vh' }}"
-         data-stream="/servers/{{ server.name }}/{{ inst.role }}/log/stream"></pre>
+         data-log="/api/servers/{{ server.name }}/{{ inst.role }}/log"></pre>
   </section>
 {% endfor %}
 </div>
@@ -100,6 +100,7 @@
 
 {% include "_update_dialog.html" %}
 {% include "_charts.html" %}
+{% include "_logview.html" %}
 <script>
 (function () {
   const panels = [...document.querySelectorAll(".instance-panel")];
@@ -128,32 +129,16 @@
     if (all.length) since = Math.max(...all.map((p) => p.t));
   }
   refresh();
-  setInterval(refresh, 5000);
+  setInterval(() => { if (!document.hidden) refresh(); }, 5000);
   window.addEventListener("resize", () => { since = 0; for (const k in series) delete series[k]; refresh(); });
 
-  // the log of every panel, like tail -F
-  const RECORD = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d+ \d+ (\w+) /;
-  const MAX_LINES = 5000;
   for (const panel of panels) {
     const out = panel.querySelector(".log-out");
-    const errorsOnly = panel.querySelector(".log-errors");
-    const follow = panel.querySelector(".log-follow");
-    const state = panel.querySelector(".log-state");
-    const hideIt = (level) => errorsOnly.checked && !(level === "ERROR" || level === "CRITICAL");
-    let level = "INFO";
-    errorsOnly.addEventListener("change", () => { for (const s of out.childNodes) s.hidden = hideIt(s.className); });
-    const source = new EventSource(out.dataset.stream);
-    source.onopen = () => { state.textContent = "connected"; };
-    source.onerror = () => { state.textContent = "disconnected, retrying… (is the log file readable?)"; };
-    source.onmessage = (ev) => {
-      const m = RECORD.exec(ev.data);
-      if (m) level = m[1];
-      const span = document.createElement("span");
-      span.className = level; span.textContent = ev.data + "\n"; span.hidden = hideIt(level);
-      out.appendChild(span);
-      while (out.childNodes.length > MAX_LINES) out.removeChild(out.firstChild);
-      if (follow.checked) out.scrollTop = out.scrollHeight;
-    };
+    OmniaLog.attach(out, out.dataset.log, {
+      errorsOnly: panel.querySelector(".log-errors"),
+      follow: panel.querySelector(".log-follow"),
+      state: panel.querySelector(".log-state"),
+    });
   }
 })();
 </script>

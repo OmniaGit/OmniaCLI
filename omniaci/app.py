@@ -11,7 +11,7 @@ from typing import Optional
 from urllib.parse import urlsplit
 
 from fastapi import Body, Depends, FastAPI, HTTPException, Request, status
-from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.templating import Jinja2Templates
 
@@ -27,7 +27,7 @@ from .config import (
     server_to_dict,
 )
 from .jobs import JobManager
-from .logtail import follow
+from .logtail import read_since
 from .metrics import Sampler
 from .scheduler import AutoUpdater
 
@@ -261,23 +261,17 @@ def create_app(settings: Settings) -> FastAPI:
             request, "log.html", {"instance": get_instance(server, role)}
         )
 
-    @app.get("/servers/{server}/{role}/log/stream")
-    async def log_stream(server: str, role: str):
+    @app.get("/api/servers/{server}/{role}/log")
+    async def log_read(
+        server: str, role: str, pos: Optional[int] = None, inode: Optional[int] = None
+    ):
+        """The log lines after pos (the last 300 when pos is missing)."""
         instance = get_instance(server, role)
-        if not os.access(instance.log_file, os.R_OK):
-            raise HTTPException(
-                status.HTTP_404_NOT_FOUND, f"Cannot read {instance.log_file}"
-            )
-
-        async def events():
-            async for line in follow(instance.log_file):
-                yield f"data: {line}\n\n"
-
-        return StreamingResponse(
-            events(),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-        )
+        try:
+            return await asyncio.to_thread(read_since, instance.log_file, pos, inode)
+        except OSError as exc:
+            return JSONResponse({"error": f"Cannot read {instance.log_file}: {exc.strerror}"},
+                                status_code=404)
 
     @app.get("/jobs")
     async def job_list(request: Request):

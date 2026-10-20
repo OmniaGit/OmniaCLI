@@ -53,7 +53,7 @@
     } catch (e) { /* next round */ }
   }
   refresh();
-  setInterval(refresh, 5000);
+  setInterval(() => { if (!document.hidden) refresh(); }, 5000);
 })();
 </script>
 {% endblock %}

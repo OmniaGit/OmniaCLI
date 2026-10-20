@@ -6,7 +6,7 @@ import httpx
 import pytest
 
 from omniaci.app import create_app
-from omniaci.logtail import follow
+from omniaci.logtail import read_since
 
 from .conftest import PASSWORD, clone, commit, sh
 
@@ -99,22 +99,50 @@ async def test_auto_updater(client, env):
     assert "restart odoo-test" in env["calls"].read_text()
 
 
-async def test_follow_handles_rotation(tmp_path):
+def test_read_since_handles_partial_lines_and_rotation(tmp_path):
     log = tmp_path / "x.log"
-    log.write_text("a\nb\nc\n")
-    gen = follow(log, initial=2, poll=0.01)
-    assert [await gen.__anext__() for _ in range(2)] == ["b", "c"]
+    log.write_text("a\nb\nc\npart")
+    first = read_since(log, initial=2)
+    assert first["lines"] == ["b", "c"]  # the line being written waits
     with open(log, "a") as fh:
-        fh.write("d\npart")
-    assert await gen.__anext__() == "d"
-    with open(log, "a") as fh:
-        fh.write("ial\n")
-    assert await gen.__anext__() == "partial"
+        fh.write("ial\nd\n")
+    nxt = read_since(log, first["pos"], first["inode"])
+    assert nxt["lines"] == ["partial", "d"] and not nxt["rotated"]
+    assert read_since(log, nxt["pos"], nxt["inode"])["lines"] == []
     log.rename(tmp_path / "x.log.1")
     log.write_text("new\n")
-    assert "rotated" in await gen.__anext__()
-    assert await gen.__anext__() == "new"
-    await gen.aclose()
+    rotated = read_since(log, nxt["pos"], nxt["inode"])
+    assert rotated["rotated"] and rotated["lines"] == ["new"]
+
+
+def test_read_since_in_pieces(tmp_path, monkeypatch):
+    import omniaci.logtail as logtail
+
+    monkeypatch.setattr(logtail, "MAX_READ", 10)
+    log = tmp_path / "x.log"
+    log.write_text("")
+    start = read_since(log)
+    log.write_text("1234\n5678\nabcd\n")
+    got, pos, inode = [], start["pos"], start["inode"]
+    while True:
+        data = read_since(log, pos, inode)
+        got += data["lines"]; pos = data["pos"]
+        if not data["more"]:
+            break
+    assert got == ["1234", "5678", "abcd"]
+
+
+async def test_log_api(client, env):
+    url = "/api/servers/srv/test/log"
+    first = (await client.get(url, headers={"Authorization": AUTH})).json()
+    assert first["lines"][-1] == "line 9"
+    log = env["settings"].instance("srv", "test").log_file
+    with open(log, "a") as fh:
+        fh.write("line 10\n")
+    nxt = await client.get(f"{url}?pos={first['pos']}&inode={first['inode']}", headers={"Authorization": AUTH})
+    assert nxt.json()["lines"] == ["line 10"]
+    log.unlink()
+    assert (await client.get(url, headers={"Authorization": AUTH})).status_code == 404
 
 
 POST = {"Authorization": AUTH, "Origin": f"http://{HOST}"}

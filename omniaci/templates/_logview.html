@@ -1,0 +1,53 @@
+{# Log viewer: OmniaLog.attach(pre, url, {errorsOnly, follow, state}).
+   It polls url with the position reached, starts only when the log is on
+   screen (lazy) and pauses while the browser tab is hidden. No connection
+   stays open, so pages never wait for a free connection. #}
+<script>
+const OmniaLog = (function () {
+  const RECORD = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d+ \d+ (\w+) /;
+  const MAX_LINES = 5000, EVERY = 2000;
+  function attach(out, url, ctl) {
+    let pos = null, inode = null, level = "INFO", timer = null, visible = false, busy = false;
+    const hideIt = (lv) => ctl.errorsOnly.checked && !(lv === "ERROR" || lv === "CRITICAL");
+    ctl.errorsOnly.addEventListener("change", () => { for (const s of out.childNodes) s.hidden = hideIt(s.className); });
+    function add(text) {
+      const m = RECORD.exec(text);
+      if (m) level = m[1];
+      const span = document.createElement("span");
+      span.className = level; span.textContent = text + "\n"; span.hidden = hideIt(level);
+      out.appendChild(span);
+    }
+    async function poll() {
+      timer = null;
+      if (busy || !visible || document.hidden) return;
+      busy = true;
+      let again = EVERY;
+      try {
+        const q = pos === null ? "" : `?pos=${pos}&inode=${inode}`;
+        const resp = await fetch(url + q);
+        const data = await resp.json();
+        if (!resp.ok) { ctl.state.textContent = data.error || ("error " + resp.status); again = 10000; }
+        else {
+          if (data.rotated) add("----- log file rotated or truncated -----");
+          data.lines.forEach(add);
+          while (out.childNodes.length > MAX_LINES) out.removeChild(out.firstChild);
+          if (data.lines.length && ctl.follow.checked) out.scrollTop = out.scrollHeight;
+          pos = data.pos; inode = data.inode;
+          ctl.state.textContent = "updated " + new Date().toLocaleTimeString();
+          if (data.more) again = 0;
+        }
+      } catch (e) { ctl.state.textContent = "not reachable, retrying…"; again = 5000; }
+      busy = false;
+      schedule(again);
+    }
+    function schedule(ms) { if (!timer && visible && !document.hidden) timer = setTimeout(poll, ms); }
+    new IntersectionObserver((entries) => {
+      visible = entries.some((e) => e.isIntersecting);
+      if (visible) schedule(0);
+    }).observe(out);
+    document.addEventListener("visibilitychange", () => { if (!document.hidden) schedule(0); });
+    ctl.state.textContent = "loads when visible";
+  }
+  return {attach};
+})();
+</script>
