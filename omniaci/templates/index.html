@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block content %}
+{% for server in servers %}
+<section class="server">
+  <div class="server-head">
+    <h2>{{ server.name }}</h2>
+    {% if server.production and server.test %}
+    <form method="post" action="/servers/{{ server.name }}/merge"
+          onsubmit="return confirm('Back up production, merge the commits deployed on test into production, push, update modules and restart production {{ server.name }}?')">
+      <button class="danger" {% if busy[server.production.key] or busy[server.test.key] %}disabled title="A job is running"{% endif %}>Merge test to production</button>
+    </form>
+    {% endif %}
+  </div>
+  <div class="instances">
+  {% for role, inst in server.instances.items() %}
+    <div class="instance">
+      <span class="role {{ role }}">{{ role }}</span>
+      {% if busy[inst.key] %}<span class="status running"> · job running</span>{% endif %}
+      <dl>
+        <dt>Database</dt><dd class="mono">{{ inst.database }}</dd>
+        <dt>Odoo config</dt><dd class="mono">{{ inst.odoo_config }}</dd>
+        <dt>Log file</dt><dd class="mono">{{ inst.log_file }}</dd>
+        <dt>Service</dt><dd class="mono">{{ inst.restart.type }}: {{ inst.restart.service }}</dd>
+        <dt>Auto update</dt>
+        <dd>
+          {% if inst.auto_update.enabled %}
+            every {{ inst.auto_update.interval_minutes }} min, {{ inst.auto_update.window_label() }}
+            {% set st = auto_state.get(inst.key) %}
+            {% if st %}<br><span class="{{ 'error' if st.error else 'muted' }}">{{ st.checked }}: {{ st.message }}</span>{% endif %}
+          {% else %}<span class="muted">off</span>{% endif %}
+        </dd>
+      </dl>
+      <div class="scroll">
+      <table>
+        <tr><th>Repository</th><th>Branch</th><th>Last commit</th></tr>
+        {% for repo in inst.repositories %}
+        {% set st = repo_status[inst.key][loop.index0] %}
+        <tr>
+          <td><span title="{{ repo.path }}">{{ repo.name }}</span></td>
+          {% if st.error %}
+          <td colspan="2" class="error">{{ st.error }}</td>
+          {% else %}
+          <td class="mono {{ 'error' if st.branch != repo.branch }}"
+              {% if st.branch != repo.branch %}title="expected {{ repo.branch }}"{% endif %}>{{ st.branch }}</td>
+          <td><span class="mono">{{ st.sha }}</span> <span class="muted">{{ st.date }}</span><br>{{ st.subject }}</td>
+          {% endif %}
+        </tr>
+        {% endfor %}
+      </table>
+      </div>
+      <div class="actions">
+        <form method="post" action="/servers/{{ server.name }}/{{ role }}/pull">
+          <button {% if busy[inst.key] %}disabled{% endif %}>Git pull</button></form>
+        <form method="post" action="/servers/{{ server.name }}/{{ role }}/pull-restart"
+              onsubmit="return confirm('Pull, update changed modules and restart {{ inst.key }}?')">
+          <button {% if busy[inst.key] %}disabled{% endif %}>Git pull + restart</button></form>
+        <form method="post" action="/servers/{{ server.name }}/{{ role }}/backup">
+          <button {% if busy[inst.key] %}disabled{% endif %}>Backup</button></form>
+        <a class="button" href="/servers/{{ server.name }}/{{ role }}/log">Log</a>
+      </div>
+    </div>
+  {% endfor %}
+  </div>
+</section>
+{% else %}
+<p class="muted">No servers configured.</p>
+{% endfor %}
+<h1>Last jobs</h1>
+<div class="panel">{% include "_jobs_table.html" %}</div>
+{% endblock %}

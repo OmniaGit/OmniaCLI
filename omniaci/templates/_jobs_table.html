@@ -1,0 +1,17 @@
+<div class="scroll">
+<table>
+  <tr><th>Job</th><th>Status</th><th>Started by</th><th>Created</th><th>Finished</th><th>Error</th></tr>
+  {% for job in jobs %}
+  <tr>
+    <td><a href="/jobs/{{ job.id }}">{{ job.title }}</a></td>
+    <td class="status {{ job.status }}">{{ job.status }}</td>
+    <td>{{ job.source }}</td>
+    <td class="mono">{{ job.created }}</td>
+    <td class="mono">{{ job.finished or "" }}</td>
+    <td class="error">{{ job.error or "" }}</td>
+  </tr>
+  {% else %}
+  <tr><td colspan="6" class="muted">No jobs yet.</td></tr>
+  {% endfor %}
+</table>
+</div>

@@ -1,0 +1,58 @@
+# OmniaCI configuration. Copy to omniaci.yaml and adapt.
+
+auth:
+  users:
+    # value from: omniaci hash-password
+    admin: "pbkdf2_sha256$600000$<salt>$<hash>"
+
+# backups go to <backup_dir>/<server>/<production|test>/<database>_<timestamp>.zip
+backup_dir: /var/backups/omniaci
+# one JSON file per job (log and result), the last 500 are kept
+jobs_dir: /var/lib/omniaci/jobs
+
+servers:
+  customer_a:
+    production:
+      database: CUSTOMER_A
+      odoo_config: /opt/odoo/customer_a/prod/odoo.conf
+      log_file: /var/log/odoo/customer_a_prod.log
+      # bin of the venv that runs this Odoo; click-odoo-contrib must be
+      # installed in it (pip install click-odoo-contrib)
+      venv_bin: /opt/odoo/venvs/odoo18/bin
+      restart:
+        type: systemd          # systemd -> systemctl restart <service>
+        service: odoo-customer-a
+        sudo: true             # run as "sudo -n": see README, sudoers
+      update_modules: true     # click-odoo-update after every pull
+      auto_update:
+        enabled: false
+        interval_minutes: 10
+        window: "20:00-06:00"  # HH:MM-HH:MM, may cross midnight; omit = always
+      repositories:
+        # "name" pairs a test repository with its production repository
+        - name: odoo
+          path: /opt/odoo/customer_a/prod/odoo
+          remote: origin
+          branch: "18.0"
+        - name: odooplm
+          path: /opt/odoo/customer_a/prod/odooplm
+          branch: "18.0"
+    test:
+      database: CUSTOMER_A_TEST
+      odoo_config: /opt/odoo/customer_a/test/odoo.conf
+      log_file: /var/log/odoo/customer_a_test.log
+      venv_bin: /opt/odoo/venvs/odoo18/bin
+      restart:
+        type: initd            # initd -> /etc/init.d/<service> restart
+        service: odoo-customer-a-test
+      auto_update:
+        enabled: true
+        interval_minutes: 10
+        window: "07:00-20:00"
+      repositories:
+        - name: odoo
+          path: /opt/odoo/customer_a/test/odoo
+          branch: "18.0"
+        - name: odooplm
+          path: /opt/odoo/customer_a/test/odooplm
+          branch: "test_18.0"

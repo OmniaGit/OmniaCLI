@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}Log {{ instance.key }} · OmniaCI{% endblock %}
+{% block content %}
+<h1>Log {{ instance.key }} <span class="muted mono">{{ instance.log_file }}</span></h1>
+<div class="panel">
+  <div class="actions" style="margin: 0 0 10px">
+    <label><input type="checkbox" id="errors"> Errors only (ERROR, CRITICAL and their tracebacks)</label>
+    <label><input type="checkbox" id="follow" checked> Follow</label>
+    <span id="state" class="muted"></span>
+  </div>
+  <pre class="console" id="out" style="height: 70vh"></pre>
+</div>
+<script>
+(function () {
+  const out = document.getElementById("out");
+  const errorsOnly = document.getElementById("errors");
+  const followBox = document.getElementById("follow");
+  const state = document.getElementById("state");
+  const MAX_LINES = 5000;
+  // An Odoo log record starts with "YYYY-MM-DD HH:MM:SS,mmm PID LEVEL"; the
+  // lines that do not (tracebacks) belong to the record above them.
+  const RECORD = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d+ \d+ (\w+) /;
+  let level = "INFO";
+  function addLine(text) {
+    const m = RECORD.exec(text);
+    if (m) level = m[1];
+    const span = document.createElement("span");
+    span.className = level;
+    span.textContent = text + "\n";
+    span.hidden = errorsOnly.checked && !(level === "ERROR" || level === "CRITICAL");
+    out.appendChild(span);
+    while (out.childNodes.length > MAX_LINES) out.removeChild(out.firstChild);
+    if (followBox.checked) out.scrollTop = out.scrollHeight;
+  }
+  errorsOnly.addEventListener("change", () => {
+    for (const span of out.childNodes)
+      span.hidden = errorsOnly.checked && !(span.className === "ERROR" || span.className === "CRITICAL");
+  });
+  const source = new EventSource("/servers/{{ instance.server }}/{{ instance.role }}/log/stream");
+  source.onopen = () => { state.textContent = "connected"; };
+  source.onmessage = (ev) => addLine(ev.data);
+  source.onerror = () => { state.textContent = "disconnected, retrying… (is the log file readable?)"; };
+})();
+</script>
+{% endblock %}

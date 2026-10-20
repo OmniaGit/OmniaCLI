@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}{{ job.title }} · OmniaCI{% endblock %}
+{% block content %}
+<h1>{{ job.title }}</h1>
+<div class="panel">
+  <dl>
+    <dt>Status</dt><dd class="status {{ job.status }}" id="status">{{ job.status }}</dd>
+    <dt>Started by</dt><dd>{{ job.source }}</dd>
+    <dt>Instances</dt><dd>{{ job.instances | join(", ") }}</dd>
+    <dt>Created</dt><dd class="mono">{{ job.created }}</dd>
+    <dt>Finished</dt><dd class="mono" id="finished">{{ job.finished or "" }}</dd>
+    <dt>Error</dt><dd class="error" id="error">{{ job.error or "" }}</dd>
+  </dl>
+  <pre class="console" id="out"></pre>
+</div>
+<script>
+(function () {
+  const out = document.getElementById("out");
+  let next = 0;
+  async function poll() {
+    let data;
+    try {
+      const resp = await fetch("/api/jobs/{{ job.id }}?since=" + next);
+      if (!resp.ok) throw new Error(resp.status);
+      data = await resp.json();
+    } catch (e) { setTimeout(poll, 5000); return; }
+    if (data.lines.length) {
+      const stick = out.scrollTop + out.clientHeight >= out.scrollHeight - 20;
+      out.textContent += data.lines.join("\n") + "\n";
+      if (stick) out.scrollTop = out.scrollHeight;
+    }
+    next = data.next;
+    const st = document.getElementById("status");
+    st.textContent = data.status; st.className = "status " + data.status;
+    document.getElementById("finished").textContent = data.finished || "";
+    document.getElementById("error").textContent = data.error || "";
+    if (!["success", "failed", "interrupted"].includes(data.status)) setTimeout(poll, 1500);
+  }
+  poll();
+})();
+</script>
+{% endblock %}
