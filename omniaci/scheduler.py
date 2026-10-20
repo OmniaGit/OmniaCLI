@@ -32,6 +32,16 @@ class AutoUpdater:
         await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks.clear()
 
+    async def reload(self) -> None:
+        """Restart the loops after the servers changed."""
+        await self.stop()
+        self.state = {
+            key: value
+            for key, value in self.state.items()
+            if key in {i.key for i in self.settings.all_instances()}
+        }
+        self.start()
+
     def _set(self, instance: Instance, message: str, error: bool = False) -> None:
         self.state[instance.key] = {
             "checked": datetime.datetime.now().isoformat(timespec="seconds"),

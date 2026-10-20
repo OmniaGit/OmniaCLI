@@ -1,0 +1,10 @@
+# Settings of the omniaci service (systemctl restart omniaci after a change).
+
+# Main configuration file: users, backup and jobs folders, servers file.
+#OMNIACI_CONFIG=/etc/omniaci/omniaci.yaml
+
+# Address and port of the web interface. Keep 127.0.0.1 and publish OmniaCI
+# through an HTTPS reverse proxy: Basic authentication sends the password with
+# every request.
+#OMNIACI_HOST=127.0.0.1
+#OMNIACI_PORT=8090

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import configparser
 import datetime
 import os
+import re
 import shlex
 from pathlib import Path
 
@@ -144,8 +146,10 @@ async def pending_updates(instance: Instance) -> dict[str, int]:
     return pending
 
 
-async def update_modules(job: Job, instance: Instance) -> None:
-    if not instance.update_modules:
+async def update_modules(job: Job, instance: Instance, force: bool = False) -> None:
+    """Update the changed modules; `force` ignores the instance's
+    update_modules setting (the user asked for it explicitly)."""
+    if not instance.update_modules and not force:
         job.log("Module update disabled for this instance")
         return
     job.log("--- update changed modules")
@@ -159,6 +163,122 @@ async def update_modules(job: Job, instance: Instance) -> None:
             instance.database,
         ],
     )
+
+
+ADDON_NAME = re.compile(r"[A-Za-z0-9_]+")
+_MANIFESTS = ("__manifest__.py", "__openerp__.py")
+_VERSION_INFO = re.compile(r"^version_info\s*=\s*\(\s*['\"]?(?:saas~)?(\d+)", re.MULTILINE)
+
+
+def odoo_major(odoo_bin: Path) -> int | None:
+    """The major version from odoo/release.py next to odoo-bin."""
+    try:
+        text = (odoo_bin.parent / "odoo" / "release.py").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    match = _VERSION_INFO.search(text)
+    return int(match.group(1)) if match else None
+
+
+def logfile_to_stdout(major: int | None) -> str:
+    """The --logfile option that sends the Odoo log to the job.
+
+    Checked on 2026-10-20 with a config that has a logfile: an empty value logs
+    to stdout from Odoo 14 (14, 15, 16, 19, 20) but is ignored by 10, 12 and
+    13; /dev/stdout works on all of them, but from 12 Odoo also prints a
+    misleading "couldn't create the logfile directory" error.
+    """
+    return "--logfile=" if major is not None and major >= 14 else "--logfile=/dev/stdout"
+
+
+def find_odoo_bin(instance: Instance) -> Path | None:
+    if instance.odoo_bin is not None:
+        return instance.odoo_bin
+    for repo in instance.repositories:
+        if (repo.path / "odoo-bin").is_file():
+            return repo.path / "odoo-bin"
+    return None
+
+
+def addons_paths(instance: Instance) -> list[Path]:
+    """The addons_path of the instance's Odoo config, then Odoo's own addons."""
+    parser = configparser.ConfigParser(interpolation=None)
+    try:
+        parser.read(instance.odoo_config, encoding="utf-8")
+        raw = parser.get("options", "addons_path", fallback="")
+    except (configparser.Error, OSError, UnicodeDecodeError):
+        raw = ""
+    paths = [Path(p.strip()) for p in raw.replace("\n", ",").split(",") if p.strip()]
+    odoo_bin = find_odoo_bin(instance)
+    if odoo_bin is not None:
+        paths += [odoo_bin.parent / "addons", odoo_bin.parent / "odoo" / "addons"]
+    if not raw:
+        # no readable addons_path: the repositories and their first level
+        for repo in instance.repositories:
+            paths += [repo.path] + sorted(p for p in repo.path.iterdir() if p.is_dir())
+    return paths
+
+
+def list_addons(instance: Instance) -> list[dict]:
+    """Every addon Odoo would see, the first of a name winning as in Odoo,
+    those inside the instance's repositories first."""
+    repos = [r.path.resolve() for r in instance.repositories]
+    found: dict[str, dict] = {}
+    for base in addons_paths(instance):
+        try:
+            children = sorted(base.iterdir())
+        except OSError:
+            continue
+        for path in children:
+            if path.name in found or not ADDON_NAME.fullmatch(path.name):
+                continue
+            if any((path / m).is_file() for m in _MANIFESTS):
+                resolved = path.resolve()
+                found[path.name] = {
+                    "name": path.name,
+                    "path": str(path),
+                    "in_repository": any(r == resolved or r in resolved.parents for r in repos),
+                }
+    return sorted(found.values(), key=lambda a: (not a["in_repository"], a["name"]))
+
+
+async def update_chosen_modules(job: Job, instance: Instance, modules: list[str]) -> None:
+    """odoo-bin -u <modules> --stop-after-init. --workers=0: with workers,
+    Odoo opens the HTTP port even when it stops after init, and the running
+    instance holds it (checked in Odoo 10, 19 and 20 server.py)."""
+    bad = [m for m in modules if not ADDON_NAME.fullmatch(m)]
+    if not modules or bad:
+        raise JobFailed(f"invalid module list: {', '.join(bad) or 'empty'}")
+    odoo_bin = find_odoo_bin(instance)
+    if odoo_bin is None or not odoo_bin.is_file():
+        raise JobFailed(
+            "odoo-bin not found: set odoo_bin in the instance configuration"
+        )
+    job.log(f"--- update modules {', '.join(modules)}")
+    first_line = len(job.lines)
+    await run(
+        job,
+        [
+            instance.venv_bin / "python",
+            odoo_bin,
+            "-c",
+            instance.odoo_config,
+            "-d",
+            instance.database,
+            "-u",
+            ",".join(modules),
+            "--stop-after-init",
+            "--workers=0",
+            # log to the job, not to the instance's log file
+            logfile_to_stdout(odoo_major(odoo_bin)),
+        ],
+    )
+    # Odoo only warns about a module it does not know and exits 0 (same
+    # message in Odoo 10 to 20)
+    for line in job.lines[first_line:]:
+        if "invalid module names, ignored: " in line:
+            ignored = line.split("invalid module names, ignored: ", 1)[1].strip()
+            raise JobFailed(f"Odoo does not know the modules {ignored}: nothing updated for them")
 
 
 async def restart(job: Job, instance: Instance) -> None:

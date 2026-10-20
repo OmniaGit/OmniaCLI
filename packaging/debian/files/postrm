@@ -1,0 +1,36 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    remove)
+        rm -rf /opt/omniaci/venv /opt/omniaci/venv.old
+        ;;
+    purge)
+        rm -rf /opt/omniaci/venv /opt/omniaci/venv.old
+        rm -f /etc/omniaci/omniaci.yaml /etc/omniaci/initial-admin-password
+        rmdir /etc/omniaci 2>/dev/null || true
+        # the configuration and the job history go; the backups stay
+        rm -rf /var/lib/omniaci/jobs
+        rm -f /var/lib/omniaci/servers.yaml /var/lib/omniaci/servers.yaml.bak \
+            /var/lib/omniaci/servers.yaml.tmp
+        if [ -d /var/lib/omniaci/backups ] && [ -n "$(ls -A /var/lib/omniaci/backups)" ]; then
+            echo "omniaci: the database backups are kept in /var/lib/omniaci/backups"
+        else
+            rm -rf /var/lib/omniaci
+        fi
+        ;;
+esac
+
+# systemd, as dh_installsystemd writes it
+if [ -d /run/systemd/system ]; then
+    systemctl --system daemon-reload >/dev/null || true
+fi
+if [ "$1" = "remove" ] && [ -x "/usr/bin/deb-systemd-helper" ]; then
+    deb-systemd-helper mask 'omniaci.service' >/dev/null || true
+fi
+if [ "$1" = "purge" ] && [ -x "/usr/bin/deb-systemd-helper" ]; then
+    deb-systemd-helper purge 'omniaci.service' >/dev/null || true
+    deb-systemd-helper unmask 'omniaci.service' >/dev/null || true
+fi
+
+exit 0

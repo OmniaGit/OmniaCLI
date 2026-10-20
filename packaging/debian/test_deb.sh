@@ -1,0 +1,143 @@
+#!/bin/bash
+# Install an OmniaCI .deb in a container with a real systemd, for every target
+# distribution, and check it end to end: the service starts, the generated
+# admin password logs in, a server saved through the API is pulled and its
+# (dummy) Odoo service restarted through sudo, then reinstall, remove, purge.
+#
+# Usage: packaging/debian/test_deb.sh <package.deb> [image ...]
+set -euo pipefail
+
+DEB="$(readlink -f "${1:?usage: test_deb.sh <package.deb> [image ...]}")"
+shift
+IMAGES=("$@")
+[ ${#IMAGES[@]} -gt 0 ] || IMAGES=(debian:11 ubuntu:22.04 debian:12 ubuntu:24.04 debian:13)
+HERE="$(cd "$(dirname "$0")" && pwd)"
+LOGS="$(mktemp -d)"
+
+# The checks, run as root inside the container.
+read -r -d '' CHECKS <<'EOS' || true
+set -euo pipefail
+step() { echo "--- $*"; }
+fail() { echo "CHECK FAILED: $*"; exit 1; }
+export DEBIAN_FRONTEND=noninteractive
+
+step "install"
+apt-get install -y -qq /opt/omniaci-test/omniaci.deb > /tmp/install.log 2>&1 || { tail -30 /tmp/install.log; fail "apt-get install"; }
+grep -E '^omniaci:' /tmp/install.log || true
+dpkg -s omniaci | grep -q '^Status: install ok installed' || fail "package not installed"
+for i in $(seq 30); do curl -s -o /dev/null localhost:8090 && break; sleep 1; done
+systemctl is-active --quiet omniaci || { journalctl -u omniaci --no-pager | tail -20; fail "service not active"; }
+systemctl is-enabled --quiet omniaci || fail "service not enabled"
+[ "$(stat -c '%U:%G %a' /etc/omniaci/omniaci.yaml)" = "root:omniaci 640" ] || fail "config permissions"
+[ "$(stat -c '%U %a' /etc/omniaci/initial-admin-password)" = "root 600" ] || fail "password file permissions"
+visudo -cf /etc/sudoers.d/omniaci >/dev/null || fail "sudoers file invalid"
+PW="$(cat /etc/omniaci/initial-admin-password)"
+[ "$(curl -s -o /dev/null -w '%{http_code}' localhost:8090/)" = 401 ] || fail "no 401 without login"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$PW" localhost:8090/)" = 200 ] || fail "admin login"
+echo "python: $(/opt/omniaci/venv/bin/python -V), $(/opt/omniaci/venv/bin/pip freeze | grep -iE '^(fastapi|starlette)==' | tr '\n' ' ')"
+
+step "a server with a git repository and a dummy Odoo service"
+cat > /etc/systemd/system/odoo-dummy.service <<'EOF'
+[Service]
+ExecStart=/bin/sleep infinity
+EOF
+systemctl daemon-reload && systemctl start odoo-dummy
+SYSTEMCTL="$(command -v systemctl)"
+echo "omniaci ALL=(root) NOPASSWD: $SYSTEMCTL --no-ask-password restart odoo-dummy" >> /etc/sudoers.d/omniaci
+visudo -cf /etc/sudoers.d/omniaci >/dev/null || fail "sudoers file invalid after the edit"
+# root plays the developer on repositories owned by omniaci (test only)
+git config --global --add safe.directory '*'
+export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
+git init -q --bare /srv/remote.git && git -C /srv/remote.git symbolic-ref HEAD refs/heads/main
+git clone -q /srv/remote.git /srv/dev 2>/dev/null
+git -C /srv/dev checkout -q -b main && git -C /srv/dev commit -q --allow-empty -m one
+git -C /srv/dev push -q origin main
+git clone -q -b main /srv/remote.git /srv/odoo && chown -R omniaci:omniaci /srv/odoo /srv/remote.git
+mkdir -p /srv/venv/bin && printf '#!/bin/sh\necho "update $*"\n' > /srv/venv/bin/click-odoo-update
+chmod 755 /srv/venv/bin/click-odoo-update
+touch /srv/odoo.conf /srv/odoo.log
+API=(-s -u "admin:$PW" -H "Origin: http://localhost:8090" -H "Content-Type: application/json")
+curl "${API[@]}" localhost:8090/api/servers/save -d '{"original": null, "name": "demo", "server": {"production": {
+  "database": "DEMO", "odoo_config": "/srv/odoo.conf", "log_file": "/srv/odoo.log", "venv_bin": "/srv/venv/bin",
+  "restart": {"type": "systemd", "service": "odoo-dummy", "sudo": true},
+  "repositories": [{"name": "odoo", "path": "/srv/odoo", "branch": "main"}]}}}' | grep -q '"ok":true' \
+  || fail "server not saved"
+[ "$(stat -c %U /var/lib/omniaci/servers.yaml)" = omniaci ] || fail "servers.yaml owner"
+
+step "git pull + restart through the web service"
+git -C /srv/dev commit -q --allow-empty -m two && git -C /srv/dev push -q origin main
+PID_BEFORE="$(systemctl show -p MainPID --value odoo-dummy)"
+LOCATION="$(curl "${API[@]}" -o /dev/null -w '%{redirect_url}' -X POST localhost:8090/servers/demo/production/pull-restart)"
+JOB="${LOCATION##*/}"
+for i in $(seq 60); do
+    STATUS="$(curl -s -u "admin:$PW" "localhost:8090/api/jobs/$JOB" | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])')"
+    case "$STATUS" in success|failed|interrupted) break ;; esac
+    sleep 1
+done
+if [ "$STATUS" != success ]; then
+    curl -s -u "admin:$PW" "localhost:8090/api/jobs/$JOB" | python3 -c 'import json,sys; d=json.load(sys.stdin); print("\n".join(d["lines"]))'
+    fail "pull-restart job $STATUS"
+fi
+[ "$(git -C /srv/odoo log -1 --format=%s)" = two ] || fail "repository not pulled"
+PID_AFTER="$(systemctl show -p MainPID --value odoo-dummy)"
+[ "$PID_AFTER" != "$PID_BEFORE" ] && [ "$PID_AFTER" != 0 ] || fail "odoo-dummy not restarted"
+echo "pulled, odoo-dummy restarted ($PID_BEFORE -> $PID_AFTER)"
+
+step "reinstall keeps config, servers and password"
+HASH_BEFORE="$(sha256sum /etc/omniaci/omniaci.yaml)"
+dpkg -i /opt/omniaci-test/omniaci.deb >/dev/null 2>&1 || fail "reinstall"
+for i in $(seq 30); do curl -s -o /dev/null localhost:8090 && break; sleep 1; done
+systemctl is-active --quiet omniaci || fail "service not active after reinstall"
+[ "$(sha256sum /etc/omniaci/omniaci.yaml)" = "$HASH_BEFORE" ] || fail "config changed by reinstall"
+curl -s -u "admin:$PW" localhost:8090/ | grep -q demo || fail "server lost after reinstall"
+
+step "remove and purge"
+apt-get remove -y -qq omniaci >/dev/null 2>&1 || fail "remove"
+systemctl is-active --quiet omniaci && fail "service still running after remove"
+[ ! -e /opt/omniaci/venv ] || fail "venv left after remove"
+[ -e /etc/omniaci/omniaci.yaml ] || fail "config removed by remove"
+apt-get purge -y -qq omniaci >/dev/null 2>&1 || fail "purge"
+[ ! -e /etc/omniaci ] || fail "/etc/omniaci left after purge"
+[ ! -e /var/lib/omniaci ] || fail "/var/lib/omniaci left after purge"
+echo "ALL CHECKS PASSED"
+EOS
+
+test_one() {
+    local image="$1" tag="omniaci-test-${1//[:\/]/-}" log="$LOGS/${1//[:\/]/_}.log" cid
+    {
+        docker build -q -t "$tag" - >/dev/null <<EOF
+FROM $image
+ENV DEBIAN_FRONTEND=noninteractive
+RUN if grep -q '^11' /etc/debian_version 2>/dev/null; then \
+      sed -i 's#http://deb.debian.org/debian-security#http://archive.debian.org/debian-security#' /etc/apt/sources.list; fi \
+ && apt-get update -qq && apt-get install -y -qq systemd systemd-sysv sudo curl >/dev/null \
+ && rm -f /usr/sbin/policy-rc.d
+# (the images forbid service starts with policy-rc.d exit 101: a real machine does not)
+CMD ["/sbin/init"]
+EOF
+        cid="$(docker run -d --privileged --cgroupns=private --tmpfs /run --tmpfs /run/lock \
+            -v "$DEB:/opt/omniaci-test/omniaci.deb:ro" "$tag")"
+        for i in $(seq 30); do
+            docker exec "$cid" systemctl is-system-running 2>/dev/null | grep -qE 'running|degraded' && break
+            sleep 1
+        done
+        docker exec "$cid" bash -c "apt-get update -qq >/dev/null; $CHECKS"
+        local rc=$?
+        docker rm -f "$cid" >/dev/null
+        return $rc
+    } > "$log" 2>&1
+}
+
+status=0
+for image in "${IMAGES[@]}"; do
+    ( if test_one "$image"; then echo "$image: OK"; else echo "$image: FAILED"; fi ) &
+done
+wait
+for image in "${IMAGES[@]}"; do
+    log="$LOGS/${image//[:\/]/_}.log"
+    echo "===== $image"
+    cat "$log"
+    grep -q "ALL CHECKS PASSED" "$log" || status=1
+done
+rm -rf "$LOGS"
+exit $status

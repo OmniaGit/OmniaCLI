@@ -9,14 +9,22 @@ from dataclasses import asdict
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi import Body, Depends, FastAPI, HTTPException, Request, status
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.templating import Jinja2Templates
 
 from . import ops
 from .auth import Authenticator
-from .config import Instance, Settings, load_settings
+from .config import (
+    ConfigError,
+    Instance,
+    Settings,
+    load_settings,
+    parse_servers,
+    save_servers,
+    server_to_dict,
+)
 from .jobs import JobManager
 from .logtail import follow
 from .scheduler import AutoUpdater
@@ -47,7 +55,7 @@ def create_app(settings: Settings) -> FastAPI:
                 "Invalid credentials",
                 headers={"WWW-Authenticate": 'Basic realm="OmniaCI"'},
             )
-        if request.method == "POST" and not _same_origin(request):
+        if request.method not in ("GET", "HEAD") and not _same_origin(request):
             raise HTTPException(status.HTTP_403_FORBIDDEN, "Cross-site request refused")
         return credentials.username
 
@@ -119,6 +127,61 @@ def create_app(settings: Settings) -> FastAPI:
                 [instance.key],
                 f"manual: {user}",
                 lambda job: ops.pull_restart(job, instance),
+            )
+        )
+
+    @app.get("/api/servers/{server}/{role}/addons")
+    async def addons(server: str, role: str):
+        instance = get_instance(server, role)
+        odoo_bin = ops.find_odoo_bin(instance)
+        return {
+            "addons": await asyncio.to_thread(ops.list_addons, instance),
+            "odoo_bin": str(odoo_bin) if odoo_bin else None,
+        }
+
+    @app.post("/api/servers/{server}/{role}/update")
+    async def action_update(
+        server: str, role: str, payload: dict = Body(...), user: str = Depends(current_user)
+    ):
+        instance = get_instance(server, role)
+        mode = payload.get("mode")
+        modules = [str(m).strip() for m in payload.get("modules") or [] if str(m).strip()]
+        restart_after = bool(payload.get("restart"))
+        if mode == "chosen":
+            bad = [m for m in modules if not ops.ADDON_NAME.fullmatch(m)]
+            if not modules or bad:
+                return JSONResponse(
+                    {"error": f"Invalid modules: {', '.join(bad)}" if bad else "Choose at least one module"},
+                    status_code=400,
+                )
+            title = f"Update {', '.join(modules)} on {instance.key}"
+        elif mode == "changed":
+            title = f"Update changed modules on {instance.key}"
+        else:
+            return JSONResponse({"error": "mode must be 'changed' or 'chosen'"}, status_code=400)
+
+        async def action(job):
+            if mode == "chosen":
+                await ops.update_chosen_modules(job, instance, modules)
+            else:
+                await ops.update_modules(job, instance, force=True)
+            if restart_after:
+                await ops.restart(job, instance)
+
+        if restart_after:
+            title += " + restart"
+        job = jobs.submit(title, [instance.key], f"manual: {user}", action)
+        return {"job": job.id}
+
+    @app.post("/servers/{server}/{role}/restart")
+    async def action_restart(server: str, role: str, user: str = Depends(current_user)):
+        instance = get_instance(server, role)
+        return started(
+            jobs.submit(
+                f"Restart {instance.key}",
+                [instance.key],
+                f"manual: {user}",
+                lambda job: ops.restart(job, instance),
             )
         )
 
@@ -194,6 +257,107 @@ def create_app(settings: Settings) -> FastAPI:
         data["lines"] = job.lines[since:]
         data["next"] = len(job.lines)
         return JSONResponse(data)
+
+    # --- server configuration -------------------------------------------
+
+    config_lock = asyncio.Lock()
+
+    def server_busy(name: str) -> bool:
+        return any(jobs.is_busy(f"{name}/{role}") for role in ("production", "test"))
+
+    def server_form(request: Request, title: str, original, name: str, data: dict):
+        return _TEMPLATES.TemplateResponse(
+            request,
+            "server_form.html",
+            {
+                "title": title,
+                "model": {"original": original, "name": name, "server": data},
+            },
+        )
+
+    def configured(name: str):
+        srv = settings.servers.get(name)
+        if srv is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, f"No server {name}")
+        return srv
+
+    @app.get("/config")
+    async def config_page(request: Request):
+        return _TEMPLATES.TemplateResponse(
+            request,
+            "config.html",
+            {
+                "servers": settings.servers.values(),
+                "servers_file": settings.servers_file,
+                "busy": {name: server_busy(name) for name in settings.servers},
+            },
+        )
+
+    @app.get("/config/new")
+    async def config_new(request: Request):
+        return server_form(request, "New server", None, "", {})
+
+    @app.get("/config/{name}/edit")
+    async def config_edit(request: Request, name: str):
+        srv = configured(name)
+        return server_form(request, f"Edit {name}", name, name, server_to_dict(srv))
+
+    @app.get("/config/{name}/clone")
+    async def config_clone(request: Request, name: str):
+        srv = configured(name)
+        new_name = f"{name}_copy"
+        while new_name in settings.servers:
+            new_name += "_copy"
+        return server_form(request, f"Clone of {name}", None, new_name, server_to_dict(srv))
+
+    def refuse(message: str, code: int = status.HTTP_400_BAD_REQUEST):
+        return JSONResponse({"error": message}, status_code=code)
+
+    @app.post("/api/servers/save")
+    async def config_save(payload: dict = Body(...)):
+        original = payload.get("original") or None
+        name = str(payload.get("name") or "").strip()
+        async with config_lock:
+            if original is not None and original not in settings.servers:
+                return refuse(f"Server {original} no longer exists", status.HTTP_404_NOT_FOUND)
+            if name != original and name in settings.servers:
+                return refuse(f"A server named {name} already exists")
+            for busy_name in {original, name} - {None}:
+                if server_busy(busy_name):
+                    return refuse(f"A job is running on {busy_name}: try again when it ends")
+            try:
+                parsed = parse_servers({name: payload.get("server") or {}})[name]
+            except (ConfigError, TypeError, ValueError, AttributeError) as exc:
+                return refuse(str(exc))
+            servers = {}
+            for key, srv in settings.servers.items():
+                # an edited server keeps its place in the list
+                servers[name if key == original else key] = parsed if key == original else srv
+            servers.setdefault(name, parsed)
+            try:
+                save_servers(settings.servers_file, servers)
+            except OSError as exc:
+                return refuse(f"Cannot write {settings.servers_file}: {exc}", 500)
+            settings.servers = servers
+            await updater.reload()
+        return {"ok": True}
+
+    @app.post("/api/servers/delete")
+    async def config_delete(payload: dict = Body(...)):
+        name = str(payload.get("name") or "")
+        async with config_lock:
+            if name not in settings.servers:
+                return refuse(f"No server {name}", status.HTTP_404_NOT_FOUND)
+            if server_busy(name):
+                return refuse(f"A job is running on {name}: try again when it ends")
+            servers = {k: v for k, v in settings.servers.items() if k != name}
+            try:
+                save_servers(settings.servers_file, servers)
+            except OSError as exc:
+                return refuse(f"Cannot write {settings.servers_file}: {exc}", 500)
+            settings.servers = servers
+            await updater.reload()
+        return {"ok": True}
 
     return app
 

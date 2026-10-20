@@ -1,0 +1,11 @@
+# OmniaCI main configuration, created at the first installation.
+# The servers are edited from the web interface (Configuration page).
+
+auth:
+  users:
+    # add users with the hash printed by: omniaci hash-password
+    admin: "@ADMIN_HASH@"
+
+backup_dir: /var/lib/omniaci/backups
+jobs_dir: /var/lib/omniaci/jobs
+servers_file: /var/lib/omniaci/servers.yaml

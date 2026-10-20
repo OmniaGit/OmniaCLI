@@ -1,0 +1,138 @@
+{% extends "base.html" %}
+{% block title %}{{ title }} · OmniaCI{% endblock %}
+{% block content %}
+<h1>{{ title }}</h1>
+<div id="error" class="banner" hidden></div>
+<form id="form" autocomplete="off">
+  <fieldset>
+    <legend>Server</legend>
+    <div class="form-grid">
+      <label for="name">Name</label>
+      <input type="text" id="name" required pattern="[A-Za-z0-9][A-Za-z0-9._\-]*"
+             title="Letters, digits, '.', '_' and '-'">
+    </div>
+  </fieldset>
+  <div id="roles"></div>
+  <div class="actions">
+    <button type="submit">Save</button>
+    <a class="button" href="/config">Cancel</a>
+  </div>
+</form>
+
+<template id="role-template">
+  <fieldset class="role-box">
+    <legend><label><input type="checkbox" class="enabled"> <span class="role"></span></label></legend>
+    <div class="body">
+      <div class="form-grid">
+        <label>Database</label><input type="text" data-k="database">
+        <label>Odoo config file</label><input type="text" data-k="odoo_config" class="mono">
+        <label>Log file</label><input type="text" data-k="log_file" class="mono">
+        <label>Venv bin (click-odoo-contrib)</label><input type="text" data-k="venv_bin" class="mono">
+        <label>odoo-bin (update of chosen modules)</label><input type="text" data-k="odoo_bin" class="mono" placeholder="empty: odoo-bin found in a repository">
+        <label>Restart with</label>
+        <select data-k="restart.type"><option value="systemd">systemd</option><option value="initd">init.d</option></select>
+        <label>Service name</label><input type="text" data-k="restart.service">
+        <label>Use sudo -n</label><input type="checkbox" data-k="restart.sudo">
+        <label>Update changed modules</label><input type="checkbox" data-k="update_modules">
+        <label>Auto update</label><input type="checkbox" data-k="auto_update.enabled">
+        <label>Every (minutes)</label><input type="number" min="1" data-k="auto_update.interval_minutes">
+        <label>Time window</label><input type="text" data-k="auto_update.window" placeholder="HH:MM-HH:MM, empty = always">
+      </div>
+      <h3 style="font-size: 14px; margin: 16px 0 6px">Repositories</h3>
+      <div class="scroll">
+      <table class="repos">
+        <thead><tr><th>Name</th><th>Path</th><th>Remote</th><th>Branch</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+      </div>
+      <div class="actions"><button type="button" class="add-repo">Add repository</button></div>
+    </div>
+  </fieldset>
+</template>
+
+<script>
+const MODEL = {{ model | tojson }};
+const ROLES = ["production", "test"];
+const DEFAULTS = {
+  database: "", odoo_config: "", log_file: "", venv_bin: "", odoo_bin: "",
+  restart: {type: "systemd", service: "", sudo: true},
+  update_modules: true,
+  auto_update: {enabled: false, interval_minutes: 10, window: ""},
+  repositories: [{name: "odoo", path: "", remote: "origin", branch: ""}],
+};
+const get = (obj, path) => path.split(".").reduce((o, k) => (o == null ? undefined : o[k]), obj);
+function set(obj, path, value) {
+  const keys = path.split("."), last = keys.pop();
+  for (const k of keys) obj = obj[k] = obj[k] || {};
+  obj[last] = value;
+}
+
+function repoRow(tbody, repo) {
+  const tr = document.createElement("tr");
+  for (const key of ["name", "path", "remote", "branch"]) {
+    const td = document.createElement("td"), input = document.createElement("input");
+    input.type = "text"; input.dataset.r = key; input.value = repo[key] || "";
+    if (key === "path") input.className = "mono";
+    td.appendChild(input); tr.appendChild(td);
+  }
+  const td = document.createElement("td"), del = document.createElement("button");
+  del.type = "button"; del.textContent = "Remove"; del.onclick = () => tr.remove();
+  td.appendChild(del); tr.appendChild(td); tbody.appendChild(tr);
+}
+
+const boxes = {};
+document.getElementById("name").value = MODEL.name;
+for (const role of ROLES) {
+  const box = document.getElementById("role-template").content.firstElementChild.cloneNode(true);
+  const data = MODEL.server[role];
+  const values = data || DEFAULTS;
+  box.querySelector(".role").textContent = role;
+  box.querySelector(".role").classList.add(role);
+  const enabled = box.querySelector(".enabled"), body = box.querySelector(".body");
+  enabled.checked = !!data || (!MODEL.original && Object.keys(MODEL.server).length === 0);
+  body.hidden = !enabled.checked;
+  enabled.onchange = () => { body.hidden = !enabled.checked; };
+  for (const input of box.querySelectorAll("[data-k]")) {
+    const value = get(values, input.dataset.k);
+    if (input.type === "checkbox") input.checked = !!value; else input.value = value == null ? "" : value;
+  }
+  const tbody = box.querySelector("tbody");
+  for (const repo of values.repositories || []) repoRow(tbody, repo);
+  box.querySelector(".add-repo").onclick = () => repoRow(tbody, {remote: "origin"});
+  document.getElementById("roles").appendChild(box);
+  boxes[role] = box;
+}
+
+document.getElementById("form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const server = {};
+  for (const role of ROLES) {
+    const box = boxes[role];
+    if (!box.querySelector(".enabled").checked) continue;
+    const data = {};
+    for (const input of box.querySelectorAll("[data-k]")) {
+      let value = input.type === "checkbox" ? input.checked : input.value.trim();
+      if (input.type === "number") value = Number(value);
+      if ((input.dataset.k === "auto_update.window" || input.dataset.k === "odoo_bin") && !value) continue;
+      set(data, input.dataset.k, value);
+    }
+    data.repositories = [];
+    for (const tr of box.querySelectorAll("tbody tr")) {
+      const repo = {};
+      for (const input of tr.querySelectorAll("[data-r]")) repo[input.dataset.r] = input.value.trim();
+      if (Object.values(repo).some(Boolean)) data.repositories.push(repo);
+    }
+    server[role] = data;
+  }
+  const resp = await fetch("/api/servers/save", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({original: MODEL.original, name: document.getElementById("name").value.trim(), server}),
+  });
+  if (resp.ok) { location.href = "/config"; return; }
+  const box = document.getElementById("error");
+  box.textContent = (await resp.json().catch(() => ({}))).error || ("Error " + resp.status);
+  box.hidden = false;
+  window.scrollTo(0, 0);
+});
+</script>
+{% endblock %}

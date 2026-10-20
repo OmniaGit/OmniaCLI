@@ -2,6 +2,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+import yaml
 
 from omniaci.auth import hash_password
 from omniaci.config import Restart, parse_settings
@@ -108,14 +109,21 @@ def env(tmp_path, fake_venv, restart_calls):
             ],
         }
 
+    servers_file = tmp_path / "conf" / "servers.yaml"
+    servers_file.parent.mkdir()
+    servers_file.write_text(
+        yaml.safe_dump(
+            {"servers": {"srv": {"production": instance("production", "main"),
+                                 "test": instance("test", "test")}}}
+        )
+    )
     settings = parse_settings(
         {
             "auth": {"users": {"admin": USER_HASH}},
             "backup_dir": str(tmp_path / "backups"),
             "jobs_dir": str(tmp_path / "jobs"),
-            "servers": {
-                "srv": {"production": instance("production", "main"), "test": instance("test", "test")}
-            },
-        }
+            "servers_file": "servers.yaml",
+        },
+        base_dir=servers_file.parent,
     )
     return {"settings": settings, "remotes": remotes, "tmp": tmp_path, "calls": restart_calls}

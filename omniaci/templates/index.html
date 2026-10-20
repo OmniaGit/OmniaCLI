@@ -54,6 +54,11 @@
         <form method="post" action="/servers/{{ server.name }}/{{ role }}/pull-restart"
               onsubmit="return confirm('Pull, update changed modules and restart {{ inst.key }}?')">
           <button {% if busy[inst.key] %}disabled{% endif %}>Git pull + restart</button></form>
+        <button type="button" class="open-update" data-server="{{ server.name }}" data-role="{{ role }}"
+                data-database="{{ inst.database }}" {% if busy[inst.key] %}disabled{% endif %}>Update modules</button>
+        <form method="post" action="/servers/{{ server.name }}/{{ role }}/restart"
+              onsubmit="return confirm('Restart the service {{ inst.restart.service }} of {{ inst.key }}?')">
+          <button {% if busy[inst.key] %}disabled{% endif %}>Restart</button></form>
         <form method="post" action="/servers/{{ server.name }}/{{ role }}/backup">
           <button {% if busy[inst.key] %}disabled{% endif %}>Backup</button></form>
         <a class="button" href="/servers/{{ server.name }}/{{ role }}/log">Log</a>
@@ -65,6 +70,109 @@
 {% else %}
 <p class="muted">No servers configured.</p>
 {% endfor %}
+<dialog id="update-dialog">
+  <form method="dialog" id="update-form">
+    <h2 id="update-title" style="margin-bottom: 4px"></h2>
+    <p class="muted" id="update-sub" style="margin-top: 0"></p>
+    <label><input type="radio" name="mode" value="changed" checked>
+      Changed modules only <span class="muted">(automatic, click-odoo-update)</span></label><br>
+    <label><input type="radio" name="mode" value="chosen"> These modules <span class="muted">(odoo-bin -u)</span></label>
+    <div id="chosen-box">
+      <input type="text" id="addon-filter" placeholder="Filter modules…" style="margin: 8px 0">
+      <div id="addon-list" class="addon-list"><span class="muted">Loading…</span></div>
+      <label>Other modules, comma separated
+        <input type="text" id="addon-extra" placeholder="e.g. base"></label>
+      <p class="muted" id="addon-count"></p>
+    </div>
+    <label><input type="checkbox" id="update-restart"> Restart the service after the update</label>
+    <p id="update-error" class="error"></p>
+    <div class="actions">
+      <button type="submit" value="ok" class="danger">Update</button>
+      <button type="button" id="update-cancel">Cancel</button>
+    </div>
+  </form>
+</dialog>
+<script>
+(function () {
+  const dialog = document.getElementById("update-dialog");
+  const list = document.getElementById("addon-list");
+  const filter = document.getElementById("addon-filter");
+  const extra = document.getElementById("addon-extra");
+  const errorBox = document.getElementById("update-error");
+  const chosenBox = document.getElementById("chosen-box");
+  let target = null;
+
+  const mode = () => dialog.querySelector("input[name=mode]:checked").value;
+  function chosen() {
+    const picked = [...list.querySelectorAll("input:checked")].map((i) => i.value);
+    const typed = extra.value.split(",").map((s) => s.trim()).filter(Boolean);
+    return [...new Set([...picked, ...typed])];
+  }
+  function refresh() {
+    chosenBox.style.opacity = mode() === "chosen" ? 1 : 0.45;
+    const n = chosen().length;
+    document.getElementById("addon-count").textContent = n ? n + " selected: " + chosen().join(", ") : "";
+  }
+  function group(title, addons) {
+    if (!addons.length) return;
+    const h = document.createElement("div");
+    h.className = "addon-group"; h.textContent = title; list.appendChild(h);
+    for (const a of addons) {
+      const label = document.createElement("label");
+      label.className = "addon"; label.title = a.path; label.dataset.name = a.name;
+      const box = document.createElement("input");
+      box.type = "checkbox"; box.value = a.name;
+      box.onchange = () => { dialog.querySelector("input[value=chosen]").checked = true; refresh(); };
+      label.append(box, " " + a.name);
+      list.appendChild(label);
+    }
+  }
+  async function load() {
+    list.innerHTML = '<span class="muted">Loading…</span>';
+    const resp = await fetch(`/api/servers/${target.server}/${target.role}/addons`);
+    const data = await resp.json();
+    list.innerHTML = "";
+    group("In the instance's repositories", data.addons.filter((a) => a.in_repository));
+    group("Other modules in the addons path", data.addons.filter((a) => !a.in_repository));
+    if (!data.addons.length) list.innerHTML = '<span class="muted">No modules found in the addons path.</span>';
+    if (!data.odoo_bin) errorBox.textContent = "odoo-bin not found: set it in the configuration to update chosen modules.";
+  }
+  filter.oninput = () => {
+    const q = filter.value.trim().toLowerCase();
+    for (const el of list.querySelectorAll(".addon")) el.hidden = q && !el.dataset.name.includes(q);
+  };
+  extra.oninput = () => { if (extra.value.trim()) dialog.querySelector("input[value=chosen]").checked = true; refresh(); };
+  for (const radio of dialog.querySelectorAll("input[name=mode]")) radio.onchange = refresh;
+  document.getElementById("update-cancel").onclick = () => dialog.close();
+
+  for (const button of document.querySelectorAll(".open-update")) {
+    button.onclick = () => {
+      target = button.dataset;
+      document.getElementById("update-title").textContent = `Update modules ${target.server}/${target.role}`;
+      document.getElementById("update-sub").textContent = `Database ${target.database}`;
+      dialog.querySelector("input[value=changed]").checked = true;
+      filter.value = ""; extra.value = ""; errorBox.textContent = "";
+      document.getElementById("update-restart").checked = false;
+      refresh(); dialog.showModal(); load();
+    };
+  }
+  document.getElementById("update-form").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const body = {mode: mode(), modules: mode() === "chosen" ? chosen() : [],
+                  restart: document.getElementById("update-restart").checked};
+    if (body.mode === "chosen" && !body.modules.length) { errorBox.textContent = "Choose at least one module."; return; }
+    const what = body.mode === "chosen" ? body.modules.join(", ") : "the changed modules";
+    if (!confirm(`Update ${what} on ${target.server}/${target.role} (database ${target.database})?`)) return;
+    const resp = await fetch(`/api/servers/${target.server}/${target.role}/update`, {
+      method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (resp.ok) { location.href = "/jobs/" + data.job; return; }
+    errorBox.textContent = data.error || ("Error " + resp.status);
+  });
+})();
+</script>
+
 <h1>Last jobs</h1>
 <div class="panel">{% include "_jobs_table.html" %}</div>
 {% endblock %}

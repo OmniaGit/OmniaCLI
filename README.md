@@ -11,6 +11,8 @@ config file, a log file and a systemd or init.d service.
 |---|---|---|---|
 | Git pull | ✓ | ✓ | `git pull --ff-only <remote> <branch>` in every repository |
 | Git pull + restart | ✓ | ✓ | pull, `click-odoo-update` (only the changed modules), restart |
+| Update modules | ✓ | ✓ | a popup asks: the changed modules (`click-odoo-update`) or chosen ones (`odoo-bin -u … --stop-after-init --workers=0`), and whether to restart after |
+| Restart | ✓ | ✓ | the instance's systemd or init.d restart |
 | Backup | ✓ | ✓ | `click-odoo-backupdb` → `<backup_dir>/<server>/<role>/<db>_<timestamp>.zip` |
 | Merge test to production | | ✓ | backup production, merge, push, update modules, restart production |
 | Log | ✓ | ✓ | `tail -F` of the Odoo log in the browser, with an "errors only" filter |
@@ -35,7 +37,42 @@ config file, a log file and a systemd or init.d service.
   before, and nothing is pushed: the conflict is for a person to resolve.
 - If a module update fails, the instance is **not** restarted.
 
-## Install
+## Install from the Debian package
+
+Supported: Debian 11, 12, 13 and Ubuntu 22.04, 24.04 (amd64), each with its
+system `python3`.
+
+```bash
+sudo apt install ./omniaci_<version>_all.deb
+sudo cat /etc/omniaci/initial-admin-password     # password of user admin
+```
+
+The package:
+
+- creates the system user `omniaci` and runs the service `omniaci` as that
+  user, on `127.0.0.1:8090` (change it in `/etc/default/omniaci`);
+- builds `/opt/omniaci/venv` at installation with the system `python3` and the
+  dependency versions locked for that Python (`packaging/debian/requirements`).
+  **The machine must reach PyPI while installing.** After an upgrade of the
+  system Python (a distribution upgrade), rebuild it with
+  `sudo dpkg-reconfigure omniaci`;
+- creates `/etc/omniaci/omniaci.yaml` once, with a random password for
+  `admin`; upgrades never change it;
+- keeps the servers file, the jobs and the backups in `/var/lib/omniaci`;
+- installs `/etc/sudoers.d/omniaci`, all comments, to be completed;
+- on purge, deletes configuration and jobs but keeps the backups.
+
+### Build and test the package
+
+```bash
+packaging/debian/build_deb.sh              # test build -> share, omniaci_<year>.1.<n>_all.deb
+packaging/debian/build_deb.sh --release    # release build of branch <year> -> share, OmniaCI.deb
+packaging/debian/build_deb.sh --check DIR  # the working tree, into DIR, no tag
+packaging/debian/test_deb.sh <deb>         # install and check it in Docker, systemd included
+packaging/debian/make_locks.sh             # regenerate the dependency locks, with the tests
+```
+
+## Install by hand
 
 ```bash
 python3.11 -m venv /opt/omniaci/venv
@@ -60,6 +97,19 @@ once per database, when you know the modules are up to date:
 
 ## Configure
 
+The configuration has two files:
+
+- the **main config** (`omniaci.yaml`): users, `backup_dir`, `jobs_dir` and
+  `servers_file`. It is edited by hand and the web interface never writes it.
+- the **servers file** (`servers_file`, see `servers.example.yaml`): the
+  servers and their instances. It is edited from the web interface
+  (**Configuration** page: new, edit, clone, delete), so the user running
+  OmniaCI must be able to write it. Every save is validated like the file at
+  startup, the previous version is kept as `<file>.bak`, and the auto update
+  loops restart with the new settings. Clone copies a server's configuration
+  only (no database, no files). A server with a running job cannot be edited or
+  deleted.
+
 ```bash
 cp config.example.yaml omniaci.yaml
 omniaci hash-password            # paste the result under auth.users
@@ -73,14 +123,18 @@ scripts exist and that every repository is on its configured branch.
 
 The user that runs OmniaCI needs:
 
-- write access to the repositories, and git credentials for `fetch`/`push`
+- to **own** the repositories (or have them listed in its git
+  `safe.directory`): git refuses to work in a repository owned by another
+  user ("dubious ownership"). It also needs git credentials for `fetch`/`push`
   that need no prompt (an SSH key without a passphrase, or a credential
   helper). Git is never allowed to ask.
 - read access to the Odoo config and log files.
 - a database connection: `click-odoo-*` connect with the settings of the
   instance's Odoo config file.
 - the right to restart the services without a password. With `sudo: true`
-  (the default), the command runs as `sudo -n`. Example `/etc/sudoers.d/omniaci`:
+  (the default), the command runs as `sudo -n`. sudoers needs the full path
+  that `command -v systemctl` prints on that machine. Example
+  `/etc/sudoers.d/omniaci`:
 
 ```
 omniaci ALL=(root) NOPASSWD: /usr/bin/systemctl --no-ask-password restart odoo-customer-a

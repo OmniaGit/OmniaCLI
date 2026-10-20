@@ -1,0 +1,87 @@
+#!/bin/sh
+set -e
+
+VENV=/opt/omniaci/venv
+CONFIG=/etc/omniaci/omniaci.yaml
+PASSWORD_FILE=/etc/omniaci/initial-admin-password
+
+# Build the venv with the system python3 and the dependencies locked for it.
+# The previous venv is kept until the new one is complete.
+build_venv() {
+    pyver=$(python3 -c 'import sys; print("py%d%d" % sys.version_info[:2])')
+    lock="/opt/omniaci/requirements/$pyver.txt"
+    if [ ! -f "$lock" ]; then
+        echo "omniaci: python3 $(python3 -V 2>&1) is not supported: no $lock" >&2
+        exit 1
+    fi
+    rm -rf "$VENV.old"
+    [ -d "$VENV" ] && mv "$VENV" "$VENV.old"
+    echo "omniaci: installing the Python dependencies ($pyver) in $VENV"
+    if python3 -m venv "$VENV" \
+        && "$VENV/bin/pip" install -q --disable-pip-version-check --no-cache-dir -r "$lock" \
+        && "$VENV/bin/pip" install -q --disable-pip-version-check --no-cache-dir --no-deps \
+            /opt/omniaci/dist/omniaci-*.whl; then
+        rm -rf "$VENV.old"
+    else
+        echo "omniaci: the venv could not be built (is PyPI reachable?)" >&2
+        rm -rf "$VENV"
+        [ -d "$VENV.old" ] && mv "$VENV.old" "$VENV"
+        exit 1
+    fi
+}
+
+# The main config is created once, with a random password for admin, and is
+# then the administrator's: upgrades never touch it.
+create_config() {
+    [ -e "$CONFIG" ] && return 0
+    password=$("$VENV/bin/python" -c 'import secrets; print(secrets.token_urlsafe(12))')
+    hash=$(OMNIACI_PW="$password" "$VENV/bin/python" -c \
+        'import os; from omniaci.auth import hash_password; print(hash_password(os.environ["OMNIACI_PW"]))')
+    install -d -m 755 /etc/omniaci
+    umask 027
+    sed "s|@ADMIN_HASH@|$hash|" /usr/share/omniaci/omniaci.yaml.in > "$CONFIG.tmp"
+    chgrp omniaci "$CONFIG.tmp"
+    chmod 640 "$CONFIG.tmp"
+    mv "$CONFIG.tmp" "$CONFIG"
+    umask 077
+    echo "$password" > "$PASSWORD_FILE"
+    umask 022
+    echo "omniaci: user 'admin', password in $PASSWORD_FILE (readable by root only)"
+}
+
+case "$1" in
+    configure)
+        if ! getent passwd omniaci >/dev/null; then
+            adduser --quiet --system --group --home /var/lib/omniaci \
+                --gecos "OmniaCI" omniaci
+        fi
+        install -d -o omniaci -g omniaci -m 750 \
+            /var/lib/omniaci /var/lib/omniaci/jobs /var/lib/omniaci/backups
+        build_venv
+        create_config
+        ;;
+    abort-upgrade|abort-remove|abort-deconfigure)
+        ;;
+    *)
+        echo "postinst called with unknown argument '$1'" >&2
+        exit 1
+        ;;
+esac
+
+# systemd, as dh_installsystemd writes it
+if [ "$1" = "configure" ] || [ "$1" = "abort-upgrade" ] || [ "$1" = "abort-deconfigure" ] || [ "$1" = "abort-remove" ]; then
+    # only removes the masks deb-systemd-helper created on package removal
+    deb-systemd-helper unmask 'omniaci.service' >/dev/null || true
+    # was-enabled is true for a new installation, so it is enabled
+    if deb-systemd-helper --quiet was-enabled 'omniaci.service'; then
+        deb-systemd-helper enable 'omniaci.service' >/dev/null || true
+    else
+        deb-systemd-helper update-state 'omniaci.service' >/dev/null || true
+    fi
+    if [ -d /run/systemd/system ]; then
+        systemctl --system daemon-reload >/dev/null || true
+        deb-systemd-invoke restart 'omniaci.service' >/dev/null || true
+    fi
+fi
+
+exit 0

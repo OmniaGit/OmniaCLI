@@ -1,0 +1,7 @@
+# OmniaCI restarts the Odoo services with "sudo -n". Allow each service here,
+# with exactly the command OmniaCI runs (see the job log), for example:
+#
+# omniaci ALL=(root) NOPASSWD: /usr/bin/systemctl --no-ask-password restart odoo-prod
+# omniaci ALL=(root) NOPASSWD: /etc/init.d/odoo-test restart
+#
+# Check the file after every change: visudo -cf /etc/sudoers.d/omniaci

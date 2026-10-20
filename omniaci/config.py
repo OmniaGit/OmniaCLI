@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import datetime
+import os
+import re
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -10,6 +13,8 @@ import yaml
 
 ROLES = ("production", "test")
 RESTART_TYPES = ("systemd", "initd")
+# a server name is part of URLs and of the job keys
+SERVER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 
 class ConfigError(Exception):
@@ -74,6 +79,8 @@ class Instance:
     restart: Restart
     update_modules: bool = True
     auto_update: AutoUpdate = field(default_factory=AutoUpdate)
+    # odoo-bin for the update of chosen modules; None: look in the repositories
+    odoo_bin: Path | None = None
 
     @property
     def key(self) -> str:
@@ -102,6 +109,8 @@ class Settings:
     users: dict[str, str]
     backup_dir: Path
     jobs_dir: Path
+    # the servers live in their own file, which the web interface rewrites
+    servers_file: Path
     servers: dict[str, Server]
 
     def instance(self, server: str, role: str) -> Instance | None:
@@ -181,19 +190,23 @@ def _parse_instance(server: str, role: str, data: dict) -> Instance:
         ),
         update_modules=bool(data.get("update_modules", True)),
         auto_update=_parse_auto_update(data.get("auto_update"), f"{where}.auto_update"),
+        odoo_bin=Path(data["odoo_bin"]) if data.get("odoo_bin") else None,
     )
 
 
-def parse_settings(data: dict) -> Settings:
-    users = (data.get("auth") or {}).get("users") or {}
-    if not users:
-        raise ConfigError("auth.users: at least one user is required")
+def parse_servers(data: dict) -> dict[str, Server]:
+    """Parse the mapping {server name: {production: ..., test: ...}}."""
     servers = {}
-    for name, srv in (_require(data, "servers", "root") or {}).items():
+    for name, srv in (data or {}).items():
+        name = str(name)
+        if not SERVER_NAME.fullmatch(name):
+            raise ConfigError(
+                f"servers.{name}: the name may contain only letters, digits, '.', '_' and '-'"
+            )
+        if not isinstance(srv, dict):
+            raise ConfigError(f"servers.{name}: must be a mapping")
         instances = {
-            role: _parse_instance(name, role, srv[role])
-            for role in ROLES
-            if srv and srv.get(role)
+            role: _parse_instance(name, role, srv[role]) for role in ROLES if srv.get(role)
         }
         if not instances:
             raise ConfigError(f"servers.{name}: define 'production' and/or 'test'")
@@ -207,14 +220,79 @@ def parse_settings(data: dict) -> Settings:
                     f"repository of the same name: {', '.join(missing)}"
                 )
         servers[name] = Server(name=name, instances=instances)
+    return servers
+
+
+def instance_to_dict(instance: Instance) -> dict:
+    auto = instance.auto_update
+    data = {
+        "database": instance.database,
+        "odoo_config": str(instance.odoo_config),
+        "log_file": str(instance.log_file),
+        "venv_bin": str(instance.venv_bin),
+        "restart": {
+            "type": instance.restart.type,
+            "service": instance.restart.service,
+            "sudo": instance.restart.sudo,
+        },
+        "update_modules": instance.update_modules,
+        "auto_update": {"enabled": auto.enabled, "interval_minutes": auto.interval_minutes},
+        "repositories": [
+            {"name": r.name, "path": str(r.path), "remote": r.remote, "branch": r.branch}
+            for r in instance.repositories
+        ],
+    }
+    if auto.window_start is not None and auto.window_end is not None:
+        data["auto_update"]["window"] = auto.window_label()
+    if instance.odoo_bin is not None:
+        data["odoo_bin"] = str(instance.odoo_bin)
+    return data
+
+
+def server_to_dict(server: Server) -> dict:
+    return {role: instance_to_dict(i) for role, i in server.instances.items()}
+
+
+def load_servers(path: Path) -> dict[str, Server]:
+    if not path.exists():
+        return {}
+    with open(path, encoding="utf-8") as fh:
+        data = yaml.safe_load(fh) or {}
+    return parse_servers(data.get("servers") or {})
+
+
+def save_servers(path: Path, servers: dict[str, Server]) -> None:
+    """Write the servers file atomically, keeping the previous one as .bak."""
+    text = yaml.safe_dump(
+        {"servers": {name: server_to_dict(srv) for name, srv in servers.items()}},
+        sort_keys=False,
+        allow_unicode=True,
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    if path.exists():
+        shutil.copy2(path, path.with_name(path.name + ".bak"))
+    os.replace(tmp, path)
+
+
+def parse_settings(data: dict, base_dir: Path = Path(".")) -> Settings:
+    users = (data.get("auth") or {}).get("users") or {}
+    if not users:
+        raise ConfigError("auth.users: at least one user is required")
+    servers_file = Path(data.get("servers_file") or "servers.yaml")
+    if not servers_file.is_absolute():
+        servers_file = base_dir / servers_file
     return Settings(
         users={str(k): str(v) for k, v in users.items()},
         backup_dir=Path(_require(data, "backup_dir", "root")),
         jobs_dir=Path(_require(data, "jobs_dir", "root")),
-        servers=servers,
+        servers_file=servers_file,
+        servers=load_servers(servers_file),
     )
 
 
 def load_settings(path: str | Path) -> Settings:
+    path = Path(path)
     with open(path, encoding="utf-8") as fh:
-        return parse_settings(yaml.safe_load(fh) or {})
+        return parse_settings(yaml.safe_load(fh) or {}, base_dir=path.parent)

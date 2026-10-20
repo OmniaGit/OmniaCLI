@@ -3,7 +3,14 @@ import datetime
 import pytest
 
 from omniaci.auth import Authenticator, hash_password, verify_password
-from omniaci.config import AutoUpdate, ConfigError, parse_settings
+from omniaci.config import (
+    AutoUpdate,
+    ConfigError,
+    load_servers,
+    parse_servers,
+    parse_settings,
+    save_servers,
+)
 
 T = datetime.time
 
@@ -37,17 +44,11 @@ def _instance(repos):
 
 
 def _settings(prod, test):
-    return {
-        "auth": {"users": {"a": "h"}},
-        "backup_dir": "/b",
-        "jobs_dir": "/j",
-        "servers": {"s": {"production": _instance(prod), "test": _instance(test)}},
-    }
+    return {"s": {"production": _instance(prod), "test": _instance(test)}}
 
 
 def test_parse_ok():
-    settings = parse_settings(_settings(["odoo", "plm"], ["plm"]))
-    test = settings.instance("s", "test")
+    test = parse_servers(_settings(["odoo", "plm"], ["plm"]))["s"].test
     assert test.auto_update.window_label() == "20:00-06:00"
     assert test.restart.command() == ["sudo", "-n", "/etc/init.d/odoo", "restart"]
     test.restart.type = "systemd"
@@ -56,14 +57,14 @@ def test_parse_ok():
 
 def test_test_repository_needs_production_pair():
     with pytest.raises(ConfigError, match="plm"):
-        parse_settings(_settings(["odoo"], ["odoo", "plm"]))
+        parse_servers(_settings(["odoo"], ["odoo", "plm"]))
 
 
 def test_bad_restart_type():
     data = _settings(["odoo"], ["odoo"])
-    data["servers"]["s"]["test"]["restart"]["type"] = "docker"
+    data["s"]["test"]["restart"]["type"] = "docker"
     with pytest.raises(ConfigError, match="restart"):
-        parse_settings(data)
+        parse_servers(data)
 
 
 def test_password_hash():
@@ -78,3 +79,28 @@ def test_authenticator():
     assert auth.check("u", "pw") and auth.check("u", "pw")  # second from cache
     assert not auth.check("u", "wrong")
     assert not auth.check("nobody", "pw")
+
+
+def test_bad_server_name():
+    with pytest.raises(ConfigError, match="name"):
+        parse_servers({"a/b": {"test": _instance(["odoo"])}})
+
+
+def test_servers_file_round_trip(tmp_path):
+    data = _settings(["odoo", "plm"], ["plm"])
+    data["s"]["production"]["odoo_bin"] = "/opt/odoo/odoo-bin"
+    servers = parse_servers(data)
+    assert str(servers["s"].production.odoo_bin) == "/opt/odoo/odoo-bin"
+    assert servers["s"].test.odoo_bin is None
+    path = tmp_path / "servers.yaml"
+    save_servers(path, servers)
+    assert load_servers(path) == servers
+    save_servers(path, {})
+    assert load_servers(path) == {}
+    assert load_servers(path.with_name("servers.yaml.bak")) == servers
+
+
+def test_settings_servers_file_relative(tmp_path):
+    main = {"auth": {"users": {"a": "h"}}, "backup_dir": "/b", "jobs_dir": "/j"}
+    settings = parse_settings(main, base_dir=tmp_path)
+    assert settings.servers_file == tmp_path / "servers.yaml" and settings.servers == {}

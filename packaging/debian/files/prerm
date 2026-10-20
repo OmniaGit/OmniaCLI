@@ -1,0 +1,9 @@
+#!/bin/sh
+set -e
+
+# stopped on upgrade too: postinst rebuilds the venv the service runs from
+if [ -d /run/systemd/system ] && { [ "$1" = "remove" ] || [ "$1" = "upgrade" ] || [ "$1" = "deconfigure" ]; }; then
+    deb-systemd-invoke stop 'omniaci.service' >/dev/null || true
+fi
+
+exit 0

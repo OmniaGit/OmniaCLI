@@ -1,0 +1,21 @@
+[Unit]
+Description=OmniaCI, web service to deploy Odoo instances
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=omniaci
+Group=omniaci
+Environment=OMNIACI_CONFIG=/etc/omniaci/omniaci.yaml
+Environment=OMNIACI_HOST=127.0.0.1
+Environment=OMNIACI_PORT=8090
+EnvironmentFile=-/etc/default/omniaci
+WorkingDirectory=/var/lib/omniaci
+ExecStart=/opt/omniaci/venv/bin/omniaci serve -c ${OMNIACI_CONFIG} --host ${OMNIACI_HOST} --port ${OMNIACI_PORT}
+Restart=on-failure
+RestartSec=5
+# no NoNewPrivileges: the restart of the Odoo services goes through sudo
+
+[Install]
+WantedBy=multi-user.target

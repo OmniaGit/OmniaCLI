@@ -1,0 +1,17 @@
+Package: omniaci
+Version: @VERSION@
+Architecture: all
+Maintainer: OmniaSolutions <matteo.boscolo@omniasolutions.eu>
+Installed-Size: @SIZE@
+Depends: python3 (>= 3.9), python3-venv, git, adduser, init-system-helpers
+Recommends: sudo, postgresql-client
+Section: admin
+Priority: optional
+Description: web service to deploy and test Odoo instances
+ OmniaCI manages the production and test instances of Odoo servers from a
+ web interface: git pull, module update and restart, database backup, merge
+ of the tested code into production, automatic update from git and a live
+ view of the Odoo log.
+ .
+ The Python dependencies are installed at configure time in
+ /opt/omniaci/venv, from PyPI, at the versions locked for the system python3.

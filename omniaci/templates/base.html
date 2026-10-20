@@ -18,6 +18,7 @@
   }
 }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 body { margin: 0; background: var(--bg); color: var(--text);
   font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
 header { display: flex; gap: 20px; align-items: center; padding: 12px 20px;
@@ -62,6 +63,22 @@ pre.console { background: var(--code-bg); color: var(--code-text); padding: 12px
   margin: 0; font-size: 12.5px; line-height: 1.4; }
 pre.console .ERROR, pre.console .CRITICAL { color: #ff7b7b; }
 pre.console .WARNING { color: #f0c060; }
+.form-grid { display: grid; grid-template-columns: max-content 1fr; gap: 8px 12px; align-items: center; }
+.form-grid label { color: var(--muted); }
+input[type=text], input[type=number], select { font: inherit; padding: 5px 8px; width: 100%;
+  border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); }
+fieldset { border: 1px solid var(--border); border-radius: 8px; margin: 0 0 16px; padding: 12px 16px; }
+legend { padding: 0 6px; }
+.repos td { padding: 4px; } .repos input { min-width: 90px; }
+.banner { padding: 10px 14px; border-radius: 6px; margin-bottom: 14px; border: 1px solid var(--err); color: var(--err); }
+dialog { border: 1px solid var(--border); border-radius: 10px; background: var(--panel);
+  color: var(--text); width: min(640px, calc(100vw - 32px)); padding: 18px 20px; }
+dialog::backdrop { background: rgba(0, 0, 0, .45); }
+.addon-list { max-height: 45vh; overflow: auto; border: 1px solid var(--border);
+  border-radius: 6px; padding: 6px 10px; margin-bottom: 10px; }
+.addon-group { font-weight: 600; color: var(--muted); margin: 8px 0 4px; font-size: 12px;
+  text-transform: uppercase; letter-spacing: .04em; }
+.addon { display: block; padding: 2px 0; font-family: ui-monospace, "DejaVu Sans Mono", monospace; font-size: 12.5px; }
 .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
 @media (max-width: 700px) {
   main { padding: 16px; }
@@ -76,6 +93,7 @@ pre.console .WARNING { color: #f0c060; }
   <strong><a href="/">OmniaCI</a></strong>
   <a href="/">Servers</a>
   <a href="/jobs">Jobs</a>
+  <a href="/config">Configuration</a>
 </header>
 <main>
 {% block content %}{% endblock %}
