@@ -1,0 +1,32 @@
+{# Shows a check report: OmniaChecks.show(title, checks, summary) #}
+<dialog id="checks-dialog">
+  <h2 id="checks-title" style="margin-bottom: 4px"></h2>
+  <p id="checks-summary" style="margin-top: 0"></p>
+  <div class="scroll"><table id="checks-table"></table></div>
+  <div class="actions"><button type="button" onclick="document.getElementById('checks-dialog').close()">Close</button></div>
+</dialog>
+<script>
+const OmniaChecks = {
+  show(title, checks, summary, ok, onClose) {
+    const dialog = document.getElementById("checks-dialog");
+    document.getElementById("checks-title").textContent = title;
+    const s = document.getElementById("checks-summary");
+    s.textContent = summary; s.className = ok ? "status success" : "status failed";
+    const table = document.getElementById("checks-table");
+    table.innerHTML = "<tr><th></th><th>Where</th><th>Check</th><th>Result</th></tr>";
+    for (const c of checks) {
+      const tr = document.createElement("tr");
+      const mark = c.ok ? "✓" : (c.level === "warning" ? "!" : "✗");
+      const cls = c.ok ? "status success" : (c.level === "warning" ? "status running" : "status failed");
+      for (const [text, klass] of [[mark, cls], [c.target, "muted"], [c.name, ""], [c.detail, c.ok ? "" : (c.level === "warning" ? "" : "error")]]) {
+        const td = document.createElement("td");
+        td.textContent = text; if (klass) td.className = klass;
+        tr.appendChild(td);
+      }
+      table.appendChild(tr);
+    }
+    if (onClose) dialog.addEventListener("close", onClose, {once: true});
+    dialog.showModal();
+  },
+};
+</script>

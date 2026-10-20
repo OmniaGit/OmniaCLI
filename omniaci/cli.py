@@ -36,42 +36,19 @@ def _hash_password(args) -> int:
     return 0
 
 
-async def _check_instance(instance) -> list[str]:
-    from . import ops
-
-    problems = []
-    for path, what in (
-        (instance.odoo_config, "Odoo config"),
-        (instance.log_file, "log file"),
-    ):
-        if not os.access(path, os.R_OK):
-            problems.append(f"{what} {path} is not readable")
-    for script in ("click-odoo-update", "click-odoo-backupdb"):
-        if not os.access(instance.venv_bin / script, os.X_OK):
-            problems.append(
-                f"{instance.venv_bin / script} not found: "
-                f"pip install click-odoo-contrib in that venv"
-            )
-    for repo in instance.repositories:
-        status = await ops.repository_status(repo)
-        if "error" in status:
-            problems.append(f"repository {repo.name}: {status['error']}")
-        elif status["branch"] != repo.branch:
-            problems.append(
-                f"repository {repo.name} is on '{status['branch']}', expected '{repo.branch}'"
-            )
-    return problems
-
-
 def _check_config(args) -> int:
+    from . import checks
+
     settings = load_settings(args.config)
     failed = False
-    for instance in settings.all_instances():
-        problems = asyncio.run(_check_instance(instance))
-        print(f"{instance.key}: {'OK' if not problems else 'PROBLEMS'}")
-        for problem in problems:
-            print(f"  - {problem}")
-        failed = failed or bool(problems)
+    for server in settings.servers.values():
+        report = asyncio.run(checks.check_server(server, settings.backup_dir))
+        ok = checks.passed(report)
+        print(f"{server.name} ({server.status}): {'OK' if ok else 'PROBLEMS'}")
+        for check in report:
+            mark = "ok  " if check.ok else ("warn" if check.level == checks.WARNING else "FAIL")
+            print(f"  [{mark}] {check.target:<10} {check.name}: {check.detail}")
+        failed = failed or not ok
     return 1 if failed else 0
 
 
@@ -88,7 +65,7 @@ def main(argv: list[str] | None = None) -> int:
     hashpw = sub.add_parser("hash-password", help="hash a password for auth.users")
     hashpw.set_defaults(func=_hash_password)
 
-    check = sub.add_parser("check-config", help="validate the config and the paths it names")
+    check = sub.add_parser("check-config", help="run the Test & activate checks on every server")
     check.add_argument("-c", "--config", default="omniaci.yaml")
     check.set_defaults(func=_check_config)
 

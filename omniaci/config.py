@@ -14,6 +14,7 @@ import yaml
 ROLES = ("production", "test")
 RESTART_TYPES = ("systemd", "initd")
 # a server name is part of URLs and of the job keys
+SERVER_STATUSES = ("active", "draft")
 SERVER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 
@@ -94,6 +95,13 @@ class Instance:
 class Server:
     name: str
     instances: dict[str, Instance]
+    # a draft is saved but not live: no dashboard, no actions, no auto update
+    # until "Test & activate" passes its checks
+    status: str = "active"
+
+    @property
+    def active(self) -> bool:
+        return self.status == "active"
 
     @property
     def production(self) -> Instance | None:
@@ -113,12 +121,17 @@ class Settings:
     servers_file: Path
     servers: dict[str, Server]
 
+    def active_servers(self) -> list[Server]:
+        return [s for s in self.servers.values() if s.active]
+
     def instance(self, server: str, role: str) -> Instance | None:
+        """An instance of an active server."""
         srv = self.servers.get(server)
-        return srv.instances.get(role) if srv else None
+        return srv.instances.get(role) if srv and srv.active else None
 
     def all_instances(self) -> list[Instance]:
-        return [i for s in self.servers.values() for i in s.instances.values()]
+        """The instances of the active servers."""
+        return [i for s in self.active_servers() for i in s.instances.values()]
 
 
 def _require(data: dict, key: str, where: str):
@@ -205,6 +218,9 @@ def parse_servers(data: dict) -> dict[str, Server]:
             )
         if not isinstance(srv, dict):
             raise ConfigError(f"servers.{name}: must be a mapping")
+        status = str(srv.get("status") or "active")
+        if status not in SERVER_STATUSES:
+            raise ConfigError(f"servers.{name}.status must be one of {', '.join(SERVER_STATUSES)}")
         instances = {
             role: _parse_instance(name, role, srv[role]) for role in ROLES if srv.get(role)
         }
@@ -219,7 +235,7 @@ def parse_servers(data: dict) -> dict[str, Server]:
                     f"servers.{name}: test repositories without a production "
                     f"repository of the same name: {', '.join(missing)}"
                 )
-        servers[name] = Server(name=name, instances=instances)
+        servers[name] = Server(name=name, instances=instances, status=status)
     return servers
 
 
@@ -250,7 +266,9 @@ def instance_to_dict(instance: Instance) -> dict:
 
 
 def server_to_dict(server: Server) -> dict:
-    return {role: instance_to_dict(i) for role, i in server.instances.items()}
+    data = {"status": server.status}
+    data.update({role: instance_to_dict(i) for role, i in server.instances.items()})
+    return data
 
 
 def load_servers(path: Path) -> dict[str, Server]:

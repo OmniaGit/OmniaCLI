@@ -61,7 +61,9 @@ async def run(
     return returncode
 
 
-async def capture(cmd: list[str], cwd: Path | None = None) -> tuple[int, str]:
+async def capture(
+    cmd: list[str], cwd: Path | None = None, timeout: float | None = None
+) -> tuple[int, str]:
     """Run a command quietly and return (exit code, stripped output)."""
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -75,7 +77,12 @@ async def capture(cmd: list[str], cwd: Path | None = None) -> tuple[int, str]:
         )
     except OSError as exc:
         return 127, str(exc)
-    out, _ = await proc.communicate()
+    try:
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        return 124, f"no answer within {timeout:.0f} s"
     return proc.returncode, out.decode(errors="replace").strip()
 
 

@@ -63,6 +63,26 @@ curl "${API[@]}" localhost:8090/api/servers/save -d '{"original": null, "name": 
   "repositories": [{"name": "odoo", "path": "/srv/odoo", "branch": "main"}]}}}' | grep -q '"ok":true' \
   || fail "server not saved"
 [ "$(stat -c %U /var/lib/omniaci/servers.yaml)" = omniaci ] || fail "servers.yaml owner"
+grep -q "status: draft" /var/lib/omniaci/servers.yaml || fail "a new server is not a draft"
+
+step "Test & activate: the checks that can pass here"
+curl "${API[@]}" -X POST localhost:8090/api/servers/demo/test > /tmp/checks.json
+python3 - <<'PY' || fail "activation checks"
+import json
+data = json.load(open("/tmp/checks.json"))
+checks = {(c["target"], c["name"]): c for c in data["checks"]}
+for line in data["checks"]:
+    print(("ok  " if line["ok"] else line["level"][:4]), line["target"], line["name"], "-", line["detail"])
+must_pass = ["Odoo config", "Log file", "click-odoo-update", "Repository odoo", "Service", "Restart permission"]
+bad = [n for n in must_pass if not checks[("production", n)]["ok"]]
+# no Odoo here: these must fail, so the server must stay a draft
+assert not checks[("production", "Database")]["ok"] and data["status"] == "draft", data["status"]
+assert not bad, bad
+PY
+# no Odoo in the container: activate it by hand to test the actions
+sed -i 's/status: draft/status: active/' /var/lib/omniaci/servers.yaml
+systemctl restart omniaci
+for i in $(seq 30); do curl -s -o /dev/null localhost:8090 && break; sleep 1; done
 
 step "git pull + restart through the web service"
 git -C /srv/dev commit -q --allow-empty -m two && git -C /srv/dev push -q origin main
@@ -82,6 +102,17 @@ fi
 PID_AFTER="$(systemctl show -p MainPID --value odoo-dummy)"
 [ "$PID_AFTER" != "$PID_BEFORE" ] && [ "$PID_AFTER" != 0 ] || fail "odoo-dummy not restarted"
 echo "pulled, odoo-dummy restarted ($PID_BEFORE -> $PID_AFTER)"
+
+step "load metrics of the systemd unit, read as user omniaci"
+sleep 12
+curl -s -u "admin:$PW" "localhost:8090/api/metrics?server=demo" > /tmp/metrics.json
+python3 - <<'PY' || fail "metrics"
+import json
+info = json.load(open("/tmp/metrics.json"))["instances"]["demo/production"]
+print(info["source"], info["points"][-1])
+assert info["source"] == "systemd unit odoo-dummy", info["source"]
+assert info["points"][-1]["procs"] == 1 and info["points"][-1]["mem"] > 0
+PY
 
 step "reinstall keeps config, servers and password"
 HASH_BEFORE="$(sha256sum /etc/omniaci/omniaci.yaml)"

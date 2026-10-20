@@ -17,6 +17,26 @@ config file, a log file and a systemd or init.d service.
 | Merge test to production | | ✓ | backup production, merge, push, update modules, restart production |
 | Log | ✓ | ✓ | `tail -F` of the Odoo log in the browser, with an "errors only" filter |
 
+- **Servers page**: one row per live server, with the CPU of production and
+  test over the last 15 minutes and the buttons **Test**, **Production** and
+  **Both**, which open the server's page on that instance or on both side by
+  side: CPU and memory charts of the last hour, the actions, the settings and
+  the live log. *Merge test to production* is on that page.
+- **Load**: every 5 seconds OmniaCI samples each live instance. A systemd
+  instance is measured on its unit's cgroup (cgroup v2): CPU of the main
+  process and every worker, memory as the resident size of its processes. An
+  init.d instance is measured on the processes started with `-c <its Odoo
+  config>`. CPU is in percent of one core.
+- **Draft and Test & activate**: a new or cloned server is a draft (no page,
+  no actions, no auto update). *Test & activate* runs real checks as the
+  OmniaCI user and makes it live only when no check fails: Odoo config,
+  addons path, log file, click-odoo scripts and an `import click_odoo, odoo`
+  with the instance's python, the database (connected with the Odoo config's
+  credentials), odoo-bin, every repository (branch, no local change, remote
+  reachable), the service and `sudo -n -l` for its restart command, separate
+  folders and databases for production and test, the backup folder. Saving
+  a live server runs the same checks: if they fail nothing is saved and it
+  stays live. `omniaci check-config` runs them from the command line.
 - **Auto update**: per instance, every `interval_minutes` within `window`,
   OmniaCI fetches every repository. When there are new commits it runs
   *git pull + restart* as an `auto` job.

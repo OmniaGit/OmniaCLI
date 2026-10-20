@@ -7,6 +7,7 @@ import contextlib
 import os
 from dataclasses import asdict
 from pathlib import Path
+from typing import Optional
 from urllib.parse import urlsplit
 
 from fastapi import Body, Depends, FastAPI, HTTPException, Request, status
@@ -14,7 +15,7 @@ from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.templating import Jinja2Templates
 
-from . import ops
+from . import checks, ops
 from .auth import Authenticator
 from .config import (
     ConfigError,
@@ -27,6 +28,7 @@ from .config import (
 )
 from .jobs import JobManager
 from .logtail import follow
+from .metrics import Sampler
 from .scheduler import AutoUpdater
 
 _TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
@@ -45,6 +47,7 @@ def create_app(settings: Settings) -> FastAPI:
     authenticator = Authenticator(settings.users)
     jobs = JobManager(settings.jobs_dir)
     updater = AutoUpdater(settings, jobs)
+    sampler = Sampler(settings)
 
     def current_user(
         request: Request, credentials: HTTPBasicCredentials = Depends(_basic)
@@ -62,7 +65,9 @@ def create_app(settings: Settings) -> FastAPI:
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
         updater.start()
+        sampler.start()
         yield
+        await sampler.stop()
         await updater.stop()
 
     app = FastAPI(
@@ -74,6 +79,7 @@ def create_app(settings: Settings) -> FastAPI:
         openapi_url=None,
     )
     app.state.settings, app.state.jobs, app.state.updater = settings, jobs, updater
+    app.state.sampler = sampler
 
     def get_instance(server: str, role: str) -> Instance:
         instance = settings.instance(server, role)
@@ -84,27 +90,63 @@ def create_app(settings: Settings) -> FastAPI:
     def started(job) -> RedirectResponse:
         return RedirectResponse(f"/jobs/{job.id}", status.HTTP_303_SEE_OTHER)
 
+    def active_server(name: str):
+        srv = settings.servers.get(name)
+        if srv is None or not srv.active:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, f"No active server {name}")
+        return srv
+
     @app.get("/")
     async def index(request: Request):
         instances = settings.all_instances()
-        statuses = await asyncio.gather(
-            *(
-                asyncio.gather(*(ops.repository_status(r) for r in i.repositories))
-                for i in instances
-            )
-        )
-        repo_status = {i.key: s for i, s in zip(instances, statuses)}
         return _TEMPLATES.TemplateResponse(
             request,
             "index.html",
             {
-                "servers": settings.servers.values(),
-                "repo_status": repo_status,
-                "auto_state": updater.state,
+                "servers": settings.active_servers(),
+                "drafts": [s for s in settings.servers.values() if not s.active],
                 "busy": {i.key: jobs.is_busy(i.key) for i in instances},
                 "jobs": jobs.recent(10),
             },
         )
+
+    @app.get("/servers/{server}")
+    async def server_page(request: Request, server: str, view: str = "both"):
+        srv = active_server(server)
+        roles = [r for r in ("production", "test") if r in srv.instances]
+        if view in srv.instances:
+            roles = [view]
+        elif view != "both":
+            raise HTTPException(status.HTTP_404_NOT_FOUND, f"No instance {server}/{view}")
+        shown = [srv.instances[r] for r in roles]
+        statuses = await asyncio.gather(
+            *(asyncio.gather(*(ops.repository_status(r) for r in i.repositories)) for i in shown)
+        )
+        return _TEMPLATES.TemplateResponse(
+            request,
+            "server.html",
+            {
+                "server": srv,
+                "view": view if view in srv.instances else "both",
+                "instances": shown,
+                "repo_status": {i.key: s for i, s in zip(shown, statuses)},
+                "auto_state": updater.state,
+                "busy": {i.key: jobs.is_busy(i.key) for i in srv.instances.values()},
+                "jobs": [j for j in jobs.recent(200) if any(k.startswith(f"{server}/") for k in j.instances)][:10],
+            },
+        )
+
+    @app.get("/api/metrics")
+    async def metrics(since: int = 0, server: Optional[str] = None):
+        """{cores, interval, instances: {key: {source, points}}}."""
+        data = {}
+        for inst in settings.all_instances():
+            if server is None or inst.server == server:
+                data[inst.key] = {
+                    "source": sampler.source.get(inst.key, ""),
+                    "points": sampler.series(inst.key, since),
+                }
+        return {"cores": sampler.cores, "interval": 5, "instances": data}
 
     @app.post("/servers/{server}/{role}/pull")
     async def action_pull(server: str, role: str, user: str = Depends(current_user)):
@@ -200,7 +242,7 @@ def create_app(settings: Settings) -> FastAPI:
     @app.post("/servers/{server}/merge")
     async def action_merge(server: str, user: str = Depends(current_user)):
         srv = settings.servers.get(server)
-        if srv is None or srv.production is None or srv.test is None:
+        if srv is None or not srv.active or srv.production is None or srv.test is None:
             raise HTTPException(
                 status.HTTP_404_NOT_FOUND, f"No server {server} with production and test"
             )
@@ -271,7 +313,12 @@ def create_app(settings: Settings) -> FastAPI:
             "server_form.html",
             {
                 "title": title,
-                "model": {"original": original, "name": name, "server": data},
+                "model": {
+                    "original": original,
+                    "name": name,
+                    "server": data,
+                    "active": bool(original and settings.servers[original].active),
+                },
             },
         )
 
@@ -325,22 +372,83 @@ def create_app(settings: Settings) -> FastAPI:
             for busy_name in {original, name} - {None}:
                 if server_busy(busy_name):
                     return refuse(f"A job is running on {busy_name}: try again when it ends")
+            server_data = dict(payload.get("server") or {})
+            # the status is never taken from the form: a save makes a draft,
+            # only passing checks make it active
+            server_data["status"] = "draft"
             try:
-                parsed = parse_servers({name: payload.get("server") or {}})[name]
+                parsed = parse_servers({name: server_data})[name]
             except (ConfigError, TypeError, ValueError, AttributeError) as exc:
                 return refuse(str(exc))
+            was_active = original is not None and settings.servers[original].active
+            report = None
+            if payload.get("activate"):
+                report = await checks.check_server(parsed, settings.backup_dir)
+                if checks.passed(report):
+                    parsed.status = "active"
+                elif was_active:
+                    # the live server stays as it was
+                    return JSONResponse(
+                        {"error": "The checks failed: nothing was saved, the server is "
+                                  "still live with its previous settings",
+                         "checks": [c.to_dict() for c in report]},
+                        status_code=400,
+                    )
             servers = {}
             for key, srv in settings.servers.items():
                 # an edited server keeps its place in the list
                 servers[name if key == original else key] = parsed if key == original else srv
             servers.setdefault(name, parsed)
-            try:
-                save_servers(settings.servers_file, servers)
-            except OSError as exc:
-                return refuse(f"Cannot write {settings.servers_file}: {exc}", 500)
-            settings.servers = servers
-            await updater.reload()
-        return {"ok": True}
+            error = await store(servers)
+            if error:
+                return error
+        return {
+            "ok": True,
+            "status": parsed.status,
+            "checks": [c.to_dict() for c in report] if report is not None else None,
+        }
+
+    async def store(servers):
+        """Write the servers file and make it current; a response on error."""
+        try:
+            save_servers(settings.servers_file, servers)
+        except OSError as exc:
+            return refuse(f"Cannot write {settings.servers_file}: {exc}", 500)
+        settings.servers = servers
+        await updater.reload()
+        return None
+
+    @app.post("/api/servers/{name}/test")
+    async def config_test(name: str):
+        """Run the checks; a draft that passes them becomes active."""
+        async with config_lock:
+            srv = settings.servers.get(name)
+            if srv is None:
+                return refuse(f"No server {name}", status.HTTP_404_NOT_FOUND)
+            report = await checks.check_server(srv, settings.backup_dir)
+            ok = checks.passed(report)
+            if ok and not srv.active:
+                srv.status = "active"
+                error = await store(dict(settings.servers))
+                if error:
+                    srv.status = "draft"
+                    return error
+        return {"ok": ok, "status": srv.status, "checks": [c.to_dict() for c in report]}
+
+    @app.post("/api/servers/{name}/deactivate")
+    async def config_deactivate(name: str):
+        async with config_lock:
+            srv = settings.servers.get(name)
+            if srv is None:
+                return refuse(f"No server {name}", status.HTTP_404_NOT_FOUND)
+            if server_busy(name):
+                return refuse(f"A job is running on {name}: try again when it ends")
+            srv.status = "draft"
+            error = await store(dict(settings.servers))
+            if error:
+                srv.status = "active"
+                return error
+        return {"ok": True, "status": "draft"}
 
     @app.post("/api/servers/delete")
     async def config_delete(payload: dict = Body(...)):
@@ -351,12 +459,9 @@ def create_app(settings: Settings) -> FastAPI:
             if server_busy(name):
                 return refuse(f"A job is running on {name}: try again when it ends")
             servers = {k: v for k, v in settings.servers.items() if k != name}
-            try:
-                save_servers(settings.servers_file, servers)
-            except OSError as exc:
-                return refuse(f"Cannot write {settings.servers_file}: {exc}", 500)
-            settings.servers = servers
-            await updater.reload()
+            error = await store(servers)
+            if error:
+                return error
         return {"ok": True}
 
     return app

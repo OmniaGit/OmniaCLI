@@ -2,44 +2,71 @@
 {% block title %}Configuration · OmniaCI{% endblock %}
 {% block content %}
 <h1>Configuration</h1>
-<p class="muted">Servers are saved in <span class="mono">{{ servers_file }}</span> (the previous version is kept as <span class="mono">.bak</span>).</p>
+<p class="muted">Servers are saved in <span class="mono">{{ servers_file }}</span> (the previous version is kept as <span class="mono">.bak</span>).
+A new or cloned server is a <strong>draft</strong>: it goes live only when <strong>Test &amp; activate</strong> passes its checks.</p>
 <div id="error" class="banner" hidden></div>
 <div class="panel">
   <div class="actions" style="margin: 0 0 12px"><a class="button" href="/config/new">New server</a></div>
   <div class="scroll">
   <table>
-    <tr><th>Server</th><th>Instances</th><th>Repositories</th><th></th></tr>
+    <tr><th>Server</th><th>Status</th><th>Instances</th><th>Repositories</th><th></th></tr>
     {% for server in servers %}
     <tr>
       <td><strong>{{ server.name }}</strong></td>
+      <td><span class="badge {{ server.status }}">{{ "Active" if server.active else "Draft" }}</span></td>
       <td>{% for role, inst in server.instances.items() %}<span class="role {{ role }}">{{ role }}</span> <span class="mono">{{ inst.database }}</span><br>{% endfor %}</td>
       <td>{% for role, inst in server.instances.items() %}{{ inst.repositories | map(attribute="name") | join(", ") }}<br>{% endfor %}</td>
       <td>
         <div class="actions" style="margin: 0">
+          <button type="button" class="{{ 'danger' if not server.active }}" data-test="{{ server.name }}">{{ "Test" if server.active else "Test & activate" }}</button>
           <a class="button" href="/config/{{ server.name }}/edit">Edit</a>
           <a class="button" href="/config/{{ server.name }}/clone">Clone</a>
+          {% if server.active %}<button type="button" data-deactivate="{{ server.name }}" {% if busy[server.name] %}disabled title="A job is running"{% endif %}>Set to draft</button>{% endif %}
           <button class="danger" data-name="{{ server.name }}" {% if busy[server.name] %}disabled title="A job is running"{% endif %}>Delete</button>
         </div>
       </td>
     </tr>
     {% else %}
-    <tr><td colspan="4" class="muted">No servers yet: create one with "New server".</td></tr>
+    <tr><td colspan="5" class="muted">No servers yet: create one with "New server".</td></tr>
     {% endfor %}
   </table>
   </div>
 </div>
+{% include "_checks_dialog.html" %}
 <script>
+const errorBox = document.getElementById("error");
+async function post(url, body) {
+  const resp = await fetch(url, {method: "POST", headers: {"Content-Type": "application/json"},
+                                 body: JSON.stringify(body || {})});
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) { errorBox.textContent = data.error || ("Error " + resp.status); errorBox.hidden = false; return null; }
+  return data;
+}
 for (const button of document.querySelectorAll("button[data-name]")) {
   button.addEventListener("click", async () => {
     const name = button.dataset.name;
     if (!confirm("Delete the configuration of server " + name + "? Databases and files are not touched.")) return;
-    const resp = await fetch("/api/servers/delete", {
-      method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({name}),
-    });
-    if (resp.ok) { location.reload(); return; }
-    const box = document.getElementById("error");
-    box.textContent = (await resp.json().catch(() => ({}))).error || ("Error " + resp.status);
-    box.hidden = false;
+    if (await post("/api/servers/delete", {name})) location.reload();
+  });
+}
+for (const button of document.querySelectorAll("button[data-deactivate]")) {
+  button.addEventListener("click", async () => {
+    const name = button.dataset.deactivate;
+    if (!confirm("Take server " + name + " offline (draft)? Its auto update stops and no action can run on it.")) return;
+    if (await post(`/api/servers/${encodeURIComponent(name)}/deactivate`)) location.reload();
+  });
+}
+for (const button of document.querySelectorAll("button[data-test]")) {
+  button.addEventListener("click", async () => {
+    const name = button.dataset.test, label = button.textContent;
+    button.disabled = true; button.textContent = "Checking…";
+    const data = await post(`/api/servers/${encodeURIComponent(name)}/test`);
+    button.disabled = false; button.textContent = label;
+    if (!data) return;
+    const summary = data.ok
+      ? (data.status === "active" ? "All checks passed: the server is live." : "All checks passed.")
+      : "Some checks failed: the server " + (data.status === "active" ? "stays live, fix the settings." : "stays a draft.");
+    OmniaChecks.show("Checks of " + name, data.checks, summary, data.ok, () => location.reload());
   });
 }
 </script>

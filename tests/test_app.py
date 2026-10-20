@@ -38,7 +38,9 @@ async def test_requires_auth(client):
     bad = "Basic " + base64.b64encode(b"admin:wrong").decode()
     assert (await client.get("/", headers={"Authorization": bad})).status_code == 401
     resp = await client.get("/", headers={"Authorization": AUTH})
-    assert resp.status_code == 200 and "srv" in resp.text and "DB_production" in resp.text
+    assert resp.status_code == 200 and 'href="/servers/srv?view=both"' in resp.text
+    resp = await client.get("/servers/srv?view=both", headers={"Authorization": AUTH})
+    assert resp.status_code == 200 and "DB_production" in resp.text and "DB_test" in resp.text
 
 
 async def test_post_needs_same_origin(client):
@@ -136,10 +138,28 @@ async def test_config_clone_rename_delete(client, env):
 
     resp = await client.post("/api/servers/save", headers=POST,
                              json={"original": None, "name": "srv2", "server": server})
-    assert resp.status_code == 200, resp.text
+    assert resp.status_code == 200 and resp.json()["status"] == "draft", resp.text
     assert list(load_servers(settings.servers_file)) == ["srv", "srv2"]
-    assert "srv2" in (await client.get("/", headers={"Authorization": AUTH})).text
-    assert len(client.app.state.updater._tasks) == 1  # the clone's auto update runs
+    # a draft is not live: not on the dashboard, no actions, no auto update
+    index = (await client.get("/", headers={"Authorization": AUTH})).text
+    assert "/servers/srv2" not in index and "1 draft server" in index
+    assert (await client.post("/servers/srv2/test/pull", headers=POST)).status_code == 404
+    assert (await client.get("/servers/srv2", headers={"Authorization": AUTH})).status_code == 404
+    assert client.app.state.updater._tasks == []
+    # active through the checks (here made to pass)
+    import omniaci.checks as checks
+
+    async def all_ok(server, backup_dir):
+        return [checks.Check("server", "fake", True, "ok")]
+    original_check, checks.check_server = checks.check_server, all_ok
+    try:
+        resp = await client.post("/api/servers/srv2/test", headers=POST)
+    finally:
+        checks.check_server = original_check
+    assert resp.json()["ok"] and resp.json()["status"] == "active"
+    assert load_servers(settings.servers_file)["srv2"].active
+    assert len(client.app.state.updater._tasks) == 1  # its auto update runs now
+    assert "/servers/srv2" in (await client.get("/", headers={"Authorization": AUTH})).text
 
     # a name already taken is refused
     resp = await client.post("/api/servers/save", headers=POST,
@@ -155,8 +175,8 @@ async def test_config_clone_rename_delete(client, env):
 
     resp = await client.post("/api/servers/delete", headers=POST, json={"name": "srv2"})
     assert resp.status_code == 200 and list(load_servers(settings.servers_file)) == ["first"]
-    # "first" got the same configuration, auto update included
-    assert len(client.app.state.updater._tasks) == 1
+    # "first" got the same configuration but was saved as a draft
+    assert len(client.app.state.updater._tasks) == 0
 
 
 async def test_config_invalid_and_busy(client, env):
@@ -262,5 +282,36 @@ async def test_restart_action(client, env):
     data = await wait_job(client, resp.headers["location"].rsplit("/", 1)[1])
     assert data["status"] == "success"
     assert env["calls"].read_text() == "restart odoo-test\n"
-    page = await client.get("/", headers={"Authorization": AUTH})
+    page = await client.get("/servers/srv?view=test", headers={"Authorization": AUTH})
     assert 'class="open-update"' in page.text and "/servers/srv/test/restart" in page.text
+    assert "/servers/srv/production/restart" not in page.text
+
+
+async def test_failed_checks_keep_live_server_unchanged(client, env):
+    """Editing a live server with activate=True and failing checks saves nothing."""
+    from omniaci.config import server_to_dict
+
+    settings = env["settings"]
+    before = settings.servers_file.read_text()
+    server = server_to_dict(settings.servers["srv"])
+    server["test"]["database"] = "OTHER"
+    resp = await client.post("/api/servers/save", headers=POST,
+                             json={"original": "srv", "name": "srv", "server": server, "activate": True})
+    assert resp.status_code == 400 and "still live" in resp.json()["error"]
+    assert any(not c["ok"] for c in resp.json()["checks"])
+    assert settings.servers_file.read_text() == before and settings.servers["srv"].active
+    # saved as draft on purpose: it goes offline
+    resp = await client.post("/api/servers/save", headers=POST,
+                             json={"original": "srv", "name": "srv", "server": server})
+    assert resp.json()["status"] == "draft" and not settings.servers["srv"].active
+
+
+async def test_metrics_api(client, env):
+    sampler = client.app.state.sampler
+    await sampler.sample()
+    await asyncio.sleep(0.2)
+    await sampler.sample()
+    data = (await client.get("/api/metrics?server=srv", headers={"Authorization": AUTH})).json()
+    assert set(data["instances"]) == {"srv/production", "srv/test"} and data["cores"] >= 1
+    point = data["instances"]["srv/test"]["points"][-1]
+    assert set(point) == {"t", "cpu", "mem", "procs"}

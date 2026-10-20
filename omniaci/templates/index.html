@@ -1,178 +1,59 @@
 {% extends "base.html" %}
 {% block content %}
-{% for server in servers %}
-<section class="server">
-  <div class="server-head">
-    <h2>{{ server.name }}</h2>
-    {% if server.production and server.test %}
-    <form method="post" action="/servers/{{ server.name }}/merge"
-          onsubmit="return confirm('Back up production, merge the commits deployed on test into production, push, update modules and restart production {{ server.name }}?')">
-      <button class="danger" {% if busy[server.production.key] or busy[server.test.key] %}disabled title="A job is running"{% endif %}>Merge test to production</button>
-    </form>
-    {% endif %}
+<h1>Servers</h1>
+{% if drafts %}<p class="muted">{{ drafts | length }} draft server{{ "s" if drafts | length > 1 }} not live yet: see <a href="/config">Configuration</a>.</p>{% endif %}
+<div class="panel">
+  <div class="scroll">
+  <table class="server-rows">
+    <tr><th>Server</th><th>CPU, last 15 minutes</th><th></th></tr>
+    {% for server in servers %}
+    <tr>
+      <td><a href="/servers/{{ server.name }}"><strong>{{ server.name }}</strong></a>
+        {% for role, inst in server.instances.items() %}{% if busy[inst.key] %}<br><span class="status running">job running on {{ role }}</span>{% endif %}{% endfor %}</td>
+      <td class="sparks">
+        {% for role in ("production", "test") %}{% if role in server.instances %}
+        <div class="spark-row" data-key="{{ server.name }}/{{ role }}">
+          <span class="role {{ role }}">{{ "Prod" if role == "production" else "Test" }}</span>
+          <svg class="spark" role="img" aria-label="CPU of {{ server.name }} {{ role }}"></svg>
+          <span class="spark-value mono">–</span>
+        </div>
+        {% endif %}{% endfor %}
+      </td>
+      <td>
+        <div class="actions" style="margin: 0">
+          {% if server.test %}<a class="button" href="/servers/{{ server.name }}?view=test">Test</a>{% endif %}
+          {% if server.production %}<a class="button" href="/servers/{{ server.name }}?view=production">Production</a>{% endif %}
+          {% if server.test and server.production %}<a class="button" href="/servers/{{ server.name }}?view=both">Both</a>{% endif %}
+        </div>
+      </td>
+    </tr>
+    {% else %}
+    <tr><td colspan="3" class="muted">No live servers. Add one in <a href="/config">Configuration</a>, then use Test &amp; activate.</td></tr>
+    {% endfor %}
+  </table>
   </div>
-  <div class="instances">
-  {% for role, inst in server.instances.items() %}
-    <div class="instance">
-      <span class="role {{ role }}">{{ role }}</span>
-      {% if busy[inst.key] %}<span class="status running"> · job running</span>{% endif %}
-      <dl>
-        <dt>Database</dt><dd class="mono">{{ inst.database }}</dd>
-        <dt>Odoo config</dt><dd class="mono">{{ inst.odoo_config }}</dd>
-        <dt>Log file</dt><dd class="mono">{{ inst.log_file }}</dd>
-        <dt>Service</dt><dd class="mono">{{ inst.restart.type }}: {{ inst.restart.service }}</dd>
-        <dt>Auto update</dt>
-        <dd>
-          {% if inst.auto_update.enabled %}
-            every {{ inst.auto_update.interval_minutes }} min, {{ inst.auto_update.window_label() }}
-            {% set st = auto_state.get(inst.key) %}
-            {% if st %}<br><span class="{{ 'error' if st.error else 'muted' }}">{{ st.checked }}: {{ st.message }}</span>{% endif %}
-          {% else %}<span class="muted">off</span>{% endif %}
-        </dd>
-      </dl>
-      <div class="scroll">
-      <table>
-        <tr><th>Repository</th><th>Branch</th><th>Last commit</th></tr>
-        {% for repo in inst.repositories %}
-        {% set st = repo_status[inst.key][loop.index0] %}
-        <tr>
-          <td><span title="{{ repo.path }}">{{ repo.name }}</span></td>
-          {% if st.error %}
-          <td colspan="2" class="error">{{ st.error }}</td>
-          {% else %}
-          <td class="mono {{ 'error' if st.branch != repo.branch }}"
-              {% if st.branch != repo.branch %}title="expected {{ repo.branch }}"{% endif %}>{{ st.branch }}</td>
-          <td><span class="mono">{{ st.sha }}</span> <span class="muted">{{ st.date }}</span><br>{{ st.subject }}</td>
-          {% endif %}
-        </tr>
-        {% endfor %}
-      </table>
-      </div>
-      <div class="actions">
-        <form method="post" action="/servers/{{ server.name }}/{{ role }}/pull">
-          <button {% if busy[inst.key] %}disabled{% endif %}>Git pull</button></form>
-        <form method="post" action="/servers/{{ server.name }}/{{ role }}/pull-restart"
-              onsubmit="return confirm('Pull, update changed modules and restart {{ inst.key }}?')">
-          <button {% if busy[inst.key] %}disabled{% endif %}>Git pull + restart</button></form>
-        <button type="button" class="open-update" data-server="{{ server.name }}" data-role="{{ role }}"
-                data-database="{{ inst.database }}" {% if busy[inst.key] %}disabled{% endif %}>Update modules</button>
-        <form method="post" action="/servers/{{ server.name }}/{{ role }}/restart"
-              onsubmit="return confirm('Restart the service {{ inst.restart.service }} of {{ inst.key }}?')">
-          <button {% if busy[inst.key] %}disabled{% endif %}>Restart</button></form>
-        <form method="post" action="/servers/{{ server.name }}/{{ role }}/backup">
-          <button {% if busy[inst.key] %}disabled{% endif %}>Backup</button></form>
-        <a class="button" href="/servers/{{ server.name }}/{{ role }}/log">Log</a>
-      </div>
-    </div>
-  {% endfor %}
-  </div>
-</section>
-{% else %}
-<p class="muted">No servers configured.</p>
-{% endfor %}
-<dialog id="update-dialog">
-  <form method="dialog" id="update-form">
-    <h2 id="update-title" style="margin-bottom: 4px"></h2>
-    <p class="muted" id="update-sub" style="margin-top: 0"></p>
-    <label><input type="radio" name="mode" value="changed" checked>
-      Changed modules only <span class="muted">(automatic, click-odoo-update)</span></label><br>
-    <label><input type="radio" name="mode" value="chosen"> These modules <span class="muted">(odoo-bin -u)</span></label>
-    <div id="chosen-box">
-      <input type="text" id="addon-filter" placeholder="Filter modules…" style="margin: 8px 0">
-      <div id="addon-list" class="addon-list"><span class="muted">Loading…</span></div>
-      <label>Other modules, comma separated
-        <input type="text" id="addon-extra" placeholder="e.g. base"></label>
-      <p class="muted" id="addon-count"></p>
-    </div>
-    <label><input type="checkbox" id="update-restart"> Restart the service after the update</label>
-    <p id="update-error" class="error"></p>
-    <div class="actions">
-      <button type="submit" value="ok" class="danger">Update</button>
-      <button type="button" id="update-cancel">Cancel</button>
-    </div>
-  </form>
-</dialog>
+</div>
+<h1 style="margin-top: 24px">Last jobs</h1>
+<div class="panel">{% include "_jobs_table.html" %}</div>
+{% include "_charts.html" %}
 <script>
 (function () {
-  const dialog = document.getElementById("update-dialog");
-  const list = document.getElementById("addon-list");
-  const filter = document.getElementById("addon-filter");
-  const extra = document.getElementById("addon-extra");
-  const errorBox = document.getElementById("update-error");
-  const chosenBox = document.getElementById("chosen-box");
-  let target = null;
-
-  const mode = () => dialog.querySelector("input[name=mode]:checked").value;
-  function chosen() {
-    const picked = [...list.querySelectorAll("input:checked")].map((i) => i.value);
-    const typed = extra.value.split(",").map((s) => s.trim()).filter(Boolean);
-    return [...new Set([...picked, ...typed])];
+  const WINDOW = 15 * 60;
+  async function refresh() {
+    try {
+      const resp = await fetch("/api/metrics?since=" + (Math.floor(Date.now() / 1000) - WINDOW));
+      const data = await resp.json();
+      for (const row of document.querySelectorAll(".spark-row")) {
+        const series = (data.instances[row.dataset.key] || {points: []}).points;
+        OmniaCharts.draw(row.querySelector("svg"), series, "cpu", {spark: true, minMax: 10});
+        const last = series.filter((p) => p.cpu !== null).pop();
+        row.querySelector(".spark-value").textContent = last ? last.cpu.toFixed(0) + "%" : "–";
+        row.title = last ? `${last.cpu}% CPU, ${last.mem} MiB, ${last.procs} processes` : "no samples yet";
+      }
+    } catch (e) { /* next round */ }
   }
-  function refresh() {
-    chosenBox.style.opacity = mode() === "chosen" ? 1 : 0.45;
-    const n = chosen().length;
-    document.getElementById("addon-count").textContent = n ? n + " selected: " + chosen().join(", ") : "";
-  }
-  function group(title, addons) {
-    if (!addons.length) return;
-    const h = document.createElement("div");
-    h.className = "addon-group"; h.textContent = title; list.appendChild(h);
-    for (const a of addons) {
-      const label = document.createElement("label");
-      label.className = "addon"; label.title = a.path; label.dataset.name = a.name;
-      const box = document.createElement("input");
-      box.type = "checkbox"; box.value = a.name;
-      box.onchange = () => { dialog.querySelector("input[value=chosen]").checked = true; refresh(); };
-      label.append(box, " " + a.name);
-      list.appendChild(label);
-    }
-  }
-  async function load() {
-    list.innerHTML = '<span class="muted">Loading…</span>';
-    const resp = await fetch(`/api/servers/${target.server}/${target.role}/addons`);
-    const data = await resp.json();
-    list.innerHTML = "";
-    group("In the instance's repositories", data.addons.filter((a) => a.in_repository));
-    group("Other modules in the addons path", data.addons.filter((a) => !a.in_repository));
-    if (!data.addons.length) list.innerHTML = '<span class="muted">No modules found in the addons path.</span>';
-    if (!data.odoo_bin) errorBox.textContent = "odoo-bin not found: set it in the configuration to update chosen modules.";
-  }
-  filter.oninput = () => {
-    const q = filter.value.trim().toLowerCase();
-    for (const el of list.querySelectorAll(".addon")) el.hidden = q && !el.dataset.name.includes(q);
-  };
-  extra.oninput = () => { if (extra.value.trim()) dialog.querySelector("input[value=chosen]").checked = true; refresh(); };
-  for (const radio of dialog.querySelectorAll("input[name=mode]")) radio.onchange = refresh;
-  document.getElementById("update-cancel").onclick = () => dialog.close();
-
-  for (const button of document.querySelectorAll(".open-update")) {
-    button.onclick = () => {
-      target = button.dataset;
-      document.getElementById("update-title").textContent = `Update modules ${target.server}/${target.role}`;
-      document.getElementById("update-sub").textContent = `Database ${target.database}`;
-      dialog.querySelector("input[value=changed]").checked = true;
-      filter.value = ""; extra.value = ""; errorBox.textContent = "";
-      document.getElementById("update-restart").checked = false;
-      refresh(); dialog.showModal(); load();
-    };
-  }
-  document.getElementById("update-form").addEventListener("submit", async (ev) => {
-    ev.preventDefault();
-    const body = {mode: mode(), modules: mode() === "chosen" ? chosen() : [],
-                  restart: document.getElementById("update-restart").checked};
-    if (body.mode === "chosen" && !body.modules.length) { errorBox.textContent = "Choose at least one module."; return; }
-    const what = body.mode === "chosen" ? body.modules.join(", ") : "the changed modules";
-    if (!confirm(`Update ${what} on ${target.server}/${target.role} (database ${target.database})?`)) return;
-    const resp = await fetch(`/api/servers/${target.server}/${target.role}/update`, {
-      method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body),
-    });
-    const data = await resp.json().catch(() => ({}));
-    if (resp.ok) { location.href = "/jobs/" + data.job; return; }
-    errorBox.textContent = data.error || ("Error " + resp.status);
-  });
+  refresh();
+  setInterval(refresh, 5000);
 })();
 </script>
-
-<h1>Last jobs</h1>
-<div class="panel">{% include "_jobs_table.html" %}</div>
 {% endblock %}
