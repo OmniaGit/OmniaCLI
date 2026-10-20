@@ -343,3 +343,32 @@ async def test_metrics_api(client, env):
     assert set(data["instances"]) == {"srv/production", "srv/test"} and data["cores"] >= 1
     point = data["instances"]["srv/test"]["points"][-1]
     assert set(point) == {"t", "cpu", "mem", "procs"}
+
+
+async def test_favicon_without_login(client):
+    for path, kind in (("/favicon.ico", "image/x-icon"), ("/icon-180.png", "image/png")):
+        resp = await client.get(path)
+        assert resp.status_code == 200 and resp.headers["content-type"] == kind and resp.content
+    page = await client.get("/", headers={"Authorization": AUTH})
+    assert '<link rel="icon" href="/favicon.ico"' in page.text
+    assert (await client.get("/")).status_code == 401  # everything else still needs it
+
+
+async def test_backup_and_download(client, env):
+    resp = await client.post("/servers/srv/production/backup?download=1", headers=POST)
+    assert resp.status_code == 303 and resp.headers["location"].endswith("?download=1")
+    job_id = resp.headers["location"].split("/jobs/")[1].split("?")[0]
+    data = await wait_job(client, job_id)
+    assert data["status"] == "success" and data["title"].endswith("+ download")
+    result = data["result"]
+    assert result["download"] == f"/backups/srv/production/{result['file']}" and result["size"] > 0
+    file = await client.get(result["download"], headers={"Authorization": AUTH})
+    assert file.status_code == 200 and file.content == b"dump\n"
+    assert f'filename="{result["file"]}"' in file.headers["content-disposition"]
+    listing = (await client.get("/api/servers/srv/production/backups", headers={"Authorization": AUTH})).json()
+    assert [f["file"] for f in listing] == [result["file"]]
+    # login needed, and nothing outside the instance's backup folder
+    assert (await client.get(result["download"])).status_code == 401
+    for bad in ("/backups/srv/test/" + result["file"], "/backups/srv/production/..%2F..%2Fjobs",
+                "/backups/srv/production/x.txt"):
+        assert (await client.get(bad, headers={"Authorization": AUTH})).status_code == 404, bad

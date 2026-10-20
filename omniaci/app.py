@@ -5,13 +5,14 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import re
 from dataclasses import asdict
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlsplit
 
 from fastapi import Body, Depends, FastAPI, HTTPException, Request, status
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.templating import Jinja2Templates
 
@@ -32,6 +33,12 @@ from .metrics import Sampler
 from .scheduler import AutoUpdater
 
 _TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
+# The OmniaSolutions "O" (Client2019 Setup/dist/images/omnia.ico, 355x280,
+# centred on a transparent square); served without login, like any favicon.
+_STATIC = Path(__file__).parent / "static"
+_BACKUP_NAME = re.compile(r"[A-Za-z0-9._-]+\.zip")
+_ICONS = {"/favicon.ico": ("favicon.ico", "image/x-icon"),
+          "/icon-180.png": ("icon-180.png", "image/png")}
 _basic = HTTPBasic(realm="OmniaCI")
 
 
@@ -80,6 +87,15 @@ def create_app(settings: Settings) -> FastAPI:
     )
     app.state.settings, app.state.jobs, app.state.updater = settings, jobs, updater
     app.state.sampler = sampler
+
+    async def icon(request: Request):
+        name, media_type = _ICONS[request.url.path]
+        return FileResponse(_STATIC / name, media_type=media_type,
+                            headers={"Cache-Control": "public, max-age=86400"})
+
+    # Starlette routes: the app's login dependency does not apply to them
+    for path in _ICONS:
+        app.add_route(path, icon, methods=["GET"])
 
     def get_instance(server: str, role: str) -> Instance:
         instance = settings.instance(server, role)
@@ -228,16 +244,58 @@ def create_app(settings: Settings) -> FastAPI:
         )
 
     @app.post("/servers/{server}/{role}/backup")
-    async def action_backup(server: str, role: str, user: str = Depends(current_user)):
+    async def action_backup(
+        server: str, role: str, download: bool = False, user: str = Depends(current_user)
+    ):
         instance = get_instance(server, role)
-        return started(
-            jobs.submit(
-                f"Backup {instance.key}",
-                [instance.key],
-                f"manual: {user}",
-                lambda job: ops.backup(job, instance, settings.backup_dir),
-            )
+
+        async def action(job):
+            dest = await ops.backup(job, instance, settings.backup_dir)
+            job.result = {
+                "file": dest.name,
+                "size": dest.stat().st_size,
+                "download": f"/backups/{instance.server}/{instance.role}/{dest.name}",
+            }
+
+        job = jobs.submit(
+            f"Backup {instance.key}" + (" + download" if download else ""),
+            [instance.key],
+            f"manual: {user}",
+            action,
         )
+        # the job page starts the download when the backup is ready
+        return RedirectResponse(
+            f"/jobs/{job.id}" + ("?download=1" if download else ""), status.HTTP_303_SEE_OTHER
+        )
+
+    def backup_folder(instance: Instance) -> Path:
+        return settings.backup_dir / instance.server / instance.role
+
+    @app.get("/api/servers/{server}/{role}/backups")
+    async def backup_list(server: str, role: str):
+        instance = get_instance(server, role)
+        folder = backup_folder(instance)
+        files = sorted(folder.glob("*.zip"), key=lambda p: p.stat().st_mtime, reverse=True) \
+            if folder.is_dir() else []
+        return [
+            {
+                "file": p.name,
+                "size": p.stat().st_size,
+                "time": int(p.stat().st_mtime),
+                "download": f"/backups/{server}/{role}/{p.name}",
+            }
+            for p in files
+        ]
+
+    @app.get("/backups/{server}/{role}/{name}")
+    async def backup_download(server: str, role: str, name: str):
+        instance = get_instance(server, role)
+        folder = backup_folder(instance).resolve()
+        path = (folder / name).resolve()
+        # only a zip directly in this instance's backup folder
+        if not _BACKUP_NAME.fullmatch(name) or path.parent != folder or not path.is_file():
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "No such backup")
+        return FileResponse(path, media_type="application/zip", filename=name)
 
     @app.post("/servers/{server}/merge")
     async def action_merge(server: str, user: str = Depends(current_user)):

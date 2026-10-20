@@ -24,7 +24,7 @@ omniaci = "omniaci.cli:main"
 packages = ["omniaci"]
 
 [tool.setuptools.package-data]
-omniaci = ["templates/*.html"]
+omniaci = ["templates/*.html", "static/*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

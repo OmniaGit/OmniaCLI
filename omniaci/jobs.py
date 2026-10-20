@@ -45,6 +45,8 @@ class Job:
     finished: str | None = None
     error: str | None = None
     lines: list[str] = field(default_factory=list)
+    # what the action produced, e.g. {"download": url} for a backup
+    result: dict = field(default_factory=dict)
 
     def log(self, text: str) -> None:
         stamp = datetime.datetime.now().strftime("%H:%M:%S")

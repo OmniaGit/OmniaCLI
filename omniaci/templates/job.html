@@ -11,6 +11,7 @@
     <dt>Finished</dt><dd class="mono" id="finished">{{ job.finished or "" }}</dd>
     <dt>Error</dt><dd class="error" id="error">{{ job.error or "" }}</dd>
   </dl>
+  <p id="download" hidden></p>
   <pre class="console" id="out"></pre>
 </div>
 <script>
@@ -34,7 +35,26 @@
     st.textContent = data.status; st.className = "status " + data.status;
     document.getElementById("finished").textContent = data.finished || "";
     document.getElementById("error").textContent = data.error || "";
+    if (data.status === "success" && data.result && data.result.download) offerDownload(data.result);
     if (!["success", "failed", "interrupted"].includes(data.status)) setTimeout(poll, 1500);
+  }
+  // a backup's zip: always a link; started by itself when the job was
+  // launched with "Backup + download" (?download=1), once
+  function offerDownload(result) {
+    const box = document.getElementById("download");
+    if (!box.hidden) return;
+    const a = document.createElement("a");
+    a.href = result.download; a.setAttribute("download", result.file);
+    const b = result.size;
+    const size = b >= 1073741824 ? (b / 1073741824).toFixed(2) + " GiB"
+      : b >= 1048576 ? (b / 1048576).toFixed(1) + " MiB" : Math.max(1, Math.round(b / 1024)) + " KiB";
+    a.className = "button"; a.textContent = `Download ${result.file} (${size})`;
+    box.appendChild(a); box.hidden = false;
+    const params = new URLSearchParams(location.search);
+    if (params.get("download") === "1") {
+      history.replaceState(null, "", location.pathname);  // a reload does not download again
+      a.click();
+    }
   }
   poll();
 })();

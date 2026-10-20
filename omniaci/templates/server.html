@@ -45,7 +45,14 @@
         <button {% if busy[inst.key] %}disabled{% endif %}>Restart</button></form>
       <form method="post" action="/servers/{{ server.name }}/{{ inst.role }}/backup">
         <button {% if busy[inst.key] %}disabled{% endif %}>Backup</button></form>
+      <form method="post" action="/servers/{{ server.name }}/{{ inst.role }}/backup?download=1">
+        <button {% if busy[inst.key] %}disabled{% endif %} title="Back up the database and filestore, then download the zip">Backup + download</button></form>
     </div>
+
+    <details class="backups" style="margin-top: 12px" data-url="/api/servers/{{ server.name }}/{{ inst.role }}/backups">
+      <summary>Backups</summary>
+      <div class="backup-list muted">Loading…</div>
+    </details>
 
     <details style="margin-top: 12px">
       <summary>Settings and repositories</summary>
@@ -131,6 +138,31 @@
   refresh();
   setInterval(() => { if (!document.hidden) refresh(); }, 5000);
   window.addEventListener("resize", () => { since = 0; for (const k in series) delete series[k]; refresh(); });
+
+  // the backup list loads when it is opened
+  const sizeText = (b) => b >= 1073741824 ? (b / 1073741824).toFixed(2) + " GiB"
+    : b >= 1048576 ? (b / 1048576).toFixed(1) + " MiB" : Math.max(1, Math.round(b / 1024)) + " KiB";
+  for (const box of document.querySelectorAll("details.backups")) {
+    box.addEventListener("toggle", async () => {
+      if (!box.open) return;
+      const list = box.querySelector(".backup-list");
+      try {
+        const files = await (await fetch(box.dataset.url)).json();
+        if (!files.length) { list.textContent = "No backups yet."; return; }
+        const table = document.createElement("table");
+        table.innerHTML = "<tr><th>File</th><th>Date</th><th>Size</th></tr>";
+        for (const f of files) {
+          const tr = table.insertRow();
+          const a = document.createElement("a");
+          a.href = f.download; a.textContent = f.file; a.setAttribute("download", f.file);
+          tr.insertCell().appendChild(a);
+          tr.insertCell().textContent = new Date(f.time * 1000).toLocaleString();
+          tr.insertCell().textContent = sizeText(f.size);
+        }
+        list.className = "backup-list scroll"; list.textContent = ""; list.appendChild(table);
+      } catch (e) { list.textContent = "Could not load the backups."; }
+    });
+  }
 
   for (const panel of panels) {
     const out = panel.querySelector(".log-out");
