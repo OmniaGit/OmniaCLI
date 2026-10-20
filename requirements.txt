@@ -1,0 +1,7 @@
+# Runtime dependencies of OmniaCI, pinned to the versions it was tested with.
+# Install: pip install -r requirements.txt
+# Tests also need: pip install -e '.[test]'  (pytest, pytest-asyncio, httpx)
+fastapi==0.150.0
+uvicorn==0.54.0
+Jinja2==3.1.6
+PyYAML==6.0.3
