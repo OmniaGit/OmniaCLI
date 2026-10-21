@@ -57,7 +57,7 @@
   }
   async function load() {
     list.innerHTML = '<span class="muted">Loading…</span>';
-    const resp = await fetch(`/api/servers/${target.server}/${target.role}/addons`);
+    const resp = await fetch(`{{ prefix }}/api/servers/${target.server}/${target.role}/addons`);
     const data = await resp.json();
     list.innerHTML = "";
     group("In the instance's repositories", data.addons.filter((a) => a.in_repository));
@@ -91,11 +91,11 @@
     if (body.mode === "chosen" && !body.modules.length) { errorBox.textContent = "Choose at least one module."; return; }
     const what = body.mode === "chosen" ? body.modules.join(", ") : "the changed modules";
     if (!confirm(`Update ${what} on ${target.server}/${target.role} (database ${target.database})?`)) return;
-    const resp = await fetch(`/api/servers/${target.server}/${target.role}/update`, {
+    const resp = await fetch(`{{ prefix }}/api/servers/${target.server}/${target.role}/update`, {
       method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body),
     });
     const data = await resp.json().catch(() => ({}));
-    if (resp.ok) { location.href = "/jobs/" + data.job; return; }
+    if (resp.ok) { location.href = "{{ prefix }}/jobs/" + data.job; return; }
     errorBox.textContent = data.error || ("Error " + resp.status);
   });
 })();

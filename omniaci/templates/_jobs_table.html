@@ -3,8 +3,8 @@
   <tr><th>Job</th><th>Server</th><th>Status</th><th>Started by</th><th>Created</th><th>Finished</th><th>Error</th></tr>
   {% for job in jobs %}
   <tr>
-    <td><a href="/jobs/{{ job.id }}">{{ job.title }}</a></td>
-    <td>{% for name in job.servers %}<a href="/jobs?server={{ name | urlencode }}" title="Jobs of {{ name }}">{{ name }}</a>{% if not loop.last %}, {% endif %}{% endfor %}</td>
+    <td><a href="{{ prefix }}/jobs/{{ job.id }}">{{ job.title }}</a></td>
+    <td>{% for name in job.servers %}<a href="{{ prefix }}/jobs?server={{ name | urlencode }}" title="Jobs of {{ name }}">{{ name }}</a>{% if not loop.last %}, {% endif %}{% endfor %}</td>
     <td class="status {{ job.status }}">{{ job.status }}</td>
     <td>{{ job.source }}</td>
     <td class="mono">{{ job.created }}</td>

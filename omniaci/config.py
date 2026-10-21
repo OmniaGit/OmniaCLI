@@ -11,6 +11,8 @@ from pathlib import Path
 
 import yaml
 
+from .auth import ROLES as ACCESS_ROLES
+
 ROLES = ("production", "test")
 # process: OmniaCI starts odoo-bin itself, its output going to a log of its own
 RESTART_TYPES = ("systemd", "initd", "process")
@@ -140,7 +142,28 @@ def filter_servers(servers: list[Server], query: str = "") -> list[Server]:
 
 
 @dataclass
+class LinkAccess:
+    """A linked OmniaCI instance allowed in: its token's hash and its role."""
+
+    token: str
+    role: str
+
+
+@dataclass
+class Access:
+    """The credentials of one source: the main config or the users file."""
+
+    users: dict[str, str] = field(default_factory=dict)  # {name: password hash}
+    roles: dict[str, str] = field(default_factory=dict)  # {user name: role}
+    tokens: dict[str, str] = field(default_factory=dict)  # MCP clients: {name: token hash}
+    links: dict[str, LinkAccess] = field(default_factory=dict)
+
+
+@dataclass
 class Settings:
+    # {name: password hash}; their roles in user_roles (admin when missing).
+    # users, user_roles, tokens and links join the main config's (fixed)
+    # and the users file's (edited from the web interface): see set_web_access
     users: dict[str, str]
     backup_dir: Path
     jobs_dir: Path
@@ -149,6 +172,23 @@ class Settings:
     servers: dict[str, Server]
     # MCP clients: {name: "sha256$<hex>"} (omniaci new-token)
     tokens: dict[str, str] = field(default_factory=dict)
+    user_roles: dict[str, str] = field(default_factory=dict)
+    # linked instances: {name: LinkAccess} (omniaci new-link-token)
+    links: dict[str, LinkAccess] = field(default_factory=dict)
+    users_file: Path | None = None
+    fixed: Access = field(default_factory=Access)
+    web: Access = field(default_factory=Access)
+
+    def set_web_access(self, web: Access) -> None:
+        """Make web current: the fixed credentials win a name clash."""
+        self.web = web
+        self.users = {**web.users, **self.fixed.users}
+        self.user_roles = {**web.roles, **self.fixed.roles}
+        self.tokens = {**web.tokens, **self.fixed.tokens}
+        self.links = {**web.links, **self.fixed.links}
+
+    def user_role(self, name: str) -> str:
+        return self.user_roles.get(name, "admin")
 
     @property
     def logs_dir(self) -> Path:
@@ -353,26 +393,94 @@ def save_servers(path: Path, servers: dict[str, Server]) -> None:
     os.replace(tmp, path)
 
 
+_TOKEN_HASH = re.compile(r"sha256\$[0-9a-f]{64}")
+
+
+def _access_role(where: str, value) -> str:
+    role = str(value or "")
+    if role not in ACCESS_ROLES:
+        raise ConfigError(f"{where}: role must be one of {', '.join(ACCESS_ROLES)}, not {role!r}")
+    return role
+
+
+def parse_auth(auth: dict, where: str = "auth", need_user: bool = True) -> Access:
+    """users (a hash, admin, or {password, role}), tokens and links ({token,
+    role}) of the main config's auth section or of the users file."""
+    users, roles = {}, {}
+    for name, value in (auth.get("users") or {}).items():
+        name = str(name)
+        if isinstance(value, dict):
+            users[name] = str(value.get("password") or "")
+            roles[name] = _access_role(f"{where}.users.{name}", value.get("role"))
+        else:
+            # the format before roles: such a user is an admin
+            users[name], roles[name] = str(value), "admin"
+        if not users[name]:
+            raise ConfigError(f"{where}.users.{name}: password hash missing (omniaci hash-password)")
+    if need_user and not users:
+        raise ConfigError(f"{where}.users: at least one user is required")
+    tokens = {str(k): str(v) for k, v in (auth.get("tokens") or {}).items()}
+    bad = [name for name, value in tokens.items() if not _TOKEN_HASH.fullmatch(value)]
+    if bad:
+        raise ConfigError(f"{where}.tokens: {', '.join(bad)} is not a token hash (omniaci new-token)")
+    links = {}
+    for name, value in (auth.get("links") or {}).items():
+        name, value = str(name), value if isinstance(value, dict) else {}
+        token = str(value.get("token") or "")
+        if not _TOKEN_HASH.fullmatch(token):
+            raise ConfigError(f"{where}.links.{name}: token is not a token hash (omniaci new-link-token)")
+        links[name] = LinkAccess(token, _access_role(f"{where}.links.{name}", value.get("role")))
+    return Access(users, roles, tokens, links)
+
+
+def load_access(path: Path) -> Access:
+    """The users file; none yet is no credentials."""
+    if not path.exists():
+        return Access()
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        raise ConfigError(f"cannot read {path}: {exc}") from exc
+    return parse_auth(data, where=path.name, need_user=False)
+
+
+def save_access(path: Path, access: Access) -> None:
+    """Write the users file atomically, readable by its owner only."""
+    data = {
+        "users": {n: {"password": h, "role": access.roles.get(n, "admin")} for n, h in access.users.items()},
+        "links": {n: {"token": link.token, "role": link.role} for n, link in access.links.items()},
+        "tokens": dict(access.tokens),
+    }
+    text = yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    os.replace(tmp, path)
+
+
 def parse_settings(data: dict, base_dir: Path = Path(".")) -> Settings:
-    users = (data.get("auth") or {}).get("users") or {}
-    if not users:
-        raise ConfigError("auth.users: at least one user is required")
+    fixed = parse_auth(data.get("auth") or {})
     servers_file = Path(data.get("servers_file") or "servers.yaml")
     if not servers_file.is_absolute():
         servers_file = base_dir / servers_file
+    # next to the servers file by default: a folder the service may write
+    users_file = Path(data.get("users_file") or servers_file.parent / "users.yaml")
+    if not users_file.is_absolute():
+        users_file = base_dir / users_file
     jobs_dir = Path(_require(data, "jobs_dir", "root"))
-    tokens = {str(k): str(v) for k, v in ((data.get("auth") or {}).get("tokens") or {}).items()}
-    bad = [name for name, value in tokens.items() if not re.fullmatch(r"sha256\$[0-9a-f]{64}", value)]
-    if bad:
-        raise ConfigError(f"auth.tokens: {', '.join(bad)} is not a token hash (omniaci new-token)")
-    return Settings(
-        users={str(k): str(v) for k, v in users.items()},
+    settings = Settings(
+        users={},
         backup_dir=Path(_require(data, "backup_dir", "root")),
         jobs_dir=jobs_dir,
         servers_file=servers_file,
         servers=load_servers(servers_file, logs_dir_of(jobs_dir)),
-        tokens=tokens,
+        users_file=users_file,
+        fixed=fixed,
     )
+    settings.set_web_access(load_access(users_file))
+    return settings
 
 
 def logs_dir_of(jobs_dir: Path) -> Path:

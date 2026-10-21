@@ -1,0 +1,166 @@
+{% extends "base.html" %}
+{% block title %}Users · OmniaCI{% endblock %}
+{% block crumbs %}{% from "_crumbs.html" import crumbs with context %}
+{{ crumbs([("Configuration", "/config"), ("Users", None)]) }}
+{% endblock %}
+{% block content %}
+<h1>Users</h1>
+<p class="muted">Saved in <span class="mono">{{ users_file }}</span>. Entries marked <em>main config</em> are set in the main configuration file and are changed there.
+<strong>user</strong> watches, <strong>developer</strong> also acts on the servers (pull, update, restart, backup and its download), <strong>admin</strong> does everything.</p>
+<div id="error" class="banner" hidden></div>
+<div id="secret" class="panel" hidden style="margin-bottom: 16px">
+  <p><strong id="secret-title"></strong> It is shown only now: copy it.</p>
+  <pre class="console mono" id="secret-value" style="white-space: pre-wrap; word-break: break-all"></pre>
+  <div class="actions" style="margin: 0"><button type="button" onclick="location.reload()">Done</button></div>
+</div>
+
+<h2>Users</h2>
+<div class="panel">
+  <div class="scroll">
+  <table>
+    <tr><th>User</th><th>Role</th><th>New password</th><th></th></tr>
+    {% for u in users %}
+    <tr data-user="{{ u.name }}">
+      <td><strong>{{ u.name }}</strong>{% if u.name == account %} <span class="muted">(you)</span>{% endif %}
+        {% if u.fixed %}<br><span class="muted">main config</span>{% endif %}</td>
+      {% if u.fixed %}
+      <td>{{ u.role }}</td><td></td><td></td>
+      {% else %}
+      <td><select class="role" aria-label="Role of {{ u.name }}" {% if u.name == account %}disabled title="You cannot change your own role"{% endif %}>
+        {% for r in roles %}<option {% if r == u.role %}selected{% endif %}>{{ r }}</option>{% endfor %}</select></td>
+      <td><input type="password" class="password" autocomplete="new-password" placeholder="unchanged" aria-label="New password of {{ u.name }}"></td>
+      <td><div class="actions" style="margin: 0">
+        <button type="button" data-save-user>Save</button>
+        {% if u.name != account %}<button type="button" class="danger" data-delete="users">Delete</button>{% endif %}
+      </div></td>
+      {% endif %}
+    </tr>
+    {% endfor %}
+    <tr>
+      <td><input type="text" id="new-user" placeholder="new user" aria-label="New user name"></td>
+      <td><select id="new-user-role" aria-label="Role of the new user">{% for r in roles %}<option {% if r == "user" %}selected{% endif %}>{{ r }}</option>{% endfor %}</select></td>
+      <td><input type="password" id="new-user-password" autocomplete="new-password" placeholder="password" aria-label="Password of the new user"></td>
+      <td><button type="button" id="add-user">Add user</button></td>
+    </tr>
+  </table>
+  </div>
+</div>
+
+<h2 style="margin-top: 24px">Links</h2>
+<p class="muted">Other OmniaCI instances let in to operate this one. Each gets a token, entered in its link.</p>
+<div class="panel">
+  <div class="scroll">
+  <table>
+    <tr><th>Link</th><th>Role</th><th></th></tr>
+    {% for l in links %}
+    <tr data-link="{{ l.name }}">
+      <td><strong>{{ l.name }}</strong>{% if l.fixed %}<br><span class="muted">main config</span>{% endif %}</td>
+      {% if l.fixed %}
+      <td>{{ l.role }}</td><td></td>
+      {% else %}
+      <td><select class="role" aria-label="Role of link {{ l.name }}">
+        {% for r in roles %}<option {% if r == l.role %}selected{% endif %}>{{ r }}</option>{% endfor %}</select></td>
+      <td><div class="actions" style="margin: 0">
+        <button type="button" data-save-link>Save</button>
+        <button type="button" class="danger" data-delete="links">Revoke</button>
+      </div></td>
+      {% endif %}
+    </tr>
+    {% else %}
+    <tr><td colspan="3" class="muted">No links.</td></tr>
+    {% endfor %}
+    <tr>
+      <td><input type="text" id="new-link" placeholder="who links in, e.g. omniasolutions" aria-label="New link name"></td>
+      <td><select id="new-link-role" aria-label="Role of the new link">{% for r in roles %}<option {% if r == "user" %}selected{% endif %}>{{ r }}</option>{% endfor %}</select></td>
+      <td><button type="button" id="add-link">Create link token</button></td>
+    </tr>
+  </table>
+  </div>
+</div>
+
+<h2 style="margin-top: 24px">MCP tokens</h2>
+<p class="muted">For AI clients of the <span class="mono">/mcp</span> interface: they read, and their only actions are the MCP tools.</p>
+<div class="panel">
+  <div class="scroll">
+  <table>
+    <tr><th>Token</th><th></th></tr>
+    {% for t in tokens %}
+    <tr data-token="{{ t.name }}">
+      <td><strong>{{ t.name }}</strong>{% if t.fixed %}<br><span class="muted">main config</span>{% endif %}</td>
+      <td>{% if not t.fixed %}<button type="button" class="danger" data-delete="tokens">Revoke</button>{% endif %}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="2" class="muted">No MCP tokens.</td></tr>
+    {% endfor %}
+    <tr>
+      <td><input type="text" id="new-token" placeholder="who uses it, e.g. matteo-laptop" aria-label="New MCP token name"></td>
+      <td><button type="button" id="add-token">Create MCP token</button></td>
+    </tr>
+  </table>
+  </div>
+</div>
+
+<script>
+(function () {
+  const errorBox = document.getElementById("error");
+  async function post(url, body) {
+    errorBox.hidden = true;
+    const resp = await fetch("{{ prefix }}/api/access/" + url, {method: "POST",
+      headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      errorBox.textContent = data.error || data.detail || ("Error " + resp.status);
+      errorBox.hidden = false;
+      return null;
+    }
+    return data;
+  }
+  function showSecret(title, value) {
+    document.getElementById("secret-title").textContent = title;
+    document.getElementById("secret-value").textContent = value;
+    document.getElementById("secret").hidden = false;
+    window.scrollTo(0, 0);
+  }
+  const value = (id) => document.getElementById(id).value.trim();
+
+  for (const button of document.querySelectorAll("[data-save-user]")) {
+    button.onclick = async () => {
+      const row = button.closest("tr");
+      const body = {name: row.dataset.user, role: row.querySelector(".role").value,
+                    password: row.querySelector(".password").value};
+      if (await post("users/save", body)) location.reload();
+    };
+  }
+  for (const button of document.querySelectorAll("[data-save-link]")) {
+    button.onclick = async () => {
+      const row = button.closest("tr");
+      if (await post("links/save", {name: row.dataset.link, role: row.querySelector(".role").value})) location.reload();
+    };
+  }
+  for (const button of document.querySelectorAll("[data-delete]")) {
+    button.onclick = async () => {
+      const kind = button.dataset.delete, row = button.closest("tr");
+      const name = row.dataset.user || row.dataset.link || row.dataset.token;
+      const what = {users: "user", links: "link", tokens: "MCP token"}[kind];
+      if (!confirm(`${kind === "users" ? "Delete" : "Revoke"} ${what} ${name}? It stops working at once.`)) return;
+      if (await post(kind + "/delete", {name})) location.reload();
+    };
+  }
+  document.getElementById("add-user").onclick = async () => {
+    const body = {name: value("new-user"), role: value("new-user-role"),
+                  password: document.getElementById("new-user-password").value, new: true};
+    if (await post("users/save", body)) location.reload();
+  };
+  document.getElementById("add-link").onclick = async () => {
+    const name = value("new-link");
+    const data = await post("links/save", {name, role: value("new-link-role"), new: true});
+    if (data) showSecret(`Token of link ${name}: enter it in the link of the other instance.`, data.token);
+  };
+  document.getElementById("add-token").onclick = async () => {
+    const name = value("new-token");
+    const data = await post("tokens/save", {name});
+    if (data) showSecret(`MCP token ${name}: give it to the client as "Authorization: Bearer <token>".`, data.token);
+  };
+})();
+</script>
+{% endblock %}

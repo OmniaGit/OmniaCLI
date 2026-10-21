@@ -3,7 +3,8 @@
 
 auth:
   users:
-    # add users with the hash printed by: omniaci hash-password
+    # the other users, links and MCP tokens are managed from the web
+    # interface (Users page), in /var/lib/omniaci/users.yaml
     admin: "@ADMIN_HASH@"
 
 backup_dir: /var/lib/omniaci/backups

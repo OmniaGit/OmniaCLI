@@ -8,7 +8,7 @@ import getpass
 import os
 import sys
 
-from .auth import hash_password, hash_token, new_token
+from .auth import ROLES, hash_password, hash_token, new_token
 from .config import ConfigError, load_settings
 
 
@@ -45,6 +45,15 @@ def _new_token(args) -> int:
     return 0
 
 
+def _new_link_token(args) -> int:
+    token = new_token()
+    print(f"Token for the linked instance {args.name} (enter it in its link, it is not shown again):")
+    print(f"  {token}")
+    print("Add to auth.links in the main configuration:")
+    print(f"  {args.name}: {{token: \"{hash_token(token)}\", role: {args.role}}}")
+    return 0
+
+
 def _check_config(args) -> int:
     from . import checks
 
@@ -77,6 +86,13 @@ def main(argv: list[str] | None = None) -> int:
     token = sub.add_parser("new-token", help="create a bearer token for an MCP client (auth.tokens)")
     token.add_argument("name", help="who uses it, e.g. matteo-laptop")
     token.set_defaults(func=_new_token)
+
+    link = sub.add_parser("new-link-token",
+                          help="create a token for another OmniaCI instance linked to this one (auth.links)")
+    link.add_argument("name", help="who links in, e.g. omniasolutions")
+    link.add_argument("--role", choices=ROLES, default="user",
+                      help="user: monitors only; developer: acts on the servers; admin: everything")
+    link.set_defaults(func=_new_link_token)
 
     check = sub.add_parser("check-config", help="run the Test & activate checks on every server")
     check.add_argument("-c", "--config", default="omniaci.yaml")

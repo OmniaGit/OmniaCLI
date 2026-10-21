@@ -25,7 +25,7 @@
 [hidden] { display: none !important; }
 body { margin: 0; background: var(--bg); color: var(--text);
   font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
-header { display: flex; gap: 20px; align-items: center; padding: 12px 20px;
+header { display: flex; flex-wrap: wrap; gap: 8px 20px; align-items: center; padding: 12px 20px;
   background: var(--panel); border-bottom: 1px solid var(--border); }
 header strong { font-size: 16px; }
 header a { color: var(--text); text-decoration: none; }
@@ -132,10 +132,12 @@ summary { cursor: pointer; color: var(--muted); }
 </head>
 <body>
 <header>
-  <strong><a href="/">OmniaCI</a></strong>
-  <a href="/">Servers</a>
-  <a href="/jobs">Jobs</a>
-  <a href="/config">Configuration</a>
+  <strong><a href="{{ prefix }}/">OmniaCI</a></strong>
+  <a href="{{ prefix }}/">Servers</a>
+  <a href="{{ prefix }}/jobs">Jobs</a>
+  {% if is_admin %}<a href="{{ prefix }}/config">Configuration</a>
+  <a href="{{ prefix }}/users">Users</a>{% endif %}
+  {% if account %}<a href="{{ prefix }}/account" style="margin-left: auto" title="Your account and password">{{ account }}</a>{% endif %}
 </header>
 <main>
 {% block crumbs %}{% endblock %}

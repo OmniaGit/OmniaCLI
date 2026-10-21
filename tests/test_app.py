@@ -2,6 +2,7 @@ import asyncio
 import base64
 import dataclasses
 import datetime
+import re
 
 import httpx
 import pytest
@@ -9,7 +10,7 @@ import pytest
 from omniaci.app import create_app
 from omniaci.logtail import read_since
 
-from .conftest import PASSWORD, clone, commit, sh
+from .conftest import LINK_TOKEN, LINK_VIEW_TOKEN, PASSWORD, TOKEN, clone, commit, sh
 
 AUTH = "Basic " + base64.b64encode(f"admin:{PASSWORD}".encode()).decode()
 HOST = "omniaci.test"
@@ -543,3 +544,233 @@ async def test_servers_filter(client, env):
     page = (await get("/?q=addons+test")).text  # every word: a repository and a branch
     assert "2 of 2 servers." in page
     assert "No servers match." in (await get("/?q=srv+OTHER_")).text
+
+
+
+def basic(user):
+    return "Basic " + base64.b64encode(f"{user}:{PASSWORD}".encode()).decode()
+
+
+async def test_user_role_only_monitors(client, env):
+    get = lambda url: client.get(url, headers={"Authorization": basic("viewer")})
+    post = lambda url: client.post(url, headers={"Authorization": basic("viewer"), "Origin": f"http://{HOST}"})
+    page = (await get("/servers/srv?view=both")).text
+    assert "DB_test" in page and "/pull" not in page and "Merge test to production" not in page
+    assert "Backup" not in page and ">Configuration<" not in page
+    assert (await get("/jobs")).status_code == 200
+    assert (await get("/api/servers/srv/test/log")).status_code == 200
+    assert (await get("/api/servers/srv/test/backups")).status_code == 200
+    for url in ("/config", "/config/new", "/config/srv/edit", "/backups/srv/test/x.zip"):
+        assert (await get(url)).status_code == 403, url
+    for url in ("/servers/srv/test/pull", "/servers/srv/test/restart", "/servers/srv/test/backup",
+                "/servers/srv/merge", "/api/servers/srv/test", "/api/servers/srv/deactivate"):
+        assert (await post(url)).status_code == 403, url
+
+
+async def test_developer_role_acts_but_does_not_configure(client, env):
+    headers = {"Authorization": basic("dev"), "Origin": f"http://{HOST}"}
+    page = (await client.get("/servers/srv?view=both", headers=headers)).text
+    assert "/servers/srv/test/pull" in page and "Merge test to production" not in page
+    assert ">Configuration<" not in page
+    resp = await client.post("/servers/srv/test/pull", headers=headers)
+    assert resp.status_code == 303
+    data = await wait_job(client, resp.headers["location"].rsplit("/", 1)[1])
+    assert data["status"] == "success" and data["source"] == "manual: dev"
+    # a missing backup, but past the role check
+    assert (await client.get("/backups/srv/test/x.zip", headers=headers)).status_code == 404
+    assert (await client.post("/servers/srv/merge", headers=headers)).status_code == 403
+    assert (await client.get("/config", headers=headers)).status_code == 403
+    resp = await client.post("/api/servers/save", headers=headers, json={"name": "x", "server": {}})
+    assert resp.status_code == 403
+
+
+async def test_admin_sees_everything(client):
+    page = (await client.get("/servers/srv?view=both", headers={"Authorization": AUTH})).text
+    assert "Merge test to production" in page and ">Configuration<" in page and "/servers/srv/test/pull" in page
+
+
+async def test_link_serves_prefixed_pages_and_acts(client, env):
+    link = {"Authorization": f"Bearer {LINK_TOKEN}", "X-OmniaCI-Prefix": "/links/cliente",
+            "X-OmniaCI-User": "matteo"}
+    page = (await client.get("/servers/srv?view=both", headers=link)).text
+    assert 'action="/links/cliente/servers/srv/test/pull"' in page
+    assert 'href="/links/cliente/jobs?server=srv"' in page and 'data-log="/links/cliente/api/' in page
+    assert 'href="/servers/' not in page and 'action="/servers/' not in page
+    # no Origin: no browser sends the link token by itself
+    resp = await client.post("/servers/srv/test/pull", headers=link)
+    assert resp.status_code == 303 and resp.headers["location"].startswith("/links/cliente/jobs/")
+    data = await wait_job(client, resp.headers["location"].rsplit("/", 1)[1])
+    assert data["source"] == "manual: link omnia (matteo)"
+    # no page links outside the prefix (the icons are the same on every instance)
+    unprefixed = re.compile(r'(?:href|action|data-url|data-log)="/(?!links/cliente/|favicon|icon-180)'
+                            r'|fetch\(\s*["`]/(?!links/cliente/)')
+    for url in ("/", "/jobs", f"/jobs/{data['id']}", "/servers/srv/test/log", "/servers/srv?view=test"):
+        page = (await client.get(url, headers=link)).text
+        assert not unprefixed.findall(page), (url, unprefixed.findall(page))
+    resp = await client.get("/api/servers/srv/test/backups", headers=link)
+    assert resp.status_code == 200
+    # the link's role is developer
+    assert (await client.post("/servers/srv/merge", headers=link)).status_code == 403
+    # a prefix or user that is not a plain path or name is ignored
+    bad = {**link, "X-OmniaCI-Prefix": "//evil.example/x\"onload=\"", "X-OmniaCI-User": "a b<c>"}
+    page = (await client.get("/servers/srv?view=both", headers=bad)).text
+    assert 'action="/servers/srv/test/pull"' in page and "evil" not in page
+    resp = await client.post("/servers/srv/test/pull", headers=bad)
+    data = await wait_job(client, resp.headers["location"].rsplit("/", 1)[1])
+    assert data["source"] == "manual: link omnia"
+
+
+async def test_link_with_user_role_and_bad_token(client):
+    watcher = {"Authorization": f"Bearer {LINK_VIEW_TOKEN}"}
+    assert (await client.get("/", headers=watcher)).status_code == 200
+    assert (await client.post("/servers/srv/test/pull", headers=watcher)).status_code == 403
+    assert (await client.get("/", headers={"Authorization": "Bearer nope"})).status_code == 401
+
+
+async def test_mcp_token_still_only_reads(client):
+    bearer = {"Authorization": f"Bearer {TOKEN}"}
+    assert (await client.get("/config", headers=bearer)).status_code == 200
+    resp = await client.post("/servers/srv/test/pull", headers=bearer)
+    assert resp.status_code == 403 and resp.json()["detail"] == "A token may only read"
+    # a prefix is a link's only
+    page = (await client.get("/", headers={**bearer, "X-OmniaCI-Prefix": "/links/x"})).text
+    assert "/links/x" not in page
+
+
+async def test_info_and_server_list(client):
+    for headers, role in (({"Authorization": AUTH}, "admin"),
+                          ({"Authorization": f"Bearer {LINK_VIEW_TOKEN}"}, "user")):
+        data = (await client.get("/api/info", headers=headers)).json()
+        assert data["app"] == "OmniaCI" and data["role"] == role and data["version"]
+    servers = (await client.get("/api/servers", headers={"Authorization": f"Bearer {LINK_VIEW_TOKEN}"})).json()
+    assert [s["name"] for s in servers] == ["srv"]
+    test = servers[0]["instances"]["test"]
+    assert test["database"] == "DB_test" and test["service"] == "odoo-test" and test["busy"] is False
+    assert {"name": "odoo", "branch": "test"} in test["repositories"]
+
+
+def auth_of(user, password=PASSWORD):
+    return "Basic " + base64.b64encode(f"{user}:{password}".encode()).decode()
+
+
+async def access(client, path, body, user="admin", password=PASSWORD):
+    return await client.post(f"/api/access/{path}", json=body,
+                             headers={"Authorization": auth_of(user, password), "Origin": f"http://{HOST}"})
+
+
+async def test_users_page_and_web_user(client, env):
+    settings = client.app.state.settings
+    page = (await client.get("/users", headers={"Authorization": AUTH})).text
+    assert ">Users</a>" in page and "<strong>viewer</strong>" in page and "main config" in page
+    resp = await access(client, "users/save", {"name": "anna", "role": "developer", "password": "anna-pass-1", "new": True})
+    assert resp.status_code == 200, resp.text
+    # the file holds the hash, readable by its owner only
+    text = settings.users_file.read_text()
+    assert "anna-pass-1" not in text and "pbkdf2_sha256$" in text
+    assert settings.users_file.stat().st_mode & 0o777 == 0o600
+    anna = {"Authorization": auth_of("anna", "anna-pass-1"), "Origin": f"http://{HOST}"}
+    assert (await client.get("/api/info", headers=anna)).json()["role"] == "developer"
+    resp = await client.post("/servers/srv/test/pull", headers=anna)
+    assert resp.status_code == 303
+    await wait_job(client, resp.headers["location"].rsplit("/", 1)[1])
+
+    # a new password works at once, the old one stops (it was verified before)
+    resp = await access(client, "users/save", {"name": "anna", "role": "user", "password": "anna-pass-2"})
+    assert resp.status_code == 200, resp.text
+    assert (await client.get("/", headers=anna)).status_code == 401
+    anna["Authorization"] = auth_of("anna", "anna-pass-2")
+    assert (await client.get("/api/info", headers=anna)).json()["role"] == "user"
+    assert (await client.post("/servers/srv/test/pull", headers=anna)).status_code == 403
+    # role only: the password stays
+    assert (await access(client, "users/save", {"name": "anna", "role": "developer"})).status_code == 200
+    assert (await client.get("/", headers=anna)).status_code == 200
+
+    assert (await access(client, "users/delete", {"name": "anna"})).status_code == 200
+    assert (await client.get("/", headers=anna)).status_code == 401
+    assert "anna" not in settings.users_file.read_text()
+
+
+@pytest.mark.parametrize("body, error", [
+    ({"name": "x y", "role": "user", "password": "12345678", "new": True}, "A name is"),
+    ({"name": "bob", "role": "boss", "password": "12345678", "new": True}, "The role must be one of"),
+    ({"name": "bob", "role": "user", "password": "short", "new": True}, "at least 8 characters"),
+    ({"name": "viewer", "role": "user", "password": "12345678", "new": True}, "set in the main configuration"),
+    ({"name": "viewer", "role": "admin"}, "set in the main configuration"),
+    ({"name": "nobody", "role": "user"}, "No user nobody"),
+])
+async def test_user_save_refused(client, body, error):
+    resp = await access(client, "users/save", body)
+    assert resp.status_code in (400, 404) and error in resp.json()["error"], resp.text
+
+
+async def test_access_needs_admin_and_main_config_stays(client):
+    assert (await client.get("/users", headers={"Authorization": basic("dev")})).status_code == 403
+    body = {"name": "bob", "role": "admin", "password": "12345678", "new": True}
+    assert (await access(client, "users/save", body, user="dev")).status_code == 403
+    assert "set in the main configuration" in (await access(client, "users/delete", {"name": "viewer"})).json()["error"]
+    assert "set in the main configuration" in (await access(client, "links/delete", {"name": "omnia"})).json()["error"]
+    assert "set in the main configuration" in (await access(client, "tokens/delete", {"name": "tester"})).json()["error"]
+
+
+async def test_own_role_self_delete_and_last_admin(client):
+    settings = client.app.state.settings
+    body = {"name": "boss", "role": "admin", "password": "boss-pass-1", "new": True}
+    assert (await access(client, "users/save", body)).status_code == 200
+    me = dict(user="boss", password="boss-pass-1")
+    resp = await access(client, "users/save", {"name": "boss", "role": "user"}, **me)
+    assert resp.json()["error"] == "You cannot change your own role"
+    assert (await access(client, "users/delete", {"name": "boss"}, **me)).json()["error"] == "You cannot delete yourself"
+    # boss the only admin left: not even an admin link may demote or delete it
+    settings.fixed.roles["admin"] = "user"
+    settings.set_web_access(settings.web)
+    data = (await access(client, "links/save", {"name": "ops", "role": "admin", "new": True}, **me)).json()
+    link = {"Authorization": f"Bearer {data['token']}"}
+    resp = await client.post("/api/access/users/save", json={"name": "boss", "role": "user"}, headers=link)
+    assert resp.json()["error"] == "boss is the last admin"
+    resp = await client.post("/api/access/users/delete", json={"name": "boss"}, headers=link)
+    assert resp.json()["error"] == "boss is the last admin"
+
+
+async def test_link_and_mcp_tokens_from_the_web(client):
+    data = (await access(client, "links/save", {"name": "partner", "role": "user", "new": True})).json()
+    link = {"Authorization": f"Bearer {data['token']}"}
+    assert (await client.get("/api/info", headers=link)).json() == {
+        "app": "OmniaCI", "version": (await client.get("/api/info", headers=link)).json()["version"],
+        "caller": "link partner", "role": "user"}
+    assert (await access(client, "links/save", {"name": "partner", "role": "developer"})).json()["token"] is None
+    assert (await client.get("/api/info", headers=link)).json()["role"] == "developer"
+    assert "already exists" in (await access(client, "links/save", {"name": "partner", "role": "user", "new": True})).json()["error"]
+    page = (await client.get("/users", headers={"Authorization": AUTH})).text
+    assert data["token"] not in page and "<strong>partner</strong>" in page
+    assert (await access(client, "links/delete", {"name": "partner"})).status_code == 200
+    assert (await client.get("/", headers=link)).status_code == 401
+
+    data = (await access(client, "tokens/save", {"name": "laptop"})).json()
+    bearer = {"Authorization": f"Bearer {data['token']}"}
+    assert (await client.get("/api/info", headers=bearer)).json()["caller"] == "token laptop"
+    assert (await client.post("/servers/srv/test/pull", headers=bearer)).status_code == 403
+    assert (await access(client, "tokens/delete", {"name": "laptop"})).status_code == 200
+    assert (await client.get("/", headers=bearer)).status_code == 401
+    assert (await access(client, "nothing/delete", {"name": "x"})).status_code == 404
+
+
+async def test_own_password(client):
+    page = (await client.get("/account", headers={"Authorization": basic("viewer")})).text
+    assert "set in the main configuration" in page and 'href="/account"' in page
+    resp = await client.post("/api/account/password", json={"current": PASSWORD, "password": "12345678"},
+                             headers={"Authorization": basic("viewer"), "Origin": f"http://{HOST}"})
+    assert "main configuration" in resp.json()["error"]
+    assert (await client.get("/account", headers={"Authorization": f"Bearer {LINK_TOKEN}"})).status_code == 404
+
+    body = {"name": "luca", "role": "user", "password": "luca-pass-1", "new": True}
+    assert (await access(client, "users/save", body)).status_code == 200
+    luca = {"Authorization": auth_of("luca", "luca-pass-1"), "Origin": f"http://{HOST}"}
+    assert "Change password" in (await client.get("/account", headers=luca)).text
+    resp = await client.post("/api/account/password", json={"current": "wrong", "password": "luca-pass-2"}, headers=luca)
+    assert resp.json()["error"] == "The current password is wrong"
+    resp = await client.post("/api/account/password", json={"current": "luca-pass-1", "password": "short"}, headers=luca)
+    assert "at least 8" in resp.json()["error"]
+    resp = await client.post("/api/account/password", json={"current": "luca-pass-1", "password": "luca-pass-2"}, headers=luca)
+    assert resp.status_code == 200, resp.text
+    assert (await client.get("/", headers=luca)).status_code == 401
+    assert (await client.get("/", headers={"Authorization": auth_of("luca", "luca-pass-2")})).status_code == 200

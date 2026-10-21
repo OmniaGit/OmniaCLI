@@ -9,6 +9,9 @@ from omniaci.config import Restart, parse_settings
 
 PASSWORD = "secret"
 TOKEN = "mcp-test-token"
+# linked instances: one may act on the servers, one only watches
+LINK_TOKEN = "link-developer-token"
+LINK_VIEW_TOKEN = "link-user-token"
 USER_HASH = hash_password(PASSWORD, iterations=1000)
 
 
@@ -120,7 +123,18 @@ def env(tmp_path, fake_venv, restart_calls):
     )
     settings = parse_settings(
         {
-            "auth": {"users": {"admin": USER_HASH}, "tokens": {"tester": hash_token(TOKEN)}},
+            "auth": {
+                "users": {
+                    "admin": USER_HASH,
+                    "viewer": {"password": USER_HASH, "role": "user"},
+                    "dev": {"password": USER_HASH, "role": "developer"},
+                },
+                "tokens": {"tester": hash_token(TOKEN)},
+                "links": {
+                    "omnia": {"token": hash_token(LINK_TOKEN), "role": "developer"},
+                    "watcher": {"token": hash_token(LINK_VIEW_TOKEN), "role": "user"},
+                },
+            },
             "backup_dir": str(tmp_path / "backups"),
             "jobs_dir": str(tmp_path / "jobs"),
             "servers_file": "servers.yaml",

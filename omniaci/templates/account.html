@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}Account · OmniaCI{% endblock %}
+{% block content %}
+<h1>{{ name }}</h1>
+<p class="muted">Role: <strong>{{ role }}</strong>.</p>
+{% if fixed %}
+<p>Your user is set in the main configuration file: its password is changed there (<span class="mono">omniaci hash-password</span>).</p>
+{% else %}
+<div id="error" class="banner" hidden></div>
+<div id="done" class="panel" hidden><p>Password changed. The browser asks for the new one at the next page.</p></div>
+<form class="panel" id="password-form" style="max-width: 420px">
+  <h2 style="margin-top: 0">Change password</h2>
+  <p><label>Current password<br><input type="password" id="current" autocomplete="current-password" required></label></p>
+  <p><label>New password (at least 8 characters)<br><input type="password" id="password" autocomplete="new-password" minlength="8" required></label></p>
+  <p><label>New password again<br><input type="password" id="again" autocomplete="new-password" minlength="8" required></label></p>
+  <button>Change password</button>
+</form>
+<script>
+document.getElementById("password-form").onsubmit = async (event) => {
+  event.preventDefault();
+  const errorBox = document.getElementById("error");
+  errorBox.hidden = true;
+  const password = document.getElementById("password").value;
+  if (password !== document.getElementById("again").value) {
+    errorBox.textContent = "The two new passwords differ"; errorBox.hidden = false; return;
+  }
+  const resp = await fetch("{{ prefix }}/api/account/password", {method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({current: document.getElementById("current").value, password})});
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) { errorBox.textContent = data.error || data.detail || ("Error " + resp.status); errorBox.hidden = false; return; }
+  document.getElementById("password-form").hidden = true;
+  document.getElementById("done").hidden = false;
+};
+</script>
+{% endif %}
+{% endblock %}

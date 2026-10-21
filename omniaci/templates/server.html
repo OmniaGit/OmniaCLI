@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block title %}{{ server.name }} · OmniaCI{% endblock %}
-{% block crumbs %}{% from "_crumbs.html" import crumbs %}
+{% block crumbs %}{% from "_crumbs.html" import crumbs with context %}
 {{ crumbs([("Servers", "/"), (server.name, "/servers/" ~ server.name),
            ({"production": "Production", "test": "Test", "both": "Both"}[view], None)]) }}
 {% endblock %}
@@ -8,13 +8,13 @@
 <div class="server-head" style="padding: 0 0 14px; border: 0">
   <h1 style="margin: 0">{{ server.name }}</h1>
   <div class="actions" style="margin: 0">
-    {% if server.test %}<a class="button {{ 'current' if view == 'test' }}" href="/servers/{{ server.name }}?view=test">Test</a>{% endif %}
-    {% if server.production %}<a class="button {{ 'current' if view == 'production' }}" href="/servers/{{ server.name }}?view=production">Production</a>{% endif %}
-    {% if server.test and server.production %}<a class="button {{ 'current' if view == 'both' }}" href="/servers/{{ server.name }}?view=both">Both</a>
-    <form method="post" action="/servers/{{ server.name }}/merge"
+    {% if server.test %}<a class="button {{ 'current' if view == 'test' }}" href="{{ prefix }}/servers/{{ server.name }}?view=test">Test</a>{% endif %}
+    {% if server.production %}<a class="button {{ 'current' if view == 'production' }}" href="{{ prefix }}/servers/{{ server.name }}?view=production">Production</a>{% endif %}
+    {% if server.test and server.production %}<a class="button {{ 'current' if view == 'both' }}" href="{{ prefix }}/servers/{{ server.name }}?view=both">Both</a>
+    {% if is_admin %}<form method="post" action="{{ prefix }}/servers/{{ server.name }}/merge"
           onsubmit="return confirm('Back up production, merge the commits deployed on test into production, push, update modules and restart production {{ server.name }}?')">
       <button class="danger" {% if busy[server.production.key] or busy[server.test.key] %}disabled title="A job is running"{% endif %}>Merge test to production</button>
-    </form>{% endif %}
+    </form>{% endif %}{% endif %}
   </div>
 </div>
 
@@ -36,39 +36,41 @@
     <h3 class="chart-title">Memory, MiB resident</h3>
     <div class="chart-box"><svg class="chart" data-chart="mem" role="img" aria-label="Memory of {{ inst.key }} over the last hour"></svg><div class="chart-tip" hidden></div></div>
 
+    {% if can_act %}
     <div class="actions">
-      <form method="post" action="/servers/{{ server.name }}/{{ inst.role }}/pull">
+      <form method="post" action="{{ prefix }}/servers/{{ server.name }}/{{ inst.role }}/pull">
         <button {% if busy[inst.key] %}disabled{% endif %}>Git pull</button></form>
-      <form method="post" action="/servers/{{ server.name }}/{{ inst.role }}/pull-restart"
+      <form method="post" action="{{ prefix }}/servers/{{ server.name }}/{{ inst.role }}/pull-restart"
             onsubmit="return confirm('Pull, update changed modules and restart {{ inst.key }}?')">
         <button {% if busy[inst.key] %}disabled{% endif %}>Git pull + restart</button></form>
       <button type="button" class="open-update" data-server="{{ server.name }}" data-role="{{ inst.role }}"
               data-database="{{ inst.database }}" {% if busy[inst.key] %}disabled{% endif %}>Update modules</button>
       {% if inst.restart.type == "process" %}
       {% set pid = running.get(inst.key) %}
-      <form method="post" action="/servers/{{ server.name }}/{{ inst.role }}/restart"
+      <form method="post" action="{{ prefix }}/servers/{{ server.name }}/{{ inst.role }}/restart"
             onsubmit="return confirm('{{ 'Restart' if pid else 'Start' }} Odoo of {{ inst.key }}?')">
         <button {% if busy[inst.key] %}disabled{% endif %}>{{ "Restart" if pid else "Start" }}</button></form>
       {% if pid %}
-      <form method="post" action="/servers/{{ server.name }}/{{ inst.role }}/stop"
+      <form method="post" action="{{ prefix }}/servers/{{ server.name }}/{{ inst.role }}/stop"
             onsubmit="return confirm('Stop Odoo of {{ inst.key }}? It stays stopped, also for the auto update, until Start.')">
         <button class="danger" {% if busy[inst.key] %}disabled{% endif %}>Stop</button></form>
       {% endif %}
       {% else %}
-      <form method="post" action="/servers/{{ server.name }}/{{ inst.role }}/restart"
+      <form method="post" action="{{ prefix }}/servers/{{ server.name }}/{{ inst.role }}/restart"
             onsubmit="return confirm('Restart the service {{ inst.restart.service }} of {{ inst.key }}?')">
         <button {% if busy[inst.key] %}disabled{% endif %}>Restart</button></form>
       {% endif %}
-      <form method="post" action="/servers/{{ server.name }}/{{ inst.role }}/backup">
+      <form method="post" action="{{ prefix }}/servers/{{ server.name }}/{{ inst.role }}/backup">
         <button {% if busy[inst.key] %}disabled{% endif %}>Backup</button></form>
-      <form method="post" action="/servers/{{ server.name }}/{{ inst.role }}/backup?download=1">
+      <form method="post" action="{{ prefix }}/servers/{{ server.name }}/{{ inst.role }}/backup?download=1">
         <button {% if busy[inst.key] %}disabled{% endif %} title="Back up the database and filestore, then download the zip">Backup + download</button></form>
     </div>
 
-    <details class="backups" style="margin-top: 12px" data-url="/api/servers/{{ server.name }}/{{ inst.role }}/backups">
+    <details class="backups" style="margin-top: 12px" data-url="{{ prefix }}/api/servers/{{ server.name }}/{{ inst.role }}/backups">
       <summary>Backups</summary>
       <div class="backup-list muted">Loading…</div>
     </details>
+    {% endif %}
 
     <details style="margin-top: 12px">
       <summary>Settings and repositories</summary>
@@ -117,13 +119,13 @@
       <span class="log-state muted"></span>
     </div>
     <pre class="console log-out" style="height: {{ '45vh' if instances | length == 1 else '38vh' }}"
-         data-log="/api/servers/{{ server.name }}/{{ inst.role }}/log"></pre>
+         data-log="{{ prefix }}/api/servers/{{ server.name }}/{{ inst.role }}/log"></pre>
   </section>
 {% endfor %}
 </div>
 
 <h1 style="margin-top: 24px">Last jobs of {{ server.name }}</h1>
-<p><a href="/jobs?server={{ server.name | urlencode }}">All jobs of {{ server.name }}</a></p>
+<p><a href="{{ prefix }}/jobs?server={{ server.name | urlencode }}">All jobs of {{ server.name }}</a></p>
 <div class="panel">{% include "_jobs_table.html" %}</div>
 
 {% include "_update_dialog.html" %}
@@ -136,7 +138,7 @@
   let since = 0;
   async function refresh() {
     let data;
-    try { data = await (await fetch(`/api/metrics?server={{ server.name | urlencode }}&since=${since}`)).json(); }
+    try { data = await (await fetch(`{{ prefix }}/api/metrics?server={{ server.name | urlencode }}&since=${since}`)).json(); }
     catch (e) { return; }
     for (const panel of panels) {
       const info = data.instances[panel.dataset.key];

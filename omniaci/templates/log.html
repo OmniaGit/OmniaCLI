@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block title %}Log {{ instance.key }} · OmniaCI{% endblock %}
-{% block crumbs %}{% from "_crumbs.html" import crumbs %}
+{% block crumbs %}{% from "_crumbs.html" import crumbs with context %}
 {{ crumbs([("Servers", "/"), (instance.server, "/servers/" ~ instance.server),
            (instance.role | capitalize, "/servers/" ~ instance.server ~ "?view=" ~ instance.role),
            ("Log", None)]) }}
@@ -17,7 +17,7 @@
 </div>
 {% include "_logview.html" %}
 <script>
-OmniaLog.attach(document.getElementById("out"), "/api/servers/{{ instance.server }}/{{ instance.role }}/log", {
+OmniaLog.attach(document.getElementById("out"), "{{ prefix }}/api/servers/{{ instance.server }}/{{ instance.role }}/log", {
   errorsOnly: document.getElementById("errors"),
   follow: document.getElementById("follow"),
   state: document.getElementById("state"),

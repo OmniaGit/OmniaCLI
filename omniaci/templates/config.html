@@ -6,7 +6,7 @@
 A new or cloned server is a <strong>draft</strong>: it goes live only when <strong>Test &amp; activate</strong> passes its checks.</p>
 <div id="error" class="banner" hidden></div>
 <div class="panel">
-  <div class="actions" style="margin: 0 0 12px"><a class="button" href="/config/new">New server</a></div>
+  <div class="actions" style="margin: 0 0 12px"><a class="button" href="{{ prefix }}/config/new">New server</a></div>
   <div class="scroll">
   <table>
     <tr><th>Server</th><th>Status</th><th>Instances</th><th>Repositories</th><th></th></tr>
@@ -20,8 +20,8 @@ A new or cloned server is a <strong>draft</strong>: it goes live only when <stro
       <td>
         <div class="actions" style="margin: 0">
           <button type="button" class="{{ 'danger' if not server.active }}" data-test="{{ server.name }}">{{ "Test" if server.active else "Test & activate" }}</button>
-          <a class="button" href="/config/{{ server.name }}/edit">Edit</a>
-          <a class="button" href="/config/{{ server.name }}/clone">Clone</a>
+          <a class="button" href="{{ prefix }}/config/{{ server.name }}/edit">Edit</a>
+          <a class="button" href="{{ prefix }}/config/{{ server.name }}/clone">Clone</a>
           {% if server.active %}<button type="button" data-deactivate="{{ server.name }}" {% if busy[server.name] %}disabled title="A job is running"{% endif %}>Set to draft</button>{% endif %}
           <button class="danger" data-name="{{ server.name }}" {% if busy[server.name] %}disabled title="A job is running"{% endif %}>Delete</button>
         </div>
@@ -47,21 +47,21 @@ for (const button of document.querySelectorAll("button[data-name]")) {
   button.addEventListener("click", async () => {
     const name = button.dataset.name;
     if (!confirm("Delete the configuration of server " + name + "? Databases and files are not touched.")) return;
-    if (await post("/api/servers/delete", {name})) location.reload();
+    if (await post("{{ prefix }}/api/servers/delete", {name})) location.reload();
   });
 }
 for (const button of document.querySelectorAll("button[data-deactivate]")) {
   button.addEventListener("click", async () => {
     const name = button.dataset.deactivate;
     if (!confirm("Take server " + name + " offline (draft)? Its auto update stops and no action can run on it.")) return;
-    if (await post(`/api/servers/${encodeURIComponent(name)}/deactivate`)) location.reload();
+    if (await post(`{{ prefix }}/api/servers/${encodeURIComponent(name)}/deactivate`)) location.reload();
   });
 }
 for (const button of document.querySelectorAll("button[data-test]")) {
   button.addEventListener("click", async () => {
     const name = button.dataset.test, label = button.textContent;
     button.disabled = true; button.textContent = "Checking…";
-    const data = await post(`/api/servers/${encodeURIComponent(name)}/test`);
+    const data = await post(`{{ prefix }}/api/servers/${encodeURIComponent(name)}/test`);
     button.disabled = false; button.textContent = label;
     if (!data) return;
     const summary = data.ok

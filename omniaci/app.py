@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import importlib.metadata
 import importlib.util
 import os
 import re
@@ -19,13 +20,17 @@ from fastapi.templating import Jinja2Templates
 
 from . import checks, ops
 from .odooconf import read_odoo_config
-from .auth import Authenticator
+from .auth import ROLES as ACCESS_ROLES
+from .auth import Authenticator, Principal, hash_password, hash_token, new_token, verify_password
 from .config import (
+    Access,
     ConfigError,
     Instance,
+    LinkAccess,
     Settings,
     load_settings,
     parse_servers,
+    save_access,
     save_servers,
     filter_servers,
     server_to_dict,
@@ -35,7 +40,21 @@ from .logtail import read_since
 from .metrics import Sampler
 from .scheduler import AutoUpdater
 
-_TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
+def _page_context(request: Request) -> dict:
+    """In every template: prefix, the path the pages are served under (a
+    linked instance's, empty otherwise), and what the caller may do."""
+    user = getattr(request.state, "user", None)
+    return {
+        "prefix": getattr(request.state, "prefix", ""),
+        "can_act": bool(user and user.can("developer")),
+        "is_admin": bool(user and user.can("admin")),
+        # a user who logged in with a password (not a token or a link)
+        "account": user.name if user and user.kind == "user" else None,
+    }
+
+
+_TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"),
+                             context_processors=[_page_context])
 # The OmniaSolutions "O" (Client2019 Setup/dist/images/omnia.ico, 355x280,
 # centred on a transparent square); served without login, like any favicon.
 _STATIC = Path(__file__).parent / "static"
@@ -43,6 +62,22 @@ _BACKUP_NAME = re.compile(r"[A-Za-z0-9._-]+\.zip")
 _ICONS = {"/favicon.ico": ("favicon.ico", "image/x-icon"),
           "/icon-180.png": ("icon-180.png", "image/png")}
 _basic = HTTPBasic(realm="OmniaCI", auto_error=False)
+# what a linked instance sends: the path it serves our pages under, and the
+# name of its user acting through the link
+_PREFIX_HEADER = "x-omniaci-prefix"
+_ON_BEHALF_HEADER = "x-omniaci-user"
+_PREFIX = re.compile(r"(/[A-Za-z0-9._~-]+)+")
+_ON_BEHALF = re.compile(r"[A-Za-z0-9._@-]{1,64}")
+# users, links and MCP tokens created from the web interface
+_ACCESS_NAME = re.compile(r"[A-Za-z0-9._@-]{1,64}")
+_MIN_PASSWORD = 8
+
+
+def _version() -> str:
+    try:
+        return importlib.metadata.version("omniaci")
+    except importlib.metadata.PackageNotFoundError:
+        return "unknown"
 
 
 def _same_origin(request: Request) -> bool:
@@ -54,25 +89,36 @@ def _same_origin(request: Request) -> bool:
 
 
 def create_app(settings: Settings) -> FastAPI:
-    authenticator = Authenticator(settings.users, settings.tokens)
+    def link_hashes() -> dict[str, str]:
+        return {name: link.token for name, link in settings.links.items()}
+
+    authenticator = Authenticator(settings.users, settings.tokens, link_hashes())
     jobs = JobManager(settings.jobs_dir)
     updater = AutoUpdater(settings, jobs)
     sampler = Sampler(settings)
 
-    def current_user(
-        request: Request, credentials: Optional[HTTPBasicCredentials] = Depends(_basic)
-    ) -> str:
+    def identify(request: Request, credentials: Optional[HTTPBasicCredentials]) -> Principal:
         scheme, _, token = request.headers.get("authorization", "").partition(" ")
         if scheme.lower() == "bearer":
-            # an MCP client's token: it may read (and download backups);
-            # its actions go through the MCP tools only
-            name = authenticator.token_name(token.strip())
+            token = token.strip()
+            name = authenticator.token_name(token)
+            if name is not None:
+                # an MCP client's token: it may read (and download backups);
+                # its actions go through the MCP tools only
+                if request.method not in ("GET", "HEAD"):
+                    raise HTTPException(status.HTTP_403_FORBIDDEN, "A token may only read")
+                return Principal(name, "admin", "token")
+            name = authenticator.link_name(token)
             if name is None:
                 raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid token",
                                     headers={"WWW-Authenticate": "Bearer"})
-            if request.method not in ("GET", "HEAD"):
-                raise HTTPException(status.HTTP_403_FORBIDDEN, "A token may only read")
-            return f"token {name}"
+            # a linked instance: no browser sends its token by itself, so no
+            # cross-site check; it serves our pages under its own prefix
+            prefix = request.headers.get(_PREFIX_HEADER, "")
+            request.state.prefix = prefix if _PREFIX.fullmatch(prefix) else ""
+            on_behalf = request.headers.get(_ON_BEHALF_HEADER, "")
+            return Principal(name, settings.links[name].role, "link",
+                             on_behalf if _ON_BEHALF.fullmatch(on_behalf) else "")
         if credentials is None or not authenticator.check(credentials.username, credentials.password):
             raise HTTPException(
                 status.HTTP_401_UNAUTHORIZED,
@@ -81,7 +127,24 @@ def create_app(settings: Settings) -> FastAPI:
             )
         if request.method not in ("GET", "HEAD") and not _same_origin(request):
             raise HTTPException(status.HTTP_403_FORBIDDEN, "Cross-site request refused")
-        return credentials.username
+        return Principal(credentials.username, settings.user_role(credentials.username))
+
+    def current_user(
+        request: Request, credentials: Optional[HTTPBasicCredentials] = Depends(_basic)
+    ) -> Principal:
+        user = identify(request, credentials)
+        request.state.user = user
+        return user
+
+    def needs(role: str):
+        """A dependency: the caller, refused unless its role reaches role."""
+        def check(user: Principal = Depends(current_user)) -> Principal:
+            if not user.can(role):
+                raise HTTPException(status.HTTP_403_FORBIDDEN, f"The {role} role is required")
+            return user
+        return check
+
+    developer, admin = needs("developer"), needs("admin")
 
     if importlib.util.find_spec("mcp") is None:
         # the mcp SDK needs Python 3.10: no /mcp without it
@@ -132,8 +195,11 @@ def create_app(settings: Settings) -> FastAPI:
             raise HTTPException(status.HTTP_404_NOT_FOUND, f"No instance {server}/{role}")
         return instance
 
-    def started(job) -> RedirectResponse:
-        return RedirectResponse(f"/jobs/{job.id}", status.HTTP_303_SEE_OTHER)
+    def started(request: Request, job, query: str = "") -> RedirectResponse:
+        return RedirectResponse(f"{prefix_of(request)}/jobs/{job.id}{query}", status.HTTP_303_SEE_OTHER)
+
+    def prefix_of(request: Request) -> str:
+        return getattr(request.state, "prefix", "")
 
     def active_server(name: str):
         srv = settings.servers.get(name)
@@ -188,6 +254,30 @@ def create_app(settings: Settings) -> FastAPI:
             },
         )
 
+    @app.get("/api/info")
+    async def info(user: Principal = Depends(current_user)):
+        """What a linking instance checks: this version and the caller's role."""
+        return {"app": "OmniaCI", "version": _version(), "caller": str(user), "role": user.role}
+
+    @app.get("/api/servers")
+    async def server_list():
+        """The live servers, with what the Servers page shows and filters on."""
+        return [
+            {
+                "name": srv.name,
+                "instances": {
+                    role: {
+                        "database": inst.database,
+                        "service": inst.restart.service,
+                        "repositories": [{"name": r.name, "branch": r.branch} for r in inst.repositories],
+                        "busy": jobs.is_busy(inst.key),
+                    }
+                    for role, inst in srv.instances.items()
+                },
+            }
+            for srv in settings.active_servers()
+        ]
+
     @app.get("/api/metrics")
     async def metrics(since: int = 0, server: Optional[str] = None):
         """{cores, interval, instances: {key: {source, points}}}."""
@@ -201,9 +291,10 @@ def create_app(settings: Settings) -> FastAPI:
         return {"cores": sampler.cores, "interval": 5, "instances": data}
 
     @app.post("/servers/{server}/{role}/pull")
-    async def action_pull(server: str, role: str, user: str = Depends(current_user)):
+    async def action_pull(request: Request, server: str, role: str, user: Principal = Depends(developer)):
         instance = get_instance(server, role)
         return started(
+            request,
             jobs.submit(
                 f"Git pull {instance.key}",
                 [instance.key],
@@ -213,9 +304,10 @@ def create_app(settings: Settings) -> FastAPI:
         )
 
     @app.post("/servers/{server}/{role}/pull-restart")
-    async def action_pull_restart(server: str, role: str, user: str = Depends(current_user)):
+    async def action_pull_restart(request: Request, server: str, role: str, user: Principal = Depends(developer)):
         instance = get_instance(server, role)
         return started(
+            request,
             jobs.submit(
                 f"Git pull and restart {instance.key}",
                 [instance.key],
@@ -235,7 +327,7 @@ def create_app(settings: Settings) -> FastAPI:
 
     @app.post("/api/servers/{server}/{role}/update")
     async def action_update(
-        server: str, role: str, payload: dict = Body(...), user: str = Depends(current_user)
+        server: str, role: str, payload: dict = Body(...), user: Principal = Depends(developer)
     ):
         instance = get_instance(server, role)
         mode = payload.get("mode")
@@ -268,9 +360,10 @@ def create_app(settings: Settings) -> FastAPI:
         return {"job": job.id}
 
     @app.post("/servers/{server}/{role}/restart")
-    async def action_restart(server: str, role: str, user: str = Depends(current_user)):
+    async def action_restart(request: Request, server: str, role: str, user: Principal = Depends(developer)):
         instance = get_instance(server, role)
         return started(
+            request,
             jobs.submit(
                 f"Restart {instance.key}",
                 [instance.key],
@@ -280,11 +373,12 @@ def create_app(settings: Settings) -> FastAPI:
         )
 
     @app.post("/servers/{server}/{role}/stop")
-    async def action_stop(server: str, role: str, user: str = Depends(current_user)):
+    async def action_stop(request: Request, server: str, role: str, user: Principal = Depends(developer)):
         instance = get_instance(server, role)
         if instance.restart.type != "process":
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Only an Odoo started by OmniaCI can be stopped")
         return started(
+            request,
             jobs.submit(
                 f"Stop {instance.key}",
                 [instance.key],
@@ -295,7 +389,8 @@ def create_app(settings: Settings) -> FastAPI:
 
     @app.post("/servers/{server}/{role}/backup")
     async def action_backup(
-        server: str, role: str, download: bool = False, user: str = Depends(current_user)
+        request: Request, server: str, role: str, download: bool = False,
+        user: Principal = Depends(developer),
     ):
         instance = get_instance(server, role)
 
@@ -314,15 +409,13 @@ def create_app(settings: Settings) -> FastAPI:
             action,
         )
         # the job page starts the download when the backup is ready
-        return RedirectResponse(
-            f"/jobs/{job.id}" + ("?download=1" if download else ""), status.HTTP_303_SEE_OTHER
-        )
+        return started(request, job, "?download=1" if download else "")
 
     def backup_folder(instance: Instance) -> Path:
         return settings.backup_dir / instance.server / instance.role
 
     @app.get("/api/servers/{server}/{role}/backups")
-    async def backup_list(server: str, role: str):
+    async def backup_list(request: Request, server: str, role: str):
         instance = get_instance(server, role)
         folder = backup_folder(instance)
         files = sorted(folder.glob("*.zip"), key=lambda p: p.stat().st_mtime, reverse=True) \
@@ -332,12 +425,12 @@ def create_app(settings: Settings) -> FastAPI:
                 "file": p.name,
                 "size": p.stat().st_size,
                 "time": int(p.stat().st_mtime),
-                "download": f"/backups/{server}/{role}/{p.name}",
+                "download": f"{prefix_of(request)}/backups/{server}/{role}/{p.name}",
             }
             for p in files
         ]
 
-    @app.get("/backups/{server}/{role}/{name}")
+    @app.get("/backups/{server}/{role}/{name}", dependencies=[Depends(developer)])
     async def backup_download(server: str, role: str, name: str):
         instance = get_instance(server, role)
         folder = backup_folder(instance).resolve()
@@ -348,13 +441,14 @@ def create_app(settings: Settings) -> FastAPI:
         return FileResponse(path, media_type="application/zip", filename=name)
 
     @app.post("/servers/{server}/merge")
-    async def action_merge(server: str, user: str = Depends(current_user)):
+    async def action_merge(request: Request, server: str, user: Principal = Depends(admin)):
         srv = settings.servers.get(server)
         if srv is None or not srv.active or srv.production is None or srv.test is None:
             raise HTTPException(
                 status.HTTP_404_NOT_FOUND, f"No server {server} with production and test"
             )
         return started(
+            request,
             jobs.submit(
                 f"Merge test to production {server}",
                 [srv.production.key, srv.test.key],
@@ -439,7 +533,7 @@ def create_app(settings: Settings) -> FastAPI:
             raise HTTPException(status.HTTP_404_NOT_FOUND, f"No server {name}")
         return srv
 
-    @app.get("/config")
+    @app.get("/config", dependencies=[Depends(admin)])
     async def config_page(request: Request):
         return _TEMPLATES.TemplateResponse(
             request,
@@ -451,16 +545,16 @@ def create_app(settings: Settings) -> FastAPI:
             },
         )
 
-    @app.get("/config/new")
+    @app.get("/config/new", dependencies=[Depends(admin)])
     async def config_new(request: Request):
         return server_form(request, "New server", None, "", {})
 
-    @app.get("/config/{name}/edit")
+    @app.get("/config/{name}/edit", dependencies=[Depends(admin)])
     async def config_edit(request: Request, name: str):
         srv = configured(name)
         return server_form(request, f"Edit {name}", name, name, server_to_dict(srv))
 
-    @app.get("/config/{name}/clone")
+    @app.get("/config/{name}/clone", dependencies=[Depends(admin)])
     async def config_clone(request: Request, name: str):
         srv = configured(name)
         new_name = f"{name}_copy"
@@ -471,7 +565,7 @@ def create_app(settings: Settings) -> FastAPI:
     def refuse(message: str, code: int = status.HTTP_400_BAD_REQUEST):
         return JSONResponse({"error": message}, status_code=code)
 
-    @app.post("/api/odoo-config")
+    @app.post("/api/odoo-config", dependencies=[Depends(admin)])
     async def odoo_config_read(payload: dict = Body(...)):
         """The database, log file and repositories an Odoo config gives."""
         path = str(payload.get("path") or "").strip()
@@ -482,7 +576,7 @@ def create_app(settings: Settings) -> FastAPI:
         except ConfigError as exc:
             return refuse(str(exc))
 
-    @app.post("/api/servers/save")
+    @app.post("/api/servers/save", dependencies=[Depends(admin)])
     async def config_save(payload: dict = Body(...)):
         original = payload.get("original") or None
         name = str(payload.get("name") or "").strip()
@@ -540,7 +634,7 @@ def create_app(settings: Settings) -> FastAPI:
         await updater.reload()
         return None
 
-    @app.post("/api/servers/{name}/test")
+    @app.post("/api/servers/{name}/test", dependencies=[Depends(admin)])
     async def config_test(name: str):
         """Run the checks; a draft that passes them becomes active."""
         async with config_lock:
@@ -557,7 +651,7 @@ def create_app(settings: Settings) -> FastAPI:
                     return error
         return {"ok": ok, "status": srv.status, "checks": [c.to_dict() for c in report]}
 
-    @app.post("/api/servers/{name}/deactivate")
+    @app.post("/api/servers/{name}/deactivate", dependencies=[Depends(admin)])
     async def config_deactivate(name: str):
         async with config_lock:
             srv = settings.servers.get(name)
@@ -572,7 +666,7 @@ def create_app(settings: Settings) -> FastAPI:
                 return error
         return {"ok": True, "status": "draft"}
 
-    @app.post("/api/servers/delete")
+    @app.post("/api/servers/delete", dependencies=[Depends(admin)])
     async def config_delete(payload: dict = Body(...)):
         name = str(payload.get("name") or "")
         async with config_lock:
@@ -585,6 +679,172 @@ def create_app(settings: Settings) -> FastAPI:
             if error:
                 return error
         return {"ok": True}
+
+    # --- users, links and MCP tokens ------------------------------------
+
+    access_lock = asyncio.Lock()
+
+    def web_copy() -> Access:
+        web = settings.web
+        return Access(dict(web.users), dict(web.roles), dict(web.tokens), dict(web.links))
+
+    async def store_access(web: Access):
+        """Write the users file and make it current; a response on error."""
+        try:
+            await asyncio.to_thread(save_access, settings.users_file, web)
+        except OSError as exc:
+            return refuse(f"Cannot write {settings.users_file}: {exc}", 500)
+        settings.set_web_access(web)
+        authenticator.update(settings.users, settings.tokens, link_hashes())
+        return None
+
+    def other_admins(name: str) -> int:
+        return sum(1 for n in settings.users if n != name and settings.user_role(n) == "admin")
+
+    def check_name(kind: str, name: str, fixed: dict, current: dict, new: bool):
+        """None when name may be created (new) or edited, a response otherwise."""
+        if not _ACCESS_NAME.fullmatch(name):
+            return refuse("A name is 1-64 letters, digits or . _ @ -")
+        if name in fixed:
+            return refuse(f"{kind} {name} is set in the main configuration: change it there")
+        if new and name in current:
+            return refuse(f"A {kind.lower()} named {name} already exists")
+        if not new and name not in current:
+            return refuse(f"No {kind.lower()} {name}", status.HTTP_404_NOT_FOUND)
+        return None
+
+    def check_role(role: str):
+        return None if role in ACCESS_ROLES else refuse(f"The role must be one of {', '.join(ACCESS_ROLES)}")
+
+    @app.get("/users", dependencies=[Depends(admin)])
+    async def users_page(request: Request):
+        fixed = settings.fixed
+        return _TEMPLATES.TemplateResponse(
+            request,
+            "users.html",
+            {
+                "users": [{"name": n, "role": settings.user_role(n), "fixed": n in fixed.users}
+                          for n in sorted(settings.users)],
+                "links": [{"name": n, "role": link.role, "fixed": n in fixed.links}
+                          for n, link in sorted(settings.links.items())],
+                "tokens": [{"name": n, "fixed": n in fixed.tokens} for n in sorted(settings.tokens)],
+                "users_file": settings.users_file,
+                "roles": ACCESS_ROLES,
+            },
+        )
+
+    @app.post("/api/access/users/save")
+    async def user_save(payload: dict = Body(...), me: Principal = Depends(admin)):
+        """Create a user (new: true, with a password) or change its role and,
+        when given, its password."""
+        name, role = str(payload.get("name") or "").strip(), str(payload.get("role") or "")
+        password, new = str(payload.get("password") or ""), bool(payload.get("new"))
+        async with access_lock:
+            web = web_copy()
+            refused = check_name("User", name, settings.fixed.users, settings.users, new) or check_role(role)
+            if refused:
+                return refused
+            if (new or password) and len(password) < _MIN_PASSWORD:
+                return refuse(f"The password needs at least {_MIN_PASSWORD} characters")
+            if not new:
+                if me.kind == "user" and name == me.name and role != me.role:
+                    return refuse("You cannot change your own role")
+                if role != "admin" and settings.user_role(name) == "admin" and not other_admins(name):
+                    return refuse(f"{name} is the last admin")
+            if password:
+                web.users[name] = await asyncio.to_thread(hash_password, password)
+            web.roles[name] = role
+            return await store_access(web) or {"ok": True}
+
+    @app.post("/api/access/users/delete")
+    async def user_delete(payload: dict = Body(...), me: Principal = Depends(admin)):
+        name = str(payload.get("name") or "")
+        async with access_lock:
+            refused = check_name("User", name, settings.fixed.users, settings.users, False)
+            if refused:
+                return refused
+            if me.kind == "user" and name == me.name:
+                return refuse("You cannot delete yourself")
+            if settings.user_role(name) == "admin" and not other_admins(name):
+                return refuse(f"{name} is the last admin")
+            web = web_copy()
+            del web.users[name]
+            web.roles.pop(name, None)
+            return await store_access(web) or {"ok": True}
+
+    @app.post("/api/access/links/save", dependencies=[Depends(admin)])
+    async def link_save(payload: dict = Body(...)):
+        """Create a link (new: true; its token is in the answer, once) or
+        change its role."""
+        name, role = str(payload.get("name") or "").strip(), str(payload.get("role") or "")
+        new = bool(payload.get("new"))
+        async with access_lock:
+            refused = check_name("Link", name, settings.fixed.links, settings.links, new) or check_role(role)
+            if refused:
+                return refused
+            web = web_copy()
+            token = new_token() if new else None
+            web.links[name] = LinkAccess(hash_token(token) if token else web.links[name].token, role)
+            return await store_access(web) or {"ok": True, "token": token}
+
+    @app.post("/api/access/tokens/save", dependencies=[Depends(admin)])
+    async def token_create(payload: dict = Body(...)):
+        """Create an MCP token: it is in the answer, once."""
+        name = str(payload.get("name") or "").strip()
+        async with access_lock:
+            refused = check_name("Token", name, settings.fixed.tokens, settings.tokens, True)
+            if refused:
+                return refused
+            web = web_copy()
+            token = new_token()
+            web.tokens[name] = hash_token(token)
+            return await store_access(web) or {"ok": True, "token": token}
+
+    @app.post("/api/access/{kind}/delete", dependencies=[Depends(admin)])
+    async def access_delete(kind: str, payload: dict = Body(...)):
+        """Revoke a link or an MCP token."""
+        if kind not in ("links", "tokens"):
+            raise HTTPException(status.HTTP_404_NOT_FOUND, f"No {kind}")
+        name = str(payload.get("name") or "")
+        label = "Link" if kind == "links" else "Token"
+        async with access_lock:
+            fixed, current = getattr(settings.fixed, kind), getattr(settings, kind)
+            refused = check_name(label, name, fixed, current, False)
+            if refused:
+                return refused
+            web = web_copy()
+            del getattr(web, kind)[name]
+            return await store_access(web) or {"ok": True}
+
+    # --- the caller's own password --------------------------------------
+
+    def password_user(me: Principal) -> Principal:
+        if me.kind != "user":
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Only a user who logs in has an account")
+        return me
+
+    @app.get("/account")
+    async def account_page(request: Request, me: Principal = Depends(current_user)):
+        password_user(me)
+        return _TEMPLATES.TemplateResponse(
+            request, "account.html",
+            {"name": me.name, "role": me.role, "fixed": me.name in settings.fixed.users},
+        )
+
+    @app.post("/api/account/password")
+    async def account_password(payload: dict = Body(...), me: Principal = Depends(current_user)):
+        password_user(me)
+        current, password = str(payload.get("current") or ""), str(payload.get("password") or "")
+        async with access_lock:
+            if me.name in settings.fixed.users:
+                return refuse("Your user is set in the main configuration: change its password there")
+            if not await asyncio.to_thread(verify_password, current, settings.users.get(me.name, "")):
+                return refuse("The current password is wrong")
+            if len(password) < _MIN_PASSWORD:
+                return refuse(f"The password needs at least {_MIN_PASSWORD} characters")
+            web = web_copy()
+            web.users[me.name] = await asyncio.to_thread(hash_password, password)
+            return await store_access(web) or {"ok": True}
 
     return app
 

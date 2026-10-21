@@ -9,6 +9,7 @@ from omniaci.config import (
     load_servers,
     load_settings,
     parse_servers,
+    parse_auth,
     parse_settings,
     save_servers,
 )
@@ -123,3 +124,46 @@ def test_incomplete_draft_kept_active_refused(tmp_path):
     path = tmp_path / "servers.yaml"
     save_servers(path, {"s": draft})
     assert load_servers(path) == {"s": draft}
+
+
+def test_auth_roles_and_links():
+    access = parse_auth({
+        "users": {"old": "pbkdf2_sha256$1$aa$bb", "dev": {"password": "h", "role": "developer"}},
+        "links": {"omnia": {"token": "sha256$" + "0" * 64, "role": "user"}},
+    })
+    assert access.users == {"old": "pbkdf2_sha256$1$aa$bb", "dev": "h"}
+    # a user in the format before roles is an admin
+    assert access.roles == {"old": "admin", "dev": "developer"} and access.tokens == {}
+    link = access.links["omnia"]
+    assert link.role == "user" and link.token == "sha256$" + "0" * 64
+
+
+@pytest.mark.parametrize("auth, message", [
+    ({"users": {"x": {"password": "h", "role": "boss"}}}, "auth.users.x: role must be one of"),
+    ({"users": {"x": {"role": "user"}}}, "auth.users.x: password hash missing"),
+    ({"users": {}}, "auth.users: at least one user is required"),
+    ({"users": {"x": "h"}, "links": {"c": {"token": "plain", "role": "user"}}}, "auth.links.c: token is not"),
+    ({"users": {"x": "h"}, "links": {"c": {"token": "sha256$" + "0" * 64}}}, "auth.links.c: role must be"),
+])
+def test_auth_errors(auth, message):
+    with pytest.raises(ConfigError, match=message):
+        parse_auth(auth)
+
+
+def test_users_file_round_trip_and_main_config_wins(tmp_path):
+    from omniaci.config import Access, LinkAccess, load_access, save_access
+
+    path = tmp_path / "users.yaml"
+    assert load_access(path) == Access()
+    web = Access({"anna": "h1", "admin": "web-hash"}, {"anna": "developer", "admin": "user"},
+                 {"laptop": "sha256$" + "1" * 64}, {"partner": LinkAccess("sha256$" + "2" * 64, "user")})
+    save_access(path, web)
+    assert load_access(path) == web and path.stat().st_mode & 0o777 == 0o600
+    main = {"auth": {"users": {"admin": "main-hash"}}, "backup_dir": "/b", "jobs_dir": str(tmp_path / "jobs"),
+            "servers_file": str(tmp_path / "servers.yaml")}
+    settings = parse_settings(main)
+    # the users file is next to the servers file; the main config wins a clash
+    assert settings.users_file == path
+    assert settings.users == {"anna": "h1", "admin": "main-hash"}
+    assert settings.user_role("admin") == "admin" and settings.user_role("anna") == "developer"
+    assert settings.tokens == {"laptop": "sha256$" + "1" * 64} and settings.links["partner"].role == "user"

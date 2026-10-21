@@ -1,12 +1,12 @@
 {% extends "base.html" %}
 {% block content %}
 <h1>Servers</h1>
-{% if drafts %}<p class="muted">{{ drafts | length }} draft server{{ "s" if drafts | length > 1 }} not live yet: see <a href="/config">Configuration</a>.</p>{% endif %}
+{% if drafts %}<p class="muted">{{ drafts | length }} draft server{{ "s" if drafts | length > 1 }} not live yet: see {% if is_admin %}<a href="{{ prefix }}/config">Configuration</a>{% else %}Configuration{% endif %}.</p>{% endif %}
 {% if total > 1 or q %}
-<form class="actions job-filter" method="get" action="/" style="margin: 0 0 12px">
+<form class="actions job-filter" method="get" action="{{ prefix }}/" style="margin: 0 0 12px">
   <input type="search" name="q" value="{{ q }}" placeholder="Search server, database, repository, branch…" aria-label="Search servers">
   <button>Search</button>
-  {% if q %}<a class="button" href="/">Clear</a>{% endif %}
+  {% if q %}<a class="button" href="{{ prefix }}/">Clear</a>{% endif %}
 </form>
 {% if q %}<p class="muted">{{ servers | length }} of {{ total }} server{{ "" if total == 1 else "s" }}.</p>{% endif %}
 {% endif %}
@@ -16,7 +16,7 @@
     <tr><th>Server</th><th>CPU, last 15 minutes</th><th></th></tr>
     {% for server in servers %}
     <tr>
-      <td><a href="/servers/{{ server.name }}"><strong>{{ server.name }}</strong></a>
+      <td><a href="{{ prefix }}/servers/{{ server.name }}"><strong>{{ server.name }}</strong></a>
         {% for role, inst in server.instances.items() %}{% if busy[inst.key] %}<br><span class="status running">job running on {{ role }}</span>{% endif %}{% endfor %}</td>
       <td class="sparks">
         {% for role in ("production", "test") %}{% if role in server.instances %}
@@ -29,15 +29,15 @@
       </td>
       <td>
         <div class="actions" style="margin: 0">
-          {% if server.test %}<a class="button" href="/servers/{{ server.name }}?view=test">Test</a>{% endif %}
-          {% if server.production %}<a class="button" href="/servers/{{ server.name }}?view=production">Production</a>{% endif %}
-          {% if server.test and server.production %}<a class="button" href="/servers/{{ server.name }}?view=both">Both</a>{% endif %}
+          {% if server.test %}<a class="button" href="{{ prefix }}/servers/{{ server.name }}?view=test">Test</a>{% endif %}
+          {% if server.production %}<a class="button" href="{{ prefix }}/servers/{{ server.name }}?view=production">Production</a>{% endif %}
+          {% if server.test and server.production %}<a class="button" href="{{ prefix }}/servers/{{ server.name }}?view=both">Both</a>{% endif %}
         </div>
       </td>
     </tr>
     {% else %}
     {% if q %}<tr><td colspan="3" class="muted">No servers match.</td></tr>{% else %}
-    <tr><td colspan="3" class="muted">No live servers. Add one in <a href="/config">Configuration</a>, then use Test &amp; activate.</td></tr>{% endif %}
+    <tr><td colspan="3" class="muted">No live servers.{% if is_admin %} Add one in <a href="{{ prefix }}/config">Configuration</a>, then use Test &amp; activate.{% endif %}</td></tr>{% endif %}
     {% endfor %}
   </table>
   </div>
@@ -50,7 +50,7 @@
   const WINDOW = 15 * 60;
   async function refresh() {
     try {
-      const resp = await fetch("/api/metrics?since=" + (Math.floor(Date.now() / 1000) - WINDOW));
+      const resp = await fetch("{{ prefix }}/api/metrics?since=" + (Math.floor(Date.now() / 1000) - WINDOW));
       const data = await resp.json();
       for (const row of document.querySelectorAll(".spark-row")) {
         const series = (data.instances[row.dataset.key] || {points: []}).points;

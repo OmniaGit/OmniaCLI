@@ -122,10 +122,16 @@ once per database, when you know the modules are up to date:
 
 ## Configure
 
-The configuration has two files:
+The configuration has three files:
 
-- the **main config** (`omniaci.yaml`): users, `backup_dir`, `jobs_dir` and
-  `servers_file`. It is edited by hand and the web interface never writes it.
+- the **main config** (`omniaci.yaml`): the users set by hand, `backup_dir`,
+  `jobs_dir`, `servers_file` and `users_file`. It is edited by hand and the
+  web interface never writes it.
+- the **users file** (`users_file`, by default `users.yaml` next to the
+  servers file): the users, links and MCP tokens managed from the web
+  interface (**Users** page, admins only), written readable by its owner
+  only. Every change applies at once: a changed or deleted password stops
+  working at the next request.
 - the **servers file** (`servers_file`, see `servers.example.yaml`): the
   servers and their instances. It is edited from the web interface
   (**Configuration** page: new, edit, clone, delete), so the user running
@@ -143,6 +149,59 @@ omniaci check-config -c omniaci.yaml
 
 `check-config` checks that every path is readable, that the click-odoo
 scripts exist and that every repository is on its configured branch.
+
+### Roles
+
+Every user has a role:
+
+| Role | May |
+|---|---|
+| `user` | watch: servers, load, logs, jobs, the backup list |
+| `developer` | also act on the servers: pull, update, restart, stop, backup and the download of a backup |
+| `admin` | everything: also the configuration pages and the merge of test into production |
+
+```yaml
+auth:
+  users:
+    admin: "pbkdf2_sha256$..."                 # a bare hash: an admin
+    anna: {password: "pbkdf2_sha256$...", role: developer}
+    luca: {password: "pbkdf2_sha256$...", role: user}
+```
+
+The pages show only what the role allows, and the server refuses the rest
+(403).
+
+The **Users** page adds users, changes their role, sets a new password and
+deletes them. The users of the main config are shown there too but are
+changed only in the file: they are the way in that a mistake on the page
+cannot lock out. Nobody can change their own role or delete themselves, and
+the last admin cannot be demoted or deleted. Every user who logs in with a
+password changes it from their own page (their name, top right), unless it is
+set in the main config.
+
+### Linked instances
+
+Another OmniaCI instance (yours, at the customer's) can be let in to operate
+this one with a token of its own and a role. Create it on the **Users** page
+(the token is shown once), or by hand in `auth.links`:
+
+```bash
+omniaci new-link-token omniasolutions --role developer
+```
+
+```yaml
+auth:
+  links:
+    omniasolutions: {token: "sha256$...", role: developer}
+```
+
+The linking instance sends the token as `Authorization: Bearer <token>`.
+It may also send `X-OmniaCI-Prefix` (the path it serves these pages under,
+e.g. `/links/customer`: every link in the pages starts with it) and
+`X-OmniaCI-User` (its user acting through the link: the jobs record
+`manual: link omniasolutions (matteo)`). Both are honoured for link tokens
+only. `GET /api/info` answers with the version and the caller's role,
+`GET /api/servers` with the live servers.
 
 ### Permissions
 
@@ -207,7 +266,8 @@ provides: OmniaCI installed by hand on Python 3.9 runs without it.
 | `dev_setup` | what a client needs to rebuild an instance locally: remote URLs (without credentials), branches, commits, `addons_path` as repository folders, Odoo and Python versions, the Odoo config options without secrets nor server paths, and the backups to download |
 
 Access is by bearer token, never by the users' passwords. Create one per
-client and add its hash to `auth.tokens`:
+client on the **Users** page (the token is shown once), or by hand: add its
+hash to `auth.tokens`:
 
 ```bash
 omniaci new-token matteo-laptop

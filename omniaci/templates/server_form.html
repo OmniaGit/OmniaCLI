@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block title %}{{ title }} · OmniaCI{% endblock %}
-{% block crumbs %}{% from "_crumbs.html" import crumbs %}
+{% block crumbs %}{% from "_crumbs.html" import crumbs with context %}
 {{ crumbs([("Configuration", "/config"), (title, None)]) }}
 {% endblock %}
 {% block content %}
@@ -24,7 +24,7 @@
     <button type="submit" data-activate="1" class="danger">Save, test &amp; activate</button>
     <button type="submit" data-activate="0">Save as draft</button>
     {% endif %}
-    <a class="button" href="/config">Cancel</a>
+    <a class="button" href="{{ prefix }}/config">Cancel</a>
   </div>
   <p class="muted">{% if model.active %}This server is live: the change is saved only if every check passes, otherwise it stays as it is.{% else %}A draft is not live: no dashboard, no actions, no auto update.{% endif %}</p>
 </form>
@@ -139,7 +139,7 @@ async function reloadConf(box) {
   const notes = box.querySelector(".conf-notes"), button = box.querySelector(".reload-conf");
   const path = box.querySelector('[data-k="odoo_config"]').value.trim();
   button.disabled = true;
-  const resp = await fetch("/api/odoo-config", {
+  const resp = await fetch("{{ prefix }}/api/odoo-config", {
     method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({path}),
   }).catch(() => null);
   button.disabled = false;
@@ -198,19 +198,19 @@ document.getElementById("form").addEventListener("submit", async (ev) => {
     if (!typed && !data.repositories.length) continue;
     server[role] = data;
   }
-  const resp = await fetch("/api/servers/save", {
+  const resp = await fetch("{{ prefix }}/api/servers/save", {
     method: "POST", headers: {"Content-Type": "application/json"},
     body: JSON.stringify({original: MODEL.original, name: document.getElementById("name").value.trim(), server, activate}),
   });
   for (const b of document.querySelectorAll("button[type=submit]")) b.disabled = false;
   const data = await resp.json().catch(() => ({}));
-  if (resp.ok && !data.checks) { location.href = "/config"; return; }
+  if (resp.ok && !data.checks) { location.href = "{{ prefix }}/config"; return; }
   if (data.checks) {
     const ok = resp.ok && data.status === "active";
     const summary = ok ? "All checks passed: the server is live."
       : resp.ok ? "Saved as a draft: some checks failed, fix them and save again or use Test & activate."
       : data.error;
-    OmniaChecks.show("Checks", data.checks, summary, ok, () => { if (resp.ok) location.href = "/config"; });
+    OmniaChecks.show("Checks", data.checks, summary, ok, () => { if (resp.ok) location.href = "{{ prefix }}/config"; });
     return;
   }
   const box = document.getElementById("error");

@@ -12,7 +12,8 @@ case "$1" in
         # the configuration and the job history go; the backups stay
         rm -rf /var/lib/omniaci/jobs
         rm -f /var/lib/omniaci/servers.yaml /var/lib/omniaci/servers.yaml.bak \
-            /var/lib/omniaci/servers.yaml.tmp
+            /var/lib/omniaci/servers.yaml.tmp \
+            /var/lib/omniaci/users.yaml /var/lib/omniaci/users.yaml.tmp
         if [ -d /var/lib/omniaci/backups ] && [ -n "$(ls -A /var/lib/omniaci/backups)" ]; then
             echo "omniaci: the database backups are kept in /var/lib/omniaci/backups"
         else

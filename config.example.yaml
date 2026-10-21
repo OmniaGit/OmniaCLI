@@ -2,8 +2,13 @@
 
 auth:
   users:
-    # value from: omniaci hash-password
+    # value from: omniaci hash-password; a bare hash is an admin
     admin: "pbkdf2_sha256$600000$<salt>$<hash>"
+    # or with a role: user (watches), developer (acts on the servers), admin
+    # anna: {password: "pbkdf2_sha256$600000$<salt>$<hash>", role: developer}
+  # other OmniaCI instances let in to operate this one: omniaci new-link-token
+  # links:
+  #   omniasolutions: {token: "sha256$<hash>", role: developer}
 
 # backups go to <backup_dir>/<server>/<production|test>/<database>_<timestamp>.zip
 backup_dir: /var/backups/omniaci

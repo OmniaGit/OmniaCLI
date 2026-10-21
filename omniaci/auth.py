@@ -1,11 +1,17 @@
-"""HTTP Basic authentication with PBKDF2 password hashes, and bearer tokens
-(for MCP clients) stored as their SHA-256."""
+"""HTTP Basic authentication with PBKDF2 password hashes, bearer tokens (for
+MCP clients and for linked OmniaCI instances) stored as their SHA-256, and the
+roles that decide what each caller may do."""
 
 from __future__ import annotations
 
 import hashlib
 import hmac
 import secrets
+from dataclasses import dataclass
+
+# user: monitors only; developer: also acts on the servers (pull, update,
+# restart, backup and its download); admin: everything (configuration, merge)
+ROLES = ("user", "developer", "admin")
 
 ALGORITHM = "pbkdf2_sha256"
 ITERATIONS = 600_000
@@ -43,6 +49,28 @@ def hash_token(token: str) -> str:
     return f"{TOKEN_ALGORITHM}${hashlib.sha256(token.encode()).hexdigest()}"
 
 
+@dataclass(frozen=True)
+class Principal:
+    """Who makes a request: a user (Basic), an MCP token or a linked instance."""
+
+    name: str
+    role: str
+    kind: str = "user"
+    # a linked instance: its user who acts through the link (a label only)
+    on_behalf: str = ""
+
+    def can(self, role: str) -> bool:
+        return ROLES.index(self.role) >= ROLES.index(role)
+
+    def __str__(self) -> str:
+        """The name the jobs record as who started them."""
+        if self.kind == "token":
+            return f"token {self.name}"
+        if self.kind == "link":
+            return f"link {self.name}" + (f" ({self.on_behalf})" if self.on_behalf else "")
+        return self.name
+
+
 class Authenticator:
     """Check Basic credentials against the configured users.
 
@@ -51,12 +79,20 @@ class Authenticator:
     the process, keyed by a keyed hash of the password, never the password.
     """
 
-    def __init__(self, users: dict[str, str], tokens: dict[str, str] | None = None):
+    def __init__(self, users: dict[str, str], tokens: dict[str, str] | None = None,
+                 links: dict[str, str] | None = None):
         self.users = users
         self.tokens = tokens or {}
+        self.links = links or {}
         self._key = secrets.token_bytes(32)
         self._verified: dict[str, bytes] = {}
         self._dummy = hash_password(secrets.token_hex(8))
+
+    def update(self, users: dict[str, str], tokens: dict[str, str], links: dict[str, str]) -> None:
+        """New credentials: the passwords verified so far are checked again,
+        so a changed or deleted one stops working at once."""
+        self.users, self.tokens, self.links = users, tokens, links
+        self._verified = {}
 
     def _fingerprint(self, username: str, password: str) -> bytes:
         return hmac.new(self._key, f"{username}\0{password}".encode(), "sha256").digest()
@@ -77,11 +113,19 @@ class Authenticator:
         return False
 
     def token_name(self, token: str) -> str | None:
-        """The name of a configured token, None when it is not one."""
-        encoded = hash_token(token)
-        found = None
-        for name, expected in self.tokens.items():
-            # every token compared, so the time does not tell which one matched
-            if secrets.compare_digest(encoded, expected):
-                found = name
-        return found
+        """The name of a configured MCP token, None when it is not one."""
+        return _match(token, self.tokens)
+
+    def link_name(self, token: str) -> str | None:
+        """The name of a configured link token, None when it is not one."""
+        return _match(token, self.links)
+
+
+def _match(token: str, hashes: dict[str, str]) -> str | None:
+    encoded = hash_token(token)
+    found = None
+    for name, expected in hashes.items():
+        # every token compared, so the time does not tell which one matched
+        if secrets.compare_digest(encoded, expected):
+            found = name
+    return found

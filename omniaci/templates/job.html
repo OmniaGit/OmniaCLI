@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block title %}{{ job.title }} · OmniaCI{% endblock %}
-{% block crumbs %}{% from "_crumbs.html" import crumbs %}
+{% block crumbs %}{% from "_crumbs.html" import crumbs with context %}
 {% set ns = namespace(servers=[]) %}
 {% for key in job.instances %}{% set name = key.split("/")[0] %}{% if name not in ns.servers %}{% set ns.servers = ns.servers + [name] %}{% endif %}{% endfor %}
 {% if ns.servers | length == 1 %}
@@ -34,7 +34,7 @@
   async function poll() {
     let data;
     try {
-      const resp = await fetch("/api/jobs/{{ job.id }}?since=" + next);
+      const resp = await fetch("{{ prefix }}/api/jobs/{{ job.id }}?since=" + next);
       if (!resp.ok) throw new Error(resp.status);
       data = await resp.json();
     } catch (e) { setTimeout(poll, 5000); return; }
@@ -48,7 +48,7 @@
     st.textContent = data.status; st.className = "status " + data.status;
     document.getElementById("finished").textContent = data.finished || "";
     document.getElementById("error").textContent = data.error || "";
-    if (data.status === "success" && data.result && data.result.download) offerDownload(data.result);
+    if ({{ can_act | tojson }} && data.status === "success" && data.result && data.result.download) offerDownload(data.result);
     if (!["success", "failed", "interrupted"].includes(data.status)) setTimeout(poll, 1500);
   }
   // a backup's zip: always a link; started by itself when the job was
@@ -57,7 +57,7 @@
     const box = document.getElementById("download");
     if (!box.hidden) return;
     const a = document.createElement("a");
-    a.href = result.download; a.setAttribute("download", result.file);
+    a.href = {{ prefix | tojson }} + result.download; a.setAttribute("download", result.file);
     const b = result.size;
     const size = b >= 1073741824 ? (b / 1073741824).toFixed(2) + " GiB"
       : b >= 1048576 ? (b / 1048576).toFixed(1) + " MiB" : Math.max(1, Math.round(b / 1024)) + " KiB";

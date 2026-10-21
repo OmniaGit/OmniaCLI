@@ -77,6 +77,13 @@ curl "${API[@]}" localhost:8090/api/servers/save -d '{"original": null, "name": 
 [ "$(stat -c %U /var/lib/omniaci/servers.yaml)" = omniaci ] || fail "servers.yaml owner"
 grep -q "status: draft" /var/lib/omniaci/servers.yaml || fail "a new server is not a draft"
 
+step "a user created from the Users page, as user omniaci"
+curl "${API[@]}" localhost:8090/api/access/users/save \
+  -d '{"name": "anna", "role": "developer", "password": "anna-pass-1", "new": true}' | grep -q '"ok":true' \
+  || fail "user not saved"
+[ "$(stat -c '%U %a' /var/lib/omniaci/users.yaml)" = "omniaci 600" ] || fail "users.yaml owner or mode"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -u anna:anna-pass-1 localhost:8090/api/info)" = 200 ] || fail "new user login"
+
 step "Test & activate: the checks that can pass here"
 curl "${API[@]}" -X POST localhost:8090/api/servers/demo/test > /tmp/checks.json
 python3 - <<'PY' || fail "activation checks"
