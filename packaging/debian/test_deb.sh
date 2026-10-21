@@ -84,6 +84,17 @@ curl "${API[@]}" localhost:8090/api/access/users/save \
 [ "$(stat -c '%U %a' /var/lib/omniaci/users.yaml)" = "omniaci 600" ] || fail "users.yaml owner or mode"
 [ "$(curl -s -o /dev/null -w '%{http_code}' -u anna:anna-pass-1 localhost:8090/api/info)" = 200 ] || fail "new user login"
 
+step "a link to itself: token from the Users page, link from the Links page, pages through the proxy"
+LINK_TOKEN="$(curl "${API[@]}" localhost:8090/api/access/links/save -d '{"name": "self", "role": "developer", "new": true}' \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')"
+curl "${API[@]}" localhost:8090/api/links/save \
+  -d "{\"name\": \"me\", \"url\": \"http://127.0.0.1:8090\", \"token\": \"$LINK_TOKEN\", \"new\": true}" | grep -q '"ok":true' \
+  || fail "link not saved"
+[ "$(stat -c '%U %a' /var/lib/omniaci/links.yaml)" = "omniaci 600" ] || fail "links.yaml owner or mode"
+curl "${API[@]}" -X POST localhost:8090/api/links/me/test | grep -q '"role":"developer"' || fail "Test link"
+curl -s -u "admin:$PW" -H "Accept: text/html" localhost:8090/links/me/ | grep -q "Linked instance <strong>me</strong>" \
+  || fail "page through the link"
+
 step "Test & activate: the checks that can pass here"
 curl "${API[@]}" -X POST localhost:8090/api/servers/demo/test > /tmp/checks.json
 python3 - <<'PY' || fail "activation checks"
@@ -102,6 +113,8 @@ PY
 sed -i 's/status: draft/status: active/' /var/lib/omniaci/servers.yaml
 systemctl restart omniaci
 for i in $(seq 30); do curl -s -o /dev/null localhost:8090 && break; sleep 1; done
+# links.yaml read again at startup: the link lists this instance's server
+curl -s -u "admin:$PW" localhost:8090/ | grep -q "me › demo" || fail "linked server row"
 
 step "git pull + restart through the web service"
 git -C /srv/dev commit -q --allow-empty -m two && git -C /srv/dev push -q origin main

@@ -8,6 +8,7 @@ import re
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import yaml
 
@@ -131,20 +132,25 @@ class Server:
         return self.instances.get("test")
 
 
-def filter_servers(servers: list[Server], query: str = "") -> list[Server]:
-    """The servers containing every word of query (name, and of each instance
-    database, service, repository names and branches), case insensitive."""
-    words = query.lower().split()
-    if not words:
-        return servers
+def server_text(server: Server) -> str:
+    """What the Servers page filters on: the name, and of each instance the
+    database, service, repository names and branches."""
+    parts = [server.name]
+    for inst in server.instances.values():
+        parts += [inst.database, inst.restart.service]
+        parts += [f"{r.name} {r.branch}" for r in inst.repositories]
+    return " ".join(parts)
 
-    def text(server):
-        parts = [server.name]
-        for inst in server.instances.values():
-            parts += [inst.database, inst.restart.service]
-            parts += [f"{r.name} {r.branch}" for r in inst.repositories]
-        return " ".join(parts).lower()
-    return [s for s in servers if all(w in text(s) for w in words)]
+
+def matches(text: str, query: str) -> bool:
+    """True when text contains every word of query, case insensitive."""
+    text = text.lower()
+    return all(w in text for w in query.lower().split())
+
+
+def filter_servers(servers: list[Server], query: str = "") -> list[Server]:
+    """The servers whose server_text contains every word of query."""
+    return [s for s in servers if matches(server_text(s), query)]
 
 
 @dataclass
@@ -182,6 +188,9 @@ class Settings:
     # linked instances: {name: LinkAccess} (omniaci new-link-token)
     links: dict[str, LinkAccess] = field(default_factory=dict)
     users_file: Path | None = None
+    # the other OmniaCI instances this one operates (Links page)
+    links_file: Path | None = None
+    link_targets: dict[str, LinkTarget] = field(default_factory=dict)
     fixed: Access = field(default_factory=Access)
     web: Access = field(default_factory=Access)
 
@@ -466,6 +475,62 @@ def save_access(path: Path, access: Access) -> None:
     os.replace(tmp, path)
 
 
+@dataclass
+class LinkTarget:
+    name: str
+    url: str  # the other instance's base URL, https://… (http only through a tunnel)
+    token: str  # in clear: it is sent with every request
+    ca_file: str = ""  # a CA bundle for a certificate of the customer's own CA
+
+    def to_dict(self) -> dict:
+        data = {"url": self.url, "token": self.token}
+        if self.ca_file:
+            data["ca_file"] = self.ca_file
+        return data
+
+
+def parse_link(name: str, data: dict) -> LinkTarget:
+    if not SERVER_NAME.fullmatch(name):
+        raise ConfigError(f"links.{name}: a name is letters, digits and . _ - (it is part of URLs)")
+    url = str(data.get("url") or "").strip().rstrip("/")
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https") or not parts.hostname or parts.query or parts.fragment:
+        raise ConfigError(f"links.{name}: url must be http(s)://host[:port][/path]")
+    token = str(data.get("token") or "").strip()
+    if not token:
+        raise ConfigError(f"links.{name}: token missing (the other instance creates it on its Users page)")
+    ca_file = str(data.get("ca_file") or "").strip()
+    if ca_file and not Path(ca_file).is_file():
+        raise ConfigError(f"links.{name}: ca_file {ca_file} is not a file")
+    return LinkTarget(name, url, token, ca_file)
+
+
+def load_links(path: Path) -> dict[str, LinkTarget]:
+    """The links file; none yet is no links."""
+    if not path.exists():
+        return {}
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        raise ConfigError(f"cannot read {path}: {exc}") from exc
+    links = data.get("links") or {}
+    if not isinstance(links, dict):
+        raise ConfigError(f"{path}: links must be a mapping")
+    return {str(name): parse_link(str(name), value or {}) for name, value in links.items()}
+
+
+def save_links(path: Path, links: dict[str, LinkTarget]) -> None:
+    """Write the links file atomically, readable by its owner only: it holds the tokens."""
+    text = yaml.safe_dump({"links": {n: link.to_dict() for n, link in links.items()}},
+                          sort_keys=False, allow_unicode=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    os.replace(tmp, path)
+
+
 def parse_settings(data: dict, base_dir: Path = Path(".")) -> Settings:
     fixed = parse_auth(data.get("auth") or {})
     servers_file = Path(data.get("servers_file") or "servers.yaml")
@@ -475,6 +540,9 @@ def parse_settings(data: dict, base_dir: Path = Path(".")) -> Settings:
     users_file = Path(data.get("users_file") or servers_file.parent / "users.yaml")
     if not users_file.is_absolute():
         users_file = base_dir / users_file
+    links_file = Path(data.get("links_file") or servers_file.parent / "links.yaml")
+    if not links_file.is_absolute():
+        links_file = base_dir / links_file
     jobs_dir = Path(_require(data, "jobs_dir", "root"))
     settings = Settings(
         users={},
@@ -483,6 +551,8 @@ def parse_settings(data: dict, base_dir: Path = Path(".")) -> Settings:
         servers_file=servers_file,
         servers=load_servers(servers_file, logs_dir_of(jobs_dir)),
         users_file=users_file,
+        links_file=links_file,
+        link_targets=load_links(links_file),
         fixed=fixed,
     )
     settings.set_web_access(load_access(users_file))

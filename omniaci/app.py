@@ -13,10 +13,12 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import urlsplit
 
+import httpx
 from fastapi import Body, Depends, FastAPI, HTTPException, Request, status
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.templating import Jinja2Templates
+from starlette.background import BackgroundTask
 
 from . import checks, ops
 from .odooconf import read_odoo_config
@@ -29,18 +31,24 @@ from .config import (
     ConfigError,
     Instance,
     LinkAccess,
+    LinkTarget,
     Settings,
     load_settings,
+    matches,
+    parse_link,
     parse_servers,
     save_access,
+    save_links,
     save_servers,
-    filter_servers,
+    server_text,
     server_to_dict,
 )
 from .jobs import JobManager, filter_jobs
+from .links import LIST_TIMEOUT, LinkClients, describe_error, link_headers
 from .logtail import read_since
 from .metrics import Sampler
 from .scheduler import AutoUpdater
+
 
 def _page_context(request: Request) -> dict:
     """In every template: prefix, the path the pages are served under (a
@@ -68,11 +76,18 @@ _basic = HTTPBasic(realm="OmniaCI", auto_error=False)
 # name of its user acting through the link
 _PREFIX_HEADER = "x-omniaci-prefix"
 _ON_BEHALF_HEADER = "x-omniaci-user"
+# the role of that user there: a link acts with the lower of it and its own
+_ROLE_CAP_HEADER = "x-omniaci-role-cap"
 _PREFIX = re.compile(r"(/[A-Za-z0-9._~-]+)+")
 _ON_BEHALF = re.compile(r"[A-Za-z0-9._@-]{1,64}")
 # users, links and MCP tokens created from the web interface
 _ACCESS_NAME = re.compile(r"[A-Za-z0-9._@-]{1,64}")
 _MIN_PASSWORD = 8
+# what the proxy of a link passes on, each way (never the caller's credentials,
+# never the other instance's WWW-Authenticate: the browser would ask for them)
+_LINK_REQUEST_HEADERS = ("content-type", "accept", "accept-language")
+_LINK_RESPONSE_HEADERS = ("content-type", "content-disposition", "content-length",
+                          "content-encoding", "location", "cache-control")
 
 
 def _version() -> str:
@@ -90,7 +105,8 @@ def _same_origin(request: Request) -> bool:
     return urlsplit(source).netloc == request.headers.get("host")
 
 
-def create_app(settings: Settings) -> FastAPI:
+def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
+    """link_transport replaces the network to the linked instances (tests)."""
     def link_hashes() -> dict[str, str]:
         return {name: link.token for name, link in settings.links.items()}
 
@@ -98,6 +114,7 @@ def create_app(settings: Settings) -> FastAPI:
     jobs = JobManager(settings.jobs_dir)
     updater = AutoUpdater(settings, jobs)
     sampler = Sampler(settings)
+    link_clients = LinkClients(link_transport)
 
     def identify(request: Request, credentials: Optional[HTTPBasicCredentials]) -> Principal:
         scheme, _, token = request.headers.get("authorization", "").partition(" ")
@@ -119,8 +136,11 @@ def create_app(settings: Settings) -> FastAPI:
             prefix = request.headers.get(_PREFIX_HEADER, "")
             request.state.prefix = prefix if _PREFIX.fullmatch(prefix) else ""
             on_behalf = request.headers.get(_ON_BEHALF_HEADER, "")
-            return Principal(name, settings.links[name].role, "link",
-                             on_behalf if _ON_BEHALF.fullmatch(on_behalf) else "")
+            role = settings.links[name].role
+            cap = request.headers.get(_ROLE_CAP_HEADER, "")
+            if cap in ACCESS_ROLES and ACCESS_ROLES.index(cap) < ACCESS_ROLES.index(role):
+                role = cap
+            return Principal(name, role, "link", on_behalf if _ON_BEHALF.fullmatch(on_behalf) else "")
         if credentials is None or not authenticator.check(credentials.username, credentials.password):
             raise HTTPException(
                 status.HTTP_401_UNAUTHORIZED,
@@ -168,6 +188,7 @@ def create_app(settings: Settings) -> FastAPI:
             yield
         await sampler.stop()
         await updater.stop()
+        await link_clients.close()
 
     app = FastAPI(
         title="OmniaCI",
@@ -209,21 +230,65 @@ def create_app(settings: Settings) -> FastAPI:
             raise HTTPException(status.HTTP_404_NOT_FOUND, f"No active server {name}")
         return srv
 
+    async def remote_servers(me: Principal) -> list[dict]:
+        """The servers of every link, as Servers page rows: an error row for a
+        link that does not answer. Only for a user who logs in here."""
+        if me.kind != "user":
+            return []
+
+        async def one(link: LinkTarget) -> list[dict]:
+            try:
+                resp = await link_clients.client(link).get(
+                    "/api/servers", headers=link_headers(link, me.name, me.role), timeout=LIST_TIMEOUT)
+                if resp.status_code != 200:
+                    return [{"link": link.name, "error": f"answered {resp.status_code}"}]
+                found = resp.json()
+            except (httpx.HTTPError, ValueError) as exc:
+                return [{"link": link.name, "error": describe_error(exc)}]
+            rows = []
+            for srv in found:
+                instances = srv.get("instances") or {}
+                text = [link.name, srv["name"]]
+                for inst in instances.values():
+                    text += [inst.get("database", ""), inst.get("service", "")]
+                    text += [f"{r['name']} {r['branch']}" for r in inst.get("repositories", [])]
+                rows.append({
+                    "link": link.name, "name": srv["name"], "label": f"{link.name} › {srv['name']}",
+                    "base": f"/links/{link.name}",
+                    "roles": [r for r in ("production", "test") if r in instances],
+                    "busy": {r: bool(i.get("busy")) for r, i in instances.items()},
+                    "text": " ".join(text),
+                })
+            return rows
+
+        found = await asyncio.gather(*(one(link) for link in settings.link_targets.values()))
+        return [row for rows in found for row in rows]
+
     @app.get("/")
-    async def index(request: Request, q: str = ""):
-        """The live servers, filtered by text (name, database, service,
-        repositories and branches)."""
-        instances = settings.all_instances()
-        live = settings.active_servers()
+    async def index(request: Request, q: str = "", me: Principal = Depends(current_user)):
+        """The live servers, this instance's and its links', filtered by text
+        (link, name, database, service, repositories and branches)."""
+        rows = [
+            {
+                "link": "", "name": srv.name, "label": srv.name, "base": prefix_of(request),
+                "roles": [r for r in ("production", "test") if r in srv.instances],
+                "busy": {r: jobs.is_busy(i.key) for r, i in srv.instances.items()},
+                "text": server_text(srv),
+            }
+            for srv in settings.active_servers()
+        ]
+        remote = await remote_servers(me)
+        errors = [r for r in remote if "error" in r]
+        rows += [r for r in remote if "error" not in r]
         return _TEMPLATES.TemplateResponse(
             request,
             "index.html",
             {
-                "servers": filter_servers(live, q),
-                "total": len(live),
+                "rows": [r for r in rows if matches(r["text"], q)],
+                "link_errors": [e for e in errors if matches(e["link"], q)],
+                "total": len(rows),
                 "q": q,
                 "drafts": [s for s in settings.servers.values() if not s.active],
-                "busy": {i.key: jobs.is_busy(i.key) for i in instances},
                 "jobs": jobs.recent(10),
             },
         )
@@ -872,6 +937,111 @@ def create_app(settings: Settings) -> FastAPI:
             web = web_copy()
             del getattr(web, kind)[name]
             return await store_access(web) or {"ok": True}
+
+    # --- links to other OmniaCI instances -------------------------------
+
+    links_lock = asyncio.Lock()
+
+    def a_link(name: str) -> LinkTarget:
+        link = settings.link_targets.get(name)
+        if link is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, f"No link {name}")
+        return link
+
+    async def store_links(links: dict[str, LinkTarget]):
+        try:
+            await asyncio.to_thread(save_links, settings.links_file, links)
+        except OSError as exc:
+            return refuse(f"Cannot write {settings.links_file}: {exc}", 500)
+        settings.link_targets = links
+        return None
+
+    @app.get("/links", dependencies=[Depends(admin)])
+    async def links_page(request: Request):
+        return _TEMPLATES.TemplateResponse(
+            request, "links.html",
+            {"links": list(settings.link_targets.values()), "links_file": settings.links_file},
+        )
+
+    @app.post("/api/links/save", dependencies=[Depends(admin)])
+    async def link_target_save(payload: dict = Body(...)):
+        """Create a link (new: true) or change it; a blank token keeps the one saved."""
+        name, new = str(payload.get("name") or "").strip(), bool(payload.get("new"))
+        async with links_lock:
+            if new and name in settings.link_targets:
+                return refuse(f"A link named {name} already exists")
+            if not new and name not in settings.link_targets:
+                return refuse(f"No link {name}", status.HTTP_404_NOT_FOUND)
+            data = {k: payload.get(k) for k in ("url", "token", "ca_file")}
+            if not new and not str(data["token"] or "").strip():
+                data["token"] = settings.link_targets[name].token
+            try:
+                link = parse_link(name, data)
+            except ConfigError as exc:
+                return refuse(str(exc))
+            return await store_links({**settings.link_targets, name: link}) or {"ok": True}
+
+    @app.post("/api/links/delete", dependencies=[Depends(admin)])
+    async def link_target_delete(payload: dict = Body(...)):
+        name = str(payload.get("name") or "")
+        async with links_lock:
+            a_link(name)
+            links = {k: v for k, v in settings.link_targets.items() if k != name}
+            return await store_links(links) or {"ok": True}
+
+    @app.post("/api/links/{name}/test")
+    async def link_target_test(name: str, me: Principal = Depends(admin)):
+        """Ask the other instance who we are there: its version and our role."""
+        link = a_link(name)
+        try:
+            resp = await link_clients.client(link).get(
+                "/api/info", headers=link_headers(link, me.name, me.role), timeout=LIST_TIMEOUT)
+        except httpx.HTTPError as exc:
+            return {"ok": False, "error": describe_error(exc)}
+        if resp.status_code == 401:
+            return {"ok": False, "error": "the other instance refused the token"}
+        try:
+            info = resp.json() if resp.status_code == 200 else None
+        except ValueError:
+            info = None
+        if not info or info.get("app") != "OmniaCI":
+            return {"ok": False, "error": f"no OmniaCI with links there (HTTP {resp.status_code})"}
+        return {"ok": True, **info}
+
+    def link_failure(request: Request, link: LinkTarget, message: str):
+        """A link that cannot answer: JSON for the pages' scripts, a page otherwise."""
+        if "text/html" not in request.headers.get("accept", ""):
+            return JSONResponse({"error": f"link {link.name}: {message}"}, status_code=502)
+        return _TEMPLATES.TemplateResponse(
+            request, "link_error.html", {"link": link, "message": message}, status_code=502)
+
+    @app.get("/links/{name}")
+    async def link_root(name: str):
+        a_link(name)
+        return RedirectResponse(f"/links/{name}/", status.HTTP_307_TEMPORARY_REDIRECT)
+
+    @app.api_route("/links/{name}/{path:path}", methods=["GET", "HEAD", "POST"])
+    async def link_proxy(request: Request, name: str, path: str, me: Principal = Depends(current_user)):
+        """The other instance's page or API, as the link, with at most our role."""
+        if me.kind != "user":
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Only a user who logs in here may use a link")
+        link = a_link(name)
+        client = link_clients.client(link)
+        headers = {k: request.headers[k] for k in _LINK_REQUEST_HEADERS if k in request.headers}
+        headers.update(link_headers(link, me.name, me.role))
+        url = "/" + path + (f"?{request.url.query}" if request.url.query else "")
+        outgoing = client.build_request(request.method, url, headers=headers,
+                                        content=await request.body() or None)
+        try:
+            resp = await client.send(outgoing, stream=True)
+        except httpx.HTTPError as exc:
+            return link_failure(request, link, describe_error(exc))
+        if resp.status_code == 401:
+            await resp.aclose()
+            return link_failure(request, link, "the other instance refused the token: ask for a new one")
+        kept = {k: resp.headers[k] for k in _LINK_RESPONSE_HEADERS if k in resp.headers}
+        return StreamingResponse(resp.aiter_raw(), status_code=resp.status_code, headers=kept,
+                                 background=BackgroundTask(resp.aclose))
 
     # --- the caller's own password --------------------------------------
 

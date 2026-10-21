@@ -18,3 +18,7 @@ jobs_dir: /var/lib/omniaci/jobs
 # The servers are kept in their own file, edited from the web interface
 # (Configuration page). A relative path is relative to this file.
 servers_file: /var/lib/omniaci/servers.yaml
+# Edited from the web interface (Users and Links pages); by default next to
+# the servers file:
+# users_file: /var/lib/omniaci/users.yaml
+# links_file: /var/lib/omniaci/links.yaml

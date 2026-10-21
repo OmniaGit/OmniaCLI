@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% block title %}Links · OmniaCI{% endblock %}
+{% block crumbs %}{% from "_crumbs.html" import crumbs with context %}
+{{ crumbs([("Configuration", "/config"), ("Links", None)]) }}
+{% endblock %}
+{% block content %}
+<h1>Links</h1>
+<p class="muted">Other OmniaCI instances this one operates: their servers are listed on the Servers page and their pages open here, under <span class="mono">/links/&lt;name&gt;/</span>.
+The other instance creates the token on its <strong>Users</strong> page and decides its role; here each user acts there with at most their own role.
+Saved in <span class="mono">{{ links_file }}</span>, readable by its owner only: it holds the tokens.</p>
+<div id="error" class="banner" hidden></div>
+<div class="panel">
+  <div class="scroll">
+  <table>
+    <tr><th>Link</th><th>URL</th><th>Token</th><th>CA file</th><th></th></tr>
+    {% for link in links %}
+    <tr data-link="{{ link.name }}">
+      <td><strong><a href="/links/{{ link.name }}/">{{ link.name }}</a></strong></td>
+      <td><input type="text" class="url mono" value="{{ link.url }}" aria-label="URL of {{ link.name }}">
+        {% if link.url.startswith("http://") %}<br><span class="error">http: the token travels in clear, use it only through a VPN or an SSH tunnel</span>{% endif %}</td>
+      <td><input type="password" class="token" placeholder="unchanged" autocomplete="off" aria-label="New token of {{ link.name }}"></td>
+      <td><input type="text" class="ca mono" value="{{ link.ca_file }}" placeholder="system CAs" aria-label="CA file of {{ link.name }}"></td>
+      <td><div class="actions" style="margin: 0">
+        <button type="button" data-test>Test link</button>
+        <button type="button" data-save>Save</button>
+        <button type="button" class="danger" data-delete>Delete</button>
+      </div>
+      <span class="result muted"></span></td>
+    </tr>
+    {% else %}
+    <tr><td colspan="5" class="muted">No links yet.</td></tr>
+    {% endfor %}
+    <tr>
+      <td><input type="text" id="new-name" placeholder="customer" aria-label="New link name"></td>
+      <td><input type="text" id="new-url" class="mono" placeholder="https://omniaci.customer.example" aria-label="New link URL"></td>
+      <td><input type="password" id="new-token" autocomplete="off" placeholder="token from its Users page" aria-label="New link token"></td>
+      <td><input type="text" id="new-ca" class="mono" placeholder="system CAs" aria-label="New link CA file"></td>
+      <td><button type="button" id="add">Add link</button></td>
+    </tr>
+  </table>
+  </div>
+</div>
+<script>
+(function () {
+  const errorBox = document.getElementById("error");
+  async function post(url, body) {
+    errorBox.hidden = true;
+    const resp = await fetch("{{ prefix }}/api/links/" + url, {method: "POST",
+      headers: {"Content-Type": "application/json"}, body: JSON.stringify(body || {})});
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) { errorBox.textContent = data.error || data.detail || ("Error " + resp.status); errorBox.hidden = false; return null; }
+    return data;
+  }
+  for (const row of document.querySelectorAll("tr[data-link]")) {
+    const name = row.dataset.link, result = row.querySelector(".result");
+    row.querySelector("[data-save]").onclick = async () => {
+      const body = {name, url: row.querySelector(".url").value, token: row.querySelector(".token").value,
+                    ca_file: row.querySelector(".ca").value};
+      if (await post("save", body)) location.reload();
+    };
+    row.querySelector("[data-delete]").onclick = async () => {
+      if (!confirm(`Delete link ${name}? Its servers leave the Servers page.`)) return;
+      if (await post("delete", {name})) location.reload();
+    };
+    row.querySelector("[data-test]").onclick = async () => {
+      result.textContent = "Testing…"; result.className = "result muted";
+      const data = await post(encodeURIComponent(name) + "/test");
+      if (!data) { result.textContent = ""; return; }
+      result.className = "result " + (data.ok ? "ok" : "error");
+      result.textContent = data.ok ? `OmniaCI ${data.version}, as ${data.caller}, role ${data.role}` : data.error;
+    };
+  }
+  document.getElementById("add").onclick = async () => {
+    const value = (id) => document.getElementById(id).value.trim();
+    const body = {name: value("new-name"), url: value("new-url"), token: value("new-token"),
+                  ca_file: value("new-ca"), new: true};
+    if (await post("save", body)) location.reload();
+  };
+})();
+</script>
+{% endblock %}

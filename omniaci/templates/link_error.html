@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{% block title %}Link {{ link.name }} · OmniaCI{% endblock %}
+{% block content %}
+<h1>Link {{ link.name }}</h1>
+<div class="banner">The linked instance at <span class="mono">{{ link.url }}</span> did not answer: {{ message }}.</div>
+<p><a href="{{ prefix }}/">Back to the servers</a>{% if is_admin %} · <a href="{{ prefix }}/links">Links</a>{% endif %}</p>
+{% endblock %}

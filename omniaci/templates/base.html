@@ -28,6 +28,9 @@ body { margin: 0; background: var(--bg); color: var(--text);
 header { display: flex; flex-wrap: wrap; gap: 8px 20px; align-items: center; padding: 12px 20px;
   background: var(--panel); border-bottom: 1px solid var(--border); }
 header strong { font-size: 16px; }
+.link-bar { padding: 8px 20px; background: var(--accent); color: var(--bg); }
+.link-bar a { color: var(--bg); text-decoration: underline; }
+.ok { color: var(--ok); }
 header a { color: var(--text); text-decoration: none; }
 header a:hover { color: var(--accent); }
 main { padding: 20px; max-width: 1400px; margin: 0 auto; }
@@ -137,9 +140,13 @@ summary { cursor: pointer; color: var(--muted); }
   <a href="{{ prefix }}/">Servers</a>
   <a href="{{ prefix }}/jobs">Jobs</a>
   {% if is_admin %}<a href="{{ prefix }}/config">Configuration</a>
-  <a href="{{ prefix }}/users">Users</a>{% endif %}
+  <a href="{{ prefix }}/users">Users</a>
+  <a href="{{ prefix }}/links">Links</a>{% endif %}
   {% if account %}<a href="{{ prefix }}/account" style="margin-left: auto" title="Your account and password">{{ account }}</a>{% endif %}
 </header>
+{% if prefix.startswith("/links/") %}
+<div class="link-bar">Linked instance <strong>{{ prefix.rsplit("/", 1)[1] }}</strong> · its pages, acting with its link · <a href="/">back to your OmniaCI</a></div>
+{% endif %}
 <main>
 {% block crumbs %}{% endblock %}
 {% block content %}{% endblock %}

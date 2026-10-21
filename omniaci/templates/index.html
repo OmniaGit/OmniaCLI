@@ -8,30 +8,32 @@
   <button>Search</button>
   {% if q %}<a class="button" href="{{ prefix }}/">Clear</a>{% endif %}
 </form>
-{% if q %}<p class="muted">{{ servers | length }} of {{ total }} server{{ "" if total == 1 else "s" }}.</p>{% endif %}
+{% if q %}<p class="muted">{{ rows | length }} of {{ total }} server{{ "" if total == 1 else "s" }}.</p>{% endif %}
 {% endif %}
+{% for e in link_errors %}<div class="banner">Link <strong>{{ e.link }}</strong>: {{ e.error }}</div>{% endfor %}
 <div class="panel">
   <div class="scroll">
   <table class="server-rows">
     <tr><th>Server</th><th>CPU, last 15 minutes</th><th></th></tr>
-    {% for server in servers %}
+    {% for row in rows %}
     <tr>
-      <td><a href="{{ prefix }}/servers/{{ server.name }}"><strong>{{ server.name }}</strong></a>
-        {% for role, inst in server.instances.items() %}{% if busy[inst.key] %}<br><span class="status running">job running on {{ role }}</span>{% endif %}{% endfor %}</td>
+      <td><a href="{{ row.base }}/servers/{{ row.name }}"><strong>{{ row.label }}</strong></a>
+        {% if row.link %}<br><span class="muted">linked instance {{ row.link }}</span>{% endif %}
+        {% for role in row.roles %}{% if row.busy[role] %}<br><span class="status running">job running on {{ role }}</span>{% endif %}{% endfor %}</td>
       <td class="sparks">
-        {% for role in ("production", "test") %}{% if role in server.instances %}
-        <div class="spark-row" data-key="{{ server.name }}/{{ role }}">
+        {% for role in row.roles %}
+        <div class="spark-row" data-link="{{ row.link }}" data-key="{{ row.name }}/{{ role }}">
           <span class="role {{ role }}">{{ "Prod" if role == "production" else "Test" }}</span>
-          <svg class="spark" role="img" aria-label="CPU of {{ server.name }} {{ role }}"></svg>
+          <svg class="spark" role="img" aria-label="CPU of {{ row.label }} {{ role }}"></svg>
           <span class="spark-value mono">–</span>
         </div>
-        {% endif %}{% endfor %}
+        {% endfor %}
       </td>
       <td>
         <div class="actions" style="margin: 0">
-          {% if server.test %}<a class="button" href="{{ prefix }}/servers/{{ server.name }}?view=test">Test</a>{% endif %}
-          {% if server.production %}<a class="button" href="{{ prefix }}/servers/{{ server.name }}?view=production">Production</a>{% endif %}
-          {% if server.test and server.production %}<a class="button" href="{{ prefix }}/servers/{{ server.name }}?view=both">Both</a>{% endif %}
+          {% if "test" in row.roles %}<a class="button" href="{{ row.base }}/servers/{{ row.name }}?view=test">Test</a>{% endif %}
+          {% if "production" in row.roles %}<a class="button" href="{{ row.base }}/servers/{{ row.name }}?view=production">Production</a>{% endif %}
+          {% if row.roles | length == 2 %}<a class="button" href="{{ row.base }}/servers/{{ row.name }}?view=both">Both</a>{% endif %}
         </div>
       </td>
     </tr>
@@ -48,11 +50,21 @@
 <script>
 (function () {
   const WINDOW = 15 * 60;
+  const rows = [...document.querySelectorAll(".spark-row")];
+  // this instance's load, and that of each linked instance through its link
+  const sources = [...new Set(rows.map((r) => r.dataset.link))];
+  async function load(link) {
+    const base = link ? "/links/" + encodeURIComponent(link) : "{{ prefix }}";
+    const resp = await fetch(base + "/api/metrics?since=" + (Math.floor(Date.now() / 1000) - WINDOW));
+    return resp.json();
+  }
   async function refresh() {
+    const loaded = await Promise.all(sources.map((link) => load(link).catch(() => null)));
+    const metrics = Object.fromEntries(sources.map((link, i) => [link, loaded[i]]));
     try {
-      const resp = await fetch("{{ prefix }}/api/metrics?since=" + (Math.floor(Date.now() / 1000) - WINDOW));
-      const data = await resp.json();
-      for (const row of document.querySelectorAll(".spark-row")) {
+      for (const row of rows) {
+        const data = metrics[row.dataset.link];
+        if (!data) continue;
         const series = (data.instances[row.dataset.key] || {points: []}).points;
         OmniaCharts.draw(row.querySelector("svg"), series, "cpu", {spark: true, minMax: 10});
         const last = series.filter((p) => p.cpu !== null).pop();

@@ -134,7 +134,7 @@ once per database, when you know the modules are up to date:
 
 ## Configure
 
-The configuration has three files:
+The configuration has four files:
 
 - the **main config** (`omniaci.yaml`): the users set by hand, `backup_dir`,
   `jobs_dir`, `servers_file` and `users_file`. It is edited by hand and the
@@ -144,6 +144,10 @@ The configuration has three files:
   interface (**Users** page, admins only), written readable by its owner
   only. Every change applies at once: a changed or deleted password stops
   working at the next request.
+- the **links file** (`links_file`, by default `links.yaml` next to the
+  servers file): the other OmniaCI instances this one operates (**Links**
+  page, admins only), with their tokens in clear, so written readable by its
+  owner only.
 - the **servers file** (`servers_file`, see `servers.example.yaml`): the
   servers and their instances. It is edited from the web interface
   (**Configuration** page: new, edit, clone, delete), so the user running
@@ -211,9 +215,32 @@ The linking instance sends the token as `Authorization: Bearer <token>`.
 It may also send `X-OmniaCI-Prefix` (the path it serves these pages under,
 e.g. `/links/customer`: every link in the pages starts with it) and
 `X-OmniaCI-User` (its user acting through the link: the jobs record
-`manual: link omniasolutions (matteo)`). Both are honoured for link tokens
-only. `GET /api/info` answers with the version and the caller's role,
-`GET /api/servers` with the live servers.
+`manual: link omniasolutions (matteo)`), and `X-OmniaCI-Role-Cap` (that
+user's role on the linking instance: the link acts with the lower of it and
+its own). They are honoured for link tokens only. `GET /api/info` answers
+with the version and the caller's role, `GET /api/servers` with the live
+servers.
+
+### Operating another instance
+
+On your instance, the **Links** page (admins) adds a link: a name (the
+customer's), the other instance's URL, the token it created for you on its
+Users page, and a CA file when its certificate is from the customer's own CA.
+**Test link** shows its version and the role you get there. Then:
+
+- the Servers page lists its live servers as `<link> › <server>`, with their
+  load, and the filter finds them by link name too. A link that does not
+  answer is shown as an error above the list;
+- its pages open here under `/links/<link>/`, with a bar saying which
+  instance you are on: every action runs there, recorded as
+  `manual: link <its name for you> (<your user>)`;
+- you act there with the lower of your role here and the link's role there.
+  Only users who log in here use links, not tokens.
+
+The other instance must be reachable from yours: through an HTTPS reverse
+proxy, a VPN, or an SSH tunnel (`http://` is accepted for a tunnel or a VPN,
+but then the token travels in clear). Both instances need a version with
+links (the Test link button says so).
 
 ### Permissions
 

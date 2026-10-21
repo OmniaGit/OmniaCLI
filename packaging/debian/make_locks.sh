@@ -13,7 +13,7 @@ ROOT="$(cd "$HERE/../.." && pwd)"
 IMAGES=("$@")
 [ ${#IMAGES[@]} -gt 0 ] || IMAGES=(ubuntu:22.04 debian:12 ubuntu:24.04 debian:13)
 # the direct dependencies; the lock pins them and everything they pull in
-DIRECT="fastapi uvicorn jinja2 pyyaml mcp"
+DIRECT="fastapi uvicorn jinja2 pyyaml httpx mcp"
 TEST_DEPS="pytest pytest-asyncio httpx"
 
 lock_one() {

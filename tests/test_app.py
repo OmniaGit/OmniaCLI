@@ -601,12 +601,14 @@ async def test_link_serves_prefixed_pages_and_acts(client, env):
     assert resp.status_code == 303 and resp.headers["location"].startswith("/links/cliente/jobs/")
     data = await wait_job(client, resp.headers["location"].rsplit("/", 1)[1])
     assert data["source"] == "manual: link omnia (matteo)"
-    # no page links outside the prefix (the icons are the same on every instance)
-    unprefixed = re.compile(r'(?:href|action|data-url|data-log)="/(?!links/cliente/|favicon|icon-180)'
+    # no page links outside the prefix (the icons are the same on every
+    # instance, and the linked instance bar links back to the linking one)
+    unprefixed = re.compile(r'(?:href|action|data-url|data-log)="/(?!links/cliente/|favicon|icon-180|")'
                             r'|fetch\(\s*["`]/(?!links/cliente/)')
     for url in ("/", "/jobs", f"/jobs/{data['id']}", "/servers/srv/test/log", "/servers/srv?view=test"):
         page = (await client.get(url, headers=link)).text
         assert not unprefixed.findall(page), (url, unprefixed.findall(page))
+        assert page.count('href="/"') == 1, url  # the bar's link back only
     resp = await client.get("/api/servers/srv/test/backups", headers=link)
     assert resp.status_code == 200
     # the link's role is developer
