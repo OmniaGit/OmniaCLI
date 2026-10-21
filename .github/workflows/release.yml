@@ -6,6 +6,8 @@
 # never changes (releases/latest/download/OmniaCLI.deb).
 #
 # The tag is the version: omniacli-v<year>.1.<n> (or v<year>.1.<n>).
+# Run by hand (Actions > Release > Run workflow) with the tag of an existing
+# release, it builds and attaches that release's package again.
 # The tests run first; the package is then installed and checked in Debian 12
 # and Ubuntu 24.04 containers with systemd (packaging/debian/test_deb.sh).
 name: Release
@@ -13,6 +15,14 @@ name: Release
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag of the release to build, e.g. omniacli-v2026.1.7"
+        required: true
+
+env:
+  TAG: ${{ github.event.release.tag_name || inputs.tag }}
 
 permissions:
   contents: write
@@ -22,6 +32,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -37,13 +49,13 @@ jobs:
       version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - name: Version from the tag
         id: version
-        env:
-          TAG: ${{ github.event.release.tag_name }}
         run: |
           version="${TAG#omniacli-v}"
           version="${version#v}"
@@ -56,7 +68,7 @@ jobs:
       - name: Attach it to the release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.event.release.tag_name }}
+          GH_REPO: ${{ github.repository }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           cp "dist/omniacli_${VERSION}_all.deb" dist/OmniaCLI.deb
@@ -71,6 +83,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
       - uses: actions/download-artifact@v4
         with:
           name: deb
