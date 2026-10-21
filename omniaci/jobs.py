@@ -54,6 +54,11 @@ class Job:
             self.lines.append(f"{stamp} {line}")
 
     @property
+    def servers(self) -> list[str]:
+        """The servers of the instances (server/role) the job ran on."""
+        return list(dict.fromkeys(key.split("/", 1)[0] for key in self.instances))
+
+    @property
     def finished_flag(self) -> bool:
         return self.status in FINISHED
 

@@ -2,5 +2,15 @@
 {% block title %}Jobs · OmniaCI{% endblock %}
 {% block content %}
 <h1>Jobs</h1>
+<form class="actions job-filter" method="get" action="/jobs" style="margin: 0 0 12px">
+  <select name="server" aria-label="Server" onchange="this.form.submit()">
+    <option value="">All servers</option>
+    {% for name in servers %}<option value="{{ name }}" {% if name == server %}selected{% endif %}>{{ name }}</option>{% endfor %}
+  </select>
+  <input type="search" name="q" value="{{ q }}" placeholder="Search title, user, error…" aria-label="Search">
+  <button>Search</button>
+  {% if server or q %}<a class="button" href="/jobs">Clear</a>{% endif %}
+</form>
+<p class="muted">{{ total }} job{{ "" if total == 1 else "s" }}{% if total > jobs | length %}, the last {{ jobs | length }} shown{% endif %}.</p>
 <div class="panel">{% include "_jobs_table.html" %}</div>
 {% endblock %}

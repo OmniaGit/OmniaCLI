@@ -1,5 +1,18 @@
 {% extends "base.html" %}
 {% block title %}{{ job.title }} · OmniaCI{% endblock %}
+{% block crumbs %}{% from "_crumbs.html" import crumbs %}
+{% set ns = namespace(servers=[]) %}
+{% for key in job.instances %}{% set name = key.split("/")[0] %}{% if name not in ns.servers %}{% set ns.servers = ns.servers + [name] %}{% endif %}{% endfor %}
+{% if ns.servers | length == 1 %}
+  {% set name = ns.servers[0] %}
+  {% set view = job.instances[0].split("/")[1] if job.instances | length == 1 else "both" %}
+  {{ crumbs([("Servers", "/"), (name, "/servers/" ~ name),
+             ({"production": "Production", "test": "Test", "both": "Both"}[view], "/servers/" ~ name ~ "?view=" ~ view),
+             (job.title, None)]) }}
+{% else %}
+  {{ crumbs([("Jobs", "/jobs"), (job.title, None)]) }}
+{% endif %}
+{% endblock %}
 {% block content %}
 <h1>{{ job.title }}</h1>
 <div class="panel">

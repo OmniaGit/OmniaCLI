@@ -14,7 +14,8 @@ A new or cloned server is a <strong>draft</strong>: it goes live only when <stro
     <tr>
       <td><strong>{{ server.name }}</strong></td>
       <td><span class="badge {{ server.status }}">{{ "Active" if server.active else "Draft" }}</span></td>
-      <td>{% for role, inst in server.instances.items() %}<span class="role {{ role }}">{{ role }}</span> <span class="mono">{{ inst.database }}</span><br>{% endfor %}</td>
+      <td>{% for role, inst in server.instances.items() %}<span class="role {{ role }}">{{ role }}</span> <span class="mono">{{ inst.database }}</span><br>{% endfor %}
+        {% if server.error %}<span class="error">Incomplete: {{ server.error }}</span>{% endif %}</td>
       <td>{% for role, inst in server.instances.items() %}{{ inst.repositories | map(attribute="name") | join(", ") }}<br>{% endfor %}</td>
       <td>
         <div class="actions" style="margin: 0">

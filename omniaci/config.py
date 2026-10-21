@@ -12,7 +12,8 @@ from pathlib import Path
 import yaml
 
 ROLES = ("production", "test")
-RESTART_TYPES = ("systemd", "initd")
+# process: OmniaCI starts odoo-bin itself, its output going to a log of its own
+RESTART_TYPES = ("systemd", "initd", "process")
 # a server name is part of URLs and of the job keys
 SERVER_STATUSES = ("active", "draft")
 SERVER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
@@ -37,6 +38,7 @@ class Restart:
     sudo: bool = True
 
     def command(self) -> list[str]:
+        """The restart command of a systemd or init.d service."""
         if self.type == "systemd":
             # without --no-ask-password systemctl waits on a polkit prompt
             cmd = ["systemctl", "--no-ask-password", "restart", self.service]
@@ -87,6 +89,11 @@ class Instance:
     def key(self) -> str:
         return f"{self.server}/{self.role}"
 
+    @property
+    def pid_file(self) -> Path:
+        """Of an instance OmniaCI starts itself, next to its log."""
+        return self.log_file.with_suffix(".pid")
+
     def repository(self, name: str) -> Repository | None:
         return next((r for r in self.repositories if r.name == name), None)
 
@@ -98,6 +105,10 @@ class Server:
     # a draft is saved but not live: no dashboard, no actions, no auto update
     # until "Test & activate" passes its checks
     status: str = "active"
+    # a draft may be saved incomplete: then it has no instances, data holds
+    # the roles as entered and error says what is missing
+    data: dict | None = None
+    error: str | None = None
 
     @property
     def active(self) -> bool:
@@ -120,6 +131,10 @@ class Settings:
     # the servers live in their own file, which the web interface rewrites
     servers_file: Path
     servers: dict[str, Server]
+
+    @property
+    def logs_dir(self) -> Path:
+        return logs_dir_of(self.jobs_dir)
 
     def active_servers(self) -> list[Server]:
         return [s for s in self.servers.values() if s.active]
@@ -166,7 +181,7 @@ def _parse_auto_update(data: dict | None, where: str) -> AutoUpdate:
     return auto
 
 
-def _parse_instance(server: str, role: str, data: dict) -> Instance:
+def _parse_instance(server: str, role: str, data: dict, logs_dir: Path | None) -> Instance:
     where = f"servers.{server}.{role}"
     repositories = []
     for idx, repo in enumerate(_require(data, "repositories", where)):
@@ -188,17 +203,26 @@ def _parse_instance(server: str, role: str, data: dict) -> Instance:
         raise ConfigError(
             f"{where}.restart: type must be one of {', '.join(RESTART_TYPES)}"
         )
+    if restart_type == "process":
+        if logs_dir is None:
+            raise ConfigError(f"{where}.restart: type process needs the logs folder")
+        # the output of the process OmniaCI starts
+        log_file = logs_dir / f"{server}_{role}.log"
+        service = ""
+    else:
+        log_file = Path(_require(data, "log_file", where))
+        service = str(_require(restart, "service", f"{where}.restart"))
     return Instance(
         server=server,
         role=role,
         repositories=repositories,
         database=str(_require(data, "database", where)),
         odoo_config=Path(_require(data, "odoo_config", where)),
-        log_file=Path(_require(data, "log_file", where)),
+        log_file=log_file,
         venv_bin=Path(_require(data, "venv_bin", where)),
         restart=Restart(
             type=restart_type,
-            service=str(_require(restart, "service", f"{where}.restart")),
+            service=service,
             sudo=bool(restart.get("sudo", True)),
         ),
         update_modules=bool(data.get("update_modules", True)),
@@ -207,8 +231,10 @@ def _parse_instance(server: str, role: str, data: dict) -> Instance:
     )
 
 
-def parse_servers(data: dict) -> dict[str, Server]:
-    """Parse the mapping {server name: {production: ..., test: ...}}."""
+def parse_servers(data: dict, logs_dir: Path | None = None) -> dict[str, Server]:
+    """Parse the mapping {server name: {production: ..., test: ...}}.
+
+    logs_dir: where the instances of restart type process log."""
     servers = {}
     for name, srv in (data or {}).items():
         name = str(name)
@@ -221,22 +247,32 @@ def parse_servers(data: dict) -> dict[str, Server]:
         status = str(srv.get("status") or "active")
         if status not in SERVER_STATUSES:
             raise ConfigError(f"servers.{name}.status must be one of {', '.join(SERVER_STATUSES)}")
-        instances = {
-            role: _parse_instance(name, role, srv[role]) for role in ROLES if srv.get(role)
-        }
-        if not instances:
-            raise ConfigError(f"servers.{name}: define 'production' and/or 'test'")
-        prod, test = instances.get("production"), instances.get("test")
-        if prod and test:
-            # merge to production pairs repositories by name
-            missing = [r.name for r in test.repositories if not prod.repository(r.name)]
-            if missing:
-                raise ConfigError(
-                    f"servers.{name}: test repositories without a production "
-                    f"repository of the same name: {', '.join(missing)}"
-                )
-        servers[name] = Server(name=name, instances=instances, status=status)
+        try:
+            servers[name] = _parse_server(name, srv, status, logs_dir)
+        except (ConfigError, TypeError, ValueError, AttributeError) as exc:
+            if status != "draft":
+                raise
+            data = {role: srv[role] for role in ROLES if srv.get(role)}
+            servers[name] = Server(name=name, instances={}, status=status, data=data, error=str(exc))
     return servers
+
+
+def _parse_server(name: str, srv: dict, status: str, logs_dir: Path | None) -> Server:
+    instances = {
+        role: _parse_instance(name, role, srv[role], logs_dir) for role in ROLES if srv.get(role)
+    }
+    if not instances:
+        raise ConfigError(f"servers.{name}: define 'production' and/or 'test'")
+    prod, test = instances.get("production"), instances.get("test")
+    if prod and test:
+        # merge to production pairs repositories by name
+        missing = [r.name for r in test.repositories if not prod.repository(r.name)]
+        if missing:
+            raise ConfigError(
+                f"servers.{name}: test repositories without a production "
+                f"repository of the same name: {', '.join(missing)}"
+            )
+    return Server(name=name, instances=instances, status=status)
 
 
 def instance_to_dict(instance: Instance) -> dict:
@@ -262,21 +298,26 @@ def instance_to_dict(instance: Instance) -> dict:
         data["auto_update"]["window"] = auto.window_label()
     if instance.odoo_bin is not None:
         data["odoo_bin"] = str(instance.odoo_bin)
+    if instance.restart.type == "process":
+        # both follow from the type: the log is OmniaCI's, there is no service
+        del data["log_file"], data["restart"]["service"], data["restart"]["sudo"]
     return data
 
 
 def server_to_dict(server: Server) -> dict:
     data = {"status": server.status}
+    if server.data is not None:
+        data.update(server.data)
     data.update({role: instance_to_dict(i) for role, i in server.instances.items()})
     return data
 
 
-def load_servers(path: Path) -> dict[str, Server]:
+def load_servers(path: Path, logs_dir: Path | None = None) -> dict[str, Server]:
     if not path.exists():
         return {}
     with open(path, encoding="utf-8") as fh:
         data = yaml.safe_load(fh) or {}
-    return parse_servers(data.get("servers") or {})
+    return parse_servers(data.get("servers") or {}, logs_dir)
 
 
 def save_servers(path: Path, servers: dict[str, Server]) -> None:
@@ -301,16 +342,26 @@ def parse_settings(data: dict, base_dir: Path = Path(".")) -> Settings:
     servers_file = Path(data.get("servers_file") or "servers.yaml")
     if not servers_file.is_absolute():
         servers_file = base_dir / servers_file
+    jobs_dir = Path(_require(data, "jobs_dir", "root"))
     return Settings(
         users={str(k): str(v) for k, v in users.items()},
         backup_dir=Path(_require(data, "backup_dir", "root")),
-        jobs_dir=Path(_require(data, "jobs_dir", "root")),
+        jobs_dir=jobs_dir,
         servers_file=servers_file,
-        servers=load_servers(servers_file),
+        servers=load_servers(servers_file, logs_dir_of(jobs_dir)),
     )
+
+
+def logs_dir_of(jobs_dir: Path) -> Path:
+    """The logs of the instances OmniaCI starts itself: next to the jobs."""
+    return jobs_dir.parent / "logs"
 
 
 def load_settings(path: str | Path) -> Settings:
     path = Path(path)
-    with open(path, encoding="utf-8") as fh:
-        return parse_settings(yaml.safe_load(fh) or {}, base_dir=path.parent)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh) or {}
+    except OSError as exc:
+        raise ConfigError(f"cannot read {path}: {exc.strerror}") from exc
+    return parse_settings(data, base_dir=path.parent)

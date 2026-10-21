@@ -56,7 +56,7 @@ case "$1" in
                 --gecos "OmniaCI" omniaci
         fi
         install -d -o omniaci -g omniaci -m 750 \
-            /var/lib/omniaci /var/lib/omniaci/jobs /var/lib/omniaci/backups
+            /var/lib/omniaci /var/lib/omniaci/jobs /var/lib/omniaci/backups /var/lib/omniaci/logs
         build_venv
         create_config
         ;;

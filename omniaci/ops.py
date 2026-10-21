@@ -8,6 +8,8 @@ import datetime
 import os
 import re
 import shlex
+import signal
+import subprocess
 from pathlib import Path
 
 from .config import Instance, Repository, Server
@@ -19,6 +21,10 @@ _ENV = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C"}
 # Odoo can log very long lines (tracebacks with data, SQL)
 _LINE_LIMIT = 4 * 1024 * 1024
 RESTART_TIMEOUT = 300
+# an Odoo OmniaCI starts itself: seconds it must stay up to count as started,
+# and seconds it has to stop on SIGTERM before SIGKILL
+START_WAIT = 5
+STOP_TIMEOUT = 60
 
 
 async def run(
@@ -27,6 +33,7 @@ async def run(
     cwd: Path | None = None,
     check: bool = True,
     timeout: float | None = None,
+    env: dict | None = None,
 ) -> int:
     """Run a command, streaming its output into the job log."""
     job.log(f"$ {shlex.join(str(c) for c in cmd)}" + (f"   (in {cwd})" if cwd else ""))
@@ -34,7 +41,7 @@ async def run(
         proc = await asyncio.create_subprocess_exec(
             *[str(c) for c in cmd],
             cwd=cwd,
-            env=_ENV,
+            env=env or _ENV,
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
@@ -62,14 +69,15 @@ async def run(
 
 
 async def capture(
-    cmd: list[str], cwd: Path | None = None, timeout: float | None = None
+    cmd: list[str], cwd: Path | None = None, timeout: float | None = None,
+    env: dict | None = None,
 ) -> tuple[int, str]:
     """Run a command quietly and return (exit code, stripped output)."""
     try:
         proc = await asyncio.create_subprocess_exec(
             *[str(c) for c in cmd],
             cwd=cwd,
-            env=_ENV,
+            env=env or _ENV,
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
@@ -169,6 +177,7 @@ async def update_modules(job: Job, instance: Instance, force: bool = False) -> N
             "-d",
             instance.database,
         ],
+        env=odoo_env(instance),
     )
 
 
@@ -196,6 +205,17 @@ def logfile_to_stdout(major: int | None) -> str:
     misleading "couldn't create the logfile directory" error.
     """
     return "--logfile=" if major is not None and major >= 14 else "--logfile=/dev/stdout"
+
+
+def odoo_env(instance: Instance) -> dict:
+    """The environment for click-odoo: it imports odoo, which a venv that runs
+    Odoo from its sources (odoo-bin) does not have; the folder of odoo-bin
+    makes it importable (checked 2026-10-21, Odoo 20 and click-odoo 1.8)."""
+    odoo_bin = find_odoo_bin(instance)
+    if odoo_bin is None or not odoo_bin.is_file():
+        return _ENV
+    paths = [str(odoo_bin.parent), _ENV.get("PYTHONPATH", "")]
+    return {**_ENV, "PYTHONPATH": os.pathsep.join(p for p in paths if p)}
 
 
 def find_odoo_bin(instance: Instance) -> Path | None:
@@ -289,8 +309,149 @@ async def update_chosen_modules(job: Job, instance: Instance, modules: list[str]
 
 
 async def restart(job: Job, instance: Instance) -> None:
+    if instance.restart.type == "process":
+        await restart_process(job, instance)
+        return
     job.log(f"--- restart {instance.restart.type} service {instance.restart.service}")
     await run(job, instance.restart.command(), timeout=RESTART_TIMEOUT)
+
+
+# The Odoo processes OmniaCI started, to reap them when they end; one started
+# before OmniaCI was restarted is found again from its pid file.
+_children: dict[str, subprocess.Popen] = {}
+
+
+def _alive(pid: int) -> bool:
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return False
+    return stat.rsplit(")", 1)[1].split()[0] != "Z"
+
+
+def _pgid(pid: int) -> int | None:
+    try:
+        return os.getpgid(pid)
+    except OSError:
+        return None
+
+
+def _config_pids(instance: Instance) -> list[int]:
+    from .metrics import processes_by_config  # metrics imports ops
+
+    return processes_by_config().get(os.path.realpath(instance.odoo_config), [])
+
+
+def managed_pid(instance: Instance) -> int | None:
+    """The Odoo OmniaCI started for the instance, if it still runs."""
+    child = _children.get(instance.key)
+    if child is not None and child.poll() is not None:
+        _children.pop(instance.key, None)
+    try:
+        pid = int(instance.pid_file.read_text().strip())
+    except (OSError, ValueError):
+        return None
+    try:
+        argv = Path(f"/proc/{pid}/cmdline").read_text().split("\0")
+    except OSError:
+        return None
+    # the pid may have been given to another program since
+    if not _alive(pid) or str(instance.odoo_config) not in argv:
+        return None
+    return pid
+
+
+def foreign_pids(instance: Instance, own: int | None) -> list[int]:
+    """Processes started with the instance's Odoo config that OmniaCI did not
+    start: its own run in the process group it created."""
+    return [p for p in _config_pids(instance) if own is None or _pgid(p) != own]
+
+
+async def stop_process(job: Job, instance: Instance, pid: int) -> None:
+    """SIGTERM to the process group (Odoo and its workers), SIGKILL after
+    STOP_TIMEOUT seconds."""
+    job.log(f"stopping Odoo, pid {pid}")
+    for sig, wait in ((signal.SIGTERM, STOP_TIMEOUT), (signal.SIGKILL, 10)):
+        try:
+            os.killpg(pid, sig)
+        except ProcessLookupError:
+            break
+        for _ in range(wait * 2):
+            if not any(_alive(p) for p in _config_pids(instance) if _pgid(p) == pid):
+                break
+            await asyncio.sleep(0.5)
+        else:
+            job.log(f"still running after {wait} s" + (", sending SIGKILL" if sig == signal.SIGTERM else ""))
+            continue
+        break
+    else:
+        raise JobFailed(f"Odoo, pid {pid}, does not stop")
+    instance.pid_file.unlink(missing_ok=True)
+    child = _children.pop(instance.key, None)
+    if child is not None:
+        child.poll()  # reaps it
+    job.log("stopped")
+
+
+async def start_process(job: Job, instance: Instance) -> int:
+    """Start odoo-bin in its own session, so that it outlives OmniaCI, with
+    its output appended to the instance's log."""
+    odoo_bin = find_odoo_bin(instance)
+    if odoo_bin is None or not odoo_bin.is_file():
+        raise JobFailed("odoo-bin not found: set odoo_bin in the instance configuration")
+    cmd = [str(instance.venv_bin / "python"), str(odoo_bin), "-c", str(instance.odoo_config),
+           # the log goes to stdout, so to the instance's log, not to the logfile of the config
+           logfile_to_stdout(odoo_major(odoo_bin))]
+    job.log(f"$ {shlex.join(cmd)}   (output to {instance.log_file})")
+    instance.log_file.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with open(instance.log_file, "ab") as out:
+            stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            out.write(f"--- {stamp} started by OmniaCI: {shlex.join(cmd)}\n".encode())
+            out.flush()
+            child = subprocess.Popen(cmd, cwd=odoo_bin.parent, stdin=subprocess.DEVNULL,
+                                     stdout=out, stderr=subprocess.STDOUT, start_new_session=True)
+    except OSError as exc:
+        raise JobFailed(f"cannot start Odoo: {exc}") from exc
+    _children[instance.key] = child
+    instance.pid_file.write_text(f"{child.pid}\n")
+    for _ in range(START_WAIT * 2):
+        await asyncio.sleep(0.5)
+        if child.poll() is not None:
+            instance.pid_file.unlink(missing_ok=True)
+            _children.pop(instance.key, None)
+            raise JobFailed(f"Odoo exited with code {child.returncode} at once: see its log "
+                            f"{instance.log_file}")
+    job.log(f"Odoo started, pid {child.pid}")
+    return child.pid
+
+
+async def stop(job: Job, instance: Instance) -> None:
+    """Stop the Odoo OmniaCI started; a service is not stopped from here."""
+    if instance.restart.type != "process":
+        raise JobFailed("Stop is only for an Odoo that OmniaCI starts itself (restart type process)")
+    job.log(f"--- stop Odoo started by OmniaCI ({instance.odoo_config})")
+    own = managed_pid(instance)
+    if own is None:
+        others = foreign_pids(instance, None)
+        job.log("not running" + (
+            f"; pid {', '.join(map(str, others))} run with this config but OmniaCI did "
+            "not start them: not touched" if others else ""))
+        return
+    await stop_process(job, instance, own)
+
+
+async def restart_process(job: Job, instance: Instance) -> None:
+    job.log(f"--- restart Odoo started by OmniaCI ({instance.odoo_config})")
+    own = managed_pid(instance)
+    others = foreign_pids(instance, own)
+    if others:
+        raise JobFailed(
+            f"Odoo is already running with {instance.odoo_config} but OmniaCI did not start "
+            f"it (pid {', '.join(map(str, others))}): stop it first, OmniaCI stops only its own")
+    if own is not None:
+        await stop_process(job, instance, own)
+    await start_process(job, instance)
 
 
 async def backup(job: Job, instance: Instance, backup_dir: Path) -> Path:
@@ -308,6 +469,7 @@ async def backup(job: Job, instance: Instance, backup_dir: Path) -> Path:
             instance.database,
             dest,
         ],
+        env=odoo_env(instance),
     )
     return dest
 
@@ -318,6 +480,10 @@ async def pull_restart(job: Job, instance: Instance, only_if_changed: bool = Fal
         job.log("Nothing new to deploy")
         return
     await update_modules(job, instance)
+    if only_if_changed and instance.restart.type == "process" and managed_pid(instance) is None:
+        # the auto update: an Odoo someone stopped stays stopped
+        job.log("Odoo is stopped: not started again")
+        return
     await restart(job, instance)
 
 

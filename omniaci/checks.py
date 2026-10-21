@@ -81,10 +81,21 @@ async def _instance_checks(instance: Instance) -> list[Check]:
             "every folder exists" if not missing else f"missing: {', '.join(missing)}", WARNING)
 
     # log file
-    readable = os.access(instance.log_file, os.R_OK)
-    add("Log file", readable,
-        f"{instance.log_file} readable" if readable
-        else f"{instance.log_file} is not readable: the log page cannot show it", WARNING)
+    process = instance.restart.type == "process"
+    if process:
+        folder = instance.log_file.parent
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(dir=folder):
+                pass
+            add("Log folder", True, f"{folder} writable: Odoo's output goes to {instance.log_file}")
+        except OSError as exc:
+            add("Log folder", False, f"{folder}: {exc}")
+    else:
+        readable = os.access(instance.log_file, os.R_OK)
+        add("Log file", readable,
+            f"{instance.log_file} readable" if readable
+            else f"{instance.log_file} is not readable: the log page cannot show it", WARNING)
 
     # click-odoo scripts and the instance's python
     for script in ("click-odoo-update", "click-odoo-backupdb"):
@@ -96,6 +107,7 @@ async def _instance_checks(instance: Instance) -> list[Check]:
         [instance.venv_bin / "python", "-c",
          "import click_odoo, odoo; print('Odoo', odoo.release.version)"],
         timeout=PYTHON_TIMEOUT,
+        env=ops.odoo_env(instance),
     )
     add("Odoo importable by click-odoo", code == 0,
         out.splitlines()[-1] if out else f"exit code {code}")
@@ -114,6 +126,8 @@ async def _instance_checks(instance: Instance) -> list[Check]:
     if odoo_bin is not None and odoo_bin.is_file():
         major = ops.odoo_major(odoo_bin)
         add("odoo-bin", True, f"{odoo_bin}" + (f" (Odoo {major})" if major else ""), WARNING)
+    elif process:
+        add("odoo-bin", False, "not found: OmniaCI cannot start Odoo; set odoo_bin")
     else:
         add("odoo-bin", False,
             "not found: the update of chosen modules will not work; set odoo_bin", WARNING)
@@ -149,6 +163,18 @@ async def _instance_checks(instance: Instance) -> list[Check]:
 
     # service and the right to restart it
     restart = instance.restart
+    if process:
+        own = ops.managed_pid(instance)
+        others = ops.foreign_pids(instance, own)
+        if others:
+            add("Odoo process", False,
+                f"running with {instance.odoo_config} but not started by OmniaCI "
+                f"(pid {', '.join(map(str, others))}): Restart refuses to start a second one")
+        elif own is not None:
+            add("Odoo process", True, f"started by OmniaCI, pid {own}")
+        else:
+            add("Odoo process", False, "not running: Restart starts it", WARNING)
+        return checks
     if restart.type == "systemd":
         code, state = await ops.capture(
             ["systemctl", "show", "-p", "LoadState", "--value", restart.service])
@@ -185,6 +211,9 @@ def _user() -> str:
 
 
 async def check_server(server: Server, backup_dir: Path) -> list[Check]:
+    if server.error:
+        # a draft saved incomplete: nothing to check until it is completed
+        return [Check("server", "Settings", False, f"incomplete: {server.error}")]
     checks: list[Check] = []
     prod, test = server.production, server.test
     if prod and test:

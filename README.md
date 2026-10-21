@@ -12,7 +12,7 @@ config file, a log file and a systemd or init.d service.
 | Git pull | ✓ | ✓ | `git pull --ff-only <remote> <branch>` in every repository |
 | Git pull + restart | ✓ | ✓ | pull, `click-odoo-update` (only the changed modules), restart |
 | Update modules | ✓ | ✓ | a popup asks: the changed modules (`click-odoo-update`) or chosen ones (`odoo-bin -u … --stop-after-init --workers=0`), and whether to restart after |
-| Restart | ✓ | ✓ | the instance's systemd or init.d restart |
+| Restart | ✓ | ✓ | the instance's systemd or init.d restart, or OmniaCI's own start of `odoo-bin` (see below) |
 | Backup | ✓ | ✓ | `click-odoo-backupdb` → `<backup_dir>/<server>/<role>/<db>_<timestamp>.zip` |
 | Merge test to production | | ✓ | backup production, merge, push, update modules, restart production |
 | Log | ✓ | ✓ | `tail -F` of the Odoo log in the browser, with an "errors only" filter |
@@ -160,6 +160,29 @@ The user that runs OmniaCI needs:
 omniaci ALL=(root) NOPASSWD: /usr/bin/systemctl --no-ask-password restart odoo-customer-a
 omniaci ALL=(root) NOPASSWD: /etc/init.d/odoo-customer-a-test restart
 ```
+
+## Odoo started by OmniaCI (restart type `process`)
+
+For an Odoo that has no service, OmniaCI can start it itself:
+`<venv_bin>/python <odoo-bin> -c <odoo_config>`, in its own session. Its
+output goes to `<jobs_dir>/../logs/<server>_<role>.log` (the logfile of the
+Odoo config is overridden), and that file is the instance's log; its pid is
+kept next to it (`.pid`).
+
+- Restart stops OmniaCI's Odoo (SIGTERM to its process group, SIGKILL after
+  60 s) and starts it again. It refuses when another process runs with the
+  same Odoo config (started from a console, an IDE, a service): OmniaCI
+  never stops a process it did not start.
+- Stop stops it, and it stays stopped until Start (the same button as
+  Restart): the auto update still pulls and updates its modules, but does
+  not start it again. Stop exists only for this type: a service is stopped
+  with its own tools.
+- Odoo keeps running when OmniaCI stops, restarts or is upgraded: the
+  package's unit has `KillMode=process`, and OmniaCI finds its Odoo again from
+  the pid file.
+- Odoo runs as the user of OmniaCI: that user needs write access to Odoo's
+  `data_dir` (filestore, sessions).
+- Odoo is not started at boot: a Restart starts it.
 
 ## Run
 

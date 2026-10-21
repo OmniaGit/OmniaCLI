@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <projectDescription>
-	<name>OmniaCI</name>
+	<name>OmniaCli</name>
 	<comment></comment>
 	<projects>
 	</projects>
@@ -14,4 +14,11 @@
 	<natures>
 		<nature>org.python.pydev.pythonNature</nature>
 	</natures>
+	<linkedResources>
+		<link>
+			<name>mboscolo.yaml</name>
+			<type>1</type>
+			<location>/media/TwoTDisk/mboscolo_data/mboscolo.yaml</location>
+		</link>
+	</linkedResources>
 </projectDescription>

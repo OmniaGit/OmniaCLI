@@ -1,5 +1,10 @@
 {% extends "base.html" %}
 {% block title %}Log {{ instance.key }} · OmniaCI{% endblock %}
+{% block crumbs %}{% from "_crumbs.html" import crumbs %}
+{{ crumbs([("Servers", "/"), (instance.server, "/servers/" ~ instance.server),
+           (instance.role | capitalize, "/servers/" ~ instance.server ~ "?view=" ~ instance.role),
+           ("Log", None)]) }}
+{% endblock %}
 {% block content %}
 <h1>Log {{ instance.key }} <span class="muted mono">{{ instance.log_file }}</span></h1>
 <div class="panel">

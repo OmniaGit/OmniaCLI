@@ -17,6 +17,7 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.templating import Jinja2Templates
 
 from . import checks, ops
+from .odooconf import read_odoo_config
 from .auth import Authenticator
 from .config import (
     ConfigError,
@@ -148,6 +149,8 @@ def create_app(settings: Settings) -> FastAPI:
                 "repo_status": {i.key: s for i, s in zip(shown, statuses)},
                 "auto_state": updater.state,
                 "busy": {i.key: jobs.is_busy(i.key) for i in srv.instances.values()},
+                # Odoo started by OmniaCI: its pid, None when stopped
+                "running": {i.key: ops.managed_pid(i) for i in shown if i.restart.type == "process"},
                 "jobs": [j for j in jobs.recent(200) if any(k.startswith(f"{server}/") for k in j.instances)][:10],
             },
         )
@@ -243,6 +246,20 @@ def create_app(settings: Settings) -> FastAPI:
             )
         )
 
+    @app.post("/servers/{server}/{role}/stop")
+    async def action_stop(server: str, role: str, user: str = Depends(current_user)):
+        instance = get_instance(server, role)
+        if instance.restart.type != "process":
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Only an Odoo started by OmniaCI can be stopped")
+        return started(
+            jobs.submit(
+                f"Stop {instance.key}",
+                [instance.key],
+                f"manual: {user}",
+                lambda job: ops.stop(job, instance),
+            )
+        )
+
     @app.post("/servers/{server}/{role}/backup")
     async def action_backup(
         server: str, role: str, download: bool = False, user: str = Depends(current_user)
@@ -332,8 +349,22 @@ def create_app(settings: Settings) -> FastAPI:
                                 status_code=404)
 
     @app.get("/jobs")
-    async def job_list(request: Request):
-        return _TEMPLATES.TemplateResponse(request, "jobs.html", {"jobs": jobs.recent(200)})
+    async def job_list(request: Request, server: str = "", q: str = ""):
+        """Every job kept, filtered by server and by text (title, started
+        by, error, server)."""
+        found = jobs.recent(len(jobs.jobs))
+        names = sorted(set(settings.servers) | {n for j in found for n in j.servers})
+        if server:
+            found = [j for j in found if server in j.servers]
+        words = q.lower().split()
+        if words:
+            def text(job):
+                return " ".join([job.title, job.source, job.error or "", *job.instances]).lower()
+            found = [j for j in found if all(w in text(j) for w in words)]
+        return _TEMPLATES.TemplateResponse(
+            request, "jobs.html",
+            {"jobs": found[:200], "total": len(found), "servers": names, "server": server, "q": q},
+        )
 
     @app.get("/jobs/{job_id}")
     async def job_page(request: Request, job_id: str):
@@ -370,6 +401,7 @@ def create_app(settings: Settings) -> FastAPI:
                     "name": name,
                     "server": data,
                     "active": bool(original and settings.servers[original].active),
+                    "logs_dir": str(settings.logs_dir),
                 },
             },
         )
@@ -412,6 +444,17 @@ def create_app(settings: Settings) -> FastAPI:
     def refuse(message: str, code: int = status.HTTP_400_BAD_REQUEST):
         return JSONResponse({"error": message}, status_code=code)
 
+    @app.post("/api/odoo-config")
+    async def odoo_config_read(payload: dict = Body(...)):
+        """The database, log file and repositories an Odoo config gives."""
+        path = str(payload.get("path") or "").strip()
+        if not path:
+            return refuse("Set the Odoo config file first")
+        try:
+            return await read_odoo_config(path)
+        except ConfigError as exc:
+            return refuse(str(exc))
+
     @app.post("/api/servers/save")
     async def config_save(payload: dict = Body(...)):
         original = payload.get("original") or None
@@ -429,7 +472,7 @@ def create_app(settings: Settings) -> FastAPI:
             # only passing checks make it active
             server_data["status"] = "draft"
             try:
-                parsed = parse_servers({name: server_data})[name]
+                parsed = parse_servers({name: server_data}, settings.logs_dir)[name]
             except (ConfigError, TypeError, ValueError, AttributeError) as exc:
                 return refuse(str(exc))
             was_active = original is not None and settings.servers[original].active

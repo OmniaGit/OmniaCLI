@@ -1,5 +1,8 @@
 {% extends "base.html" %}
 {% block title %}{{ title }} · OmniaCI{% endblock %}
+{% block crumbs %}{% from "_crumbs.html" import crumbs %}
+{{ crumbs([("Configuration", "/config"), (title, None)]) }}
+{% endblock %}
 {% block content %}
 <h1>{{ title }}</h1>
 <div id="error" class="banner" hidden></div>
@@ -33,12 +36,14 @@
     <div class="body">
       <div class="form-grid">
         <label>Database</label><input type="text" data-k="database">
-        <label>Odoo config file</label><input type="text" data-k="odoo_config" class="mono">
+        <label>Odoo config file</label>
+        <div class="with-button"><input type="text" data-k="odoo_config" class="mono">
+          <button type="button" class="reload-conf" title="Read database, log file and repositories from this file">Reload</button></div>
         <label>Log file</label><input type="text" data-k="log_file" class="mono">
         <label>Venv bin (click-odoo-contrib)</label><input type="text" data-k="venv_bin" class="mono">
         <label>odoo-bin (update of chosen modules)</label><input type="text" data-k="odoo_bin" class="mono" placeholder="empty: odoo-bin found in a repository">
         <label>Restart with</label>
-        <select data-k="restart.type"><option value="systemd">systemd</option><option value="initd">init.d</option></select>
+        <select data-k="restart.type"><option value="systemd">systemd</option><option value="initd">init.d</option><option value="process">OmniaCI starts odoo-bin itself</option></select>
         <label>Service name</label><input type="text" data-k="restart.service">
         <label>Use sudo -n</label><input type="checkbox" data-k="restart.sudo">
         <label>Update changed modules</label><input type="checkbox" data-k="update_modules">
@@ -46,6 +51,7 @@
         <label>Every (minutes)</label><input type="number" min="1" data-k="auto_update.interval_minutes">
         <label>Time window</label><input type="text" data-k="auto_update.window" placeholder="HH:MM-HH:MM, empty = always">
       </div>
+      <div class="conf-notes" hidden></div>
       <h3 style="font-size: 14px; margin: 16px 0 6px">Repositories</h3>
       <div class="scroll">
       <table class="repos">
@@ -107,8 +113,60 @@ for (const role of ROLES) {
   const tbody = box.querySelector("tbody");
   for (const repo of values.repositories || []) repoRow(tbody, repo);
   box.querySelector(".add-repo").onclick = () => repoRow(tbody, {remote: "origin"});
+  box.querySelector(".reload-conf").onclick = () => reloadConf(box);
+  const type = box.querySelector('[data-k="restart.type"]');
+  type.onchange = () => processFields(box);
+  processFields(box);
   document.getElementById("roles").appendChild(box);
   boxes[role] = box;
+}
+
+// With restart type process OmniaCI starts odoo-bin itself: no service, and
+// the log is the output it collects.
+function processFields(box) {
+  const process = box.querySelector('[data-k="restart.type"]').value === "process";
+  for (const key of ["restart.service", "restart.sudo", "log_file"]) {
+    box.querySelector(`[data-k="${key}"]`).disabled = process;
+  }
+  box.querySelector('[data-k="log_file"]').placeholder = process ? "Odoo's output, in " + MODEL.logs_dir : "";
+  if (process) box.querySelector('[data-k="log_file"]').value = "";
+}
+
+// Fill database, log file and repositories from the Odoo config file; a
+// repository already listed with the same path keeps its name (it pairs
+// test with production).
+async function reloadConf(box) {
+  const notes = box.querySelector(".conf-notes"), button = box.querySelector(".reload-conf");
+  const path = box.querySelector('[data-k="odoo_config"]').value.trim();
+  button.disabled = true;
+  const resp = await fetch("/api/odoo-config", {
+    method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({path}),
+  }).catch(() => null);
+  button.disabled = false;
+  const data = resp ? await resp.json().catch(() => ({})) : {};
+  notes.hidden = false;
+  notes.replaceChildren();
+  const line = (text, cls) => { const p = document.createElement("p"); p.textContent = text; if (cls) p.className = cls; notes.appendChild(p); };
+  if (!resp || !resp.ok) {
+    line(data.error || data.detail || (resp ? "Error " + resp.status : "The server does not answer"), "error");
+    return;
+  }
+  const loaded = [];
+  for (const key of ["database", "log_file"]) {
+    if (data[key] && !box.querySelector(`[data-k="${key}"]`).disabled) { box.querySelector(`[data-k="${key}"]`).value = data[key]; loaded.push(key.replace("_", " ")); }
+  }
+  if (data.repositories.length) {
+    const tbody = box.querySelector("tbody"), names = {};
+    for (const tr of tbody.querySelectorAll("tr")) {
+      const p = tr.querySelector('[data-r="path"]').value.trim().replace(/\/+$/, "");
+      if (p) names[p] = tr.querySelector('[data-r="name"]').value.trim();
+    }
+    tbody.replaceChildren();
+    for (const repo of data.repositories) repoRow(tbody, {...repo, name: names[repo.path] || repo.name});
+    loaded.push(data.repositories.length + " repositories");
+  }
+  line(loaded.length ? "Loaded " + loaded.join(", ") + "." : "Nothing loaded.", loaded.length ? "status success" : "");
+  for (const note of data.notes) line(note, "muted");
 }
 
 document.getElementById("form").addEventListener("submit", async (ev) => {
@@ -122,6 +180,7 @@ document.getElementById("form").addEventListener("submit", async (ev) => {
     if (!box.querySelector(".enabled").checked) continue;
     const data = {};
     for (const input of box.querySelectorAll("[data-k]")) {
+      if (input.disabled) continue;
       let value = input.type === "checkbox" ? input.checked : input.value.trim();
       if (input.type === "number") value = Number(value);
       if ((input.dataset.k === "auto_update.window" || input.dataset.k === "odoo_bin") && !value) continue;
@@ -131,8 +190,12 @@ document.getElementById("form").addEventListener("submit", async (ev) => {
     for (const tr of box.querySelectorAll("tbody tr")) {
       const repo = {};
       for (const input of tr.querySelectorAll("[data-r]")) repo[input.dataset.r] = input.value.trim();
-      if (Object.values(repo).some(Boolean)) data.repositories.push(repo);
+      // name and remote alone are the defaults of an untouched row
+      if (repo.path || repo.branch) data.repositories.push(repo);
     }
+    // a role left blank is a role not used
+    const typed = ["database", "odoo_config", "log_file", "venv_bin", "odoo_bin"].some((k) => data[k]);
+    if (!typed && !data.repositories.length) continue;
     server[role] = data;
   }
   const resp = await fetch("/api/servers/save", {

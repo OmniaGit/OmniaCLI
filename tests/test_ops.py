@@ -1,3 +1,5 @@
+import os
+
 import pytest
 
 from omniaci import ops
@@ -120,3 +122,141 @@ async def test_run_timeout():
     j = job()
     with pytest.raises(JobFailed, match="did not finish"):
         await ops.run(j, ["sleep", "5"], timeout=0.2)
+
+
+FAKE_ODOO = """import os, sys, time
+print("odoo up", " ".join(sys.argv[1:]), flush=True)
+if os.fork() == 0:  # a worker, in the same process group
+    print("worker up", flush=True)
+time.sleep(120)
+"""
+
+
+def process_instance(tmp_path):
+    import sys
+
+    from omniaci.config import parse_servers
+
+    venv = tmp_path / "pvenv" / "bin"
+    venv.mkdir(parents=True)
+    (venv / "python").symlink_to(sys.executable)
+    odoo = tmp_path / "podoo"
+    odoo.mkdir()
+    (odoo / "odoo-bin").write_text(FAKE_ODOO)
+    conf = tmp_path / "process.conf"
+    conf.write_text("[options]\n")
+    data = {"s": {"test": {
+        "database": "DB", "odoo_config": str(conf), "venv_bin": str(venv),
+        "odoo_bin": str(odoo / "odoo-bin"), "restart": {"type": "process"},
+        "repositories": [{"name": "odoo", "path": str(odoo), "branch": "x"}],
+    }}}
+    return parse_servers(data, tmp_path / "logs")["s"].test
+
+
+def group_alive(instance, pid):
+    return [p for p in ops.foreign_pids(instance, None) if ops._pgid(p) == pid and ops._alive(p)]
+
+
+@pytest.fixture(autouse=True)
+def quick_start(monkeypatch):
+    monkeypatch.setattr(ops, "START_WAIT", 1)
+
+
+async def test_process_start_restart_stop(tmp_path):
+    import asyncio
+    import subprocess
+    import sys
+
+    instance = process_instance(tmp_path)
+    assert instance.log_file == tmp_path / "logs" / "s_test.log"
+    assert ops.managed_pid(instance) is None
+    j = job()
+    await ops.restart(j, instance)
+    first = ops.managed_pid(instance)
+    assert first and len(group_alive(instance, first)) == 2  # Odoo and its worker
+    await ops.restart(job(), instance)
+    second = ops.managed_pid(instance)
+    assert second and second != first and not group_alive(instance, first)
+    log = instance.log_file.read_text()
+    assert log.count("started by OmniaCI") == 2 and log.count("worker up") == 2
+    assert f"-c {instance.odoo_config}" in log
+
+    # found again from the pid file, as after a restart of OmniaCI
+    ops._children.clear()
+    assert ops.managed_pid(instance) == second
+
+    # an Odoo with the same config that OmniaCI did not start is never touched
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)",
+                              "-c", str(instance.odoo_config)])
+    try:
+        await asyncio.sleep(0.2)
+        with pytest.raises(JobFailed, match=f"did not start it \\(pid {other.pid}\\)"):
+            await ops.restart(job(), instance)
+        assert other.poll() is None and ops.managed_pid(instance) == second
+    finally:
+        other.kill()
+        other.wait()
+
+    await ops.stop_process(job(), instance, second)
+    assert ops.managed_pid(instance) is None and not group_alive(instance, second)
+    assert not instance.pid_file.exists()
+
+
+async def test_process_exits_at_once(tmp_path):
+    instance = process_instance(tmp_path)
+    instance.odoo_bin.write_text("import sys; print('bad config'); sys.exit(3)\n")
+    with pytest.raises(JobFailed, match="exited with code 3"):
+        await ops.restart(job(), instance)
+    assert "bad config" in instance.log_file.read_text() and not instance.pid_file.exists()
+
+
+def test_process_type_config(tmp_path):
+    from omniaci.config import ConfigError, parse_servers, server_to_dict
+
+    instance = process_instance(tmp_path)
+    assert instance.restart.service == ""
+    data = server_to_dict(parse_servers({"s": {"test": {
+        "database": "DB", "odoo_config": "/c", "venv_bin": "/v", "restart": {"type": "process"},
+        "repositories": [{"name": "odoo", "path": "/o", "branch": "x"}]}}}, tmp_path)["s"])
+    assert "log_file" not in data["test"] and data["test"]["restart"] == {"type": "process"}
+    with pytest.raises(ConfigError, match="logs folder"):
+        parse_servers({"s": data})
+
+
+def test_odoo_env(tmp_path):
+    instance = process_instance(tmp_path)
+    assert ops.odoo_env(instance)["PYTHONPATH"].split(os.pathsep)[0] == str(instance.odoo_bin.parent)
+    instance.odoo_bin.unlink()
+    assert ops.odoo_env(instance) is ops._ENV
+
+
+async def test_process_stop(tmp_path, monkeypatch):
+    instance = process_instance(tmp_path)
+    j = job()
+    await ops.stop(j, instance)  # not running: nothing to do
+    assert "not running" in j.lines[-1]
+    await ops.restart(job(), instance)
+    pid = ops.managed_pid(instance)
+    await ops.stop(job(), instance)
+    assert ops.managed_pid(instance) is None and not group_alive(instance, pid)
+
+    # the auto update leaves a stopped Odoo stopped, a manual pull + restart starts it
+    async def pulled(job, instance):
+        return True
+
+    async def no_update(job, instance, force=False):
+        pass
+    monkeypatch.setattr(ops, "pull", pulled)
+    monkeypatch.setattr(ops, "update_modules", no_update)
+    j = job()
+    await ops.pull_restart(j, instance, only_if_changed=True)
+    assert "not started again" in j.lines[-1] and ops.managed_pid(instance) is None
+    await ops.pull_restart(job(), instance)
+    pid = ops.managed_pid(instance)
+    assert pid
+    await ops.stop(job(), instance)
+
+
+async def test_stop_only_process(env):
+    with pytest.raises(JobFailed, match="restart type process"):
+        await ops.stop(job(), env["settings"].instance("srv", "test"))

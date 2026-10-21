@@ -7,6 +7,7 @@ from omniaci.config import (
     AutoUpdate,
     ConfigError,
     load_servers,
+    load_settings,
     parse_servers,
     parse_settings,
     save_servers,
@@ -104,3 +105,21 @@ def test_settings_servers_file_relative(tmp_path):
     main = {"auth": {"users": {"a": "h"}}, "backup_dir": "/b", "jobs_dir": "/j"}
     settings = parse_settings(main, base_dir=tmp_path)
     assert settings.servers_file == tmp_path / "servers.yaml" and settings.servers == {}
+
+
+def test_settings_file_missing(tmp_path):
+    with pytest.raises(ConfigError, match="cannot read .*omniaci.yaml: No such file"):
+        load_settings(tmp_path / "omniaci.yaml")
+
+
+def test_incomplete_draft_kept_active_refused(tmp_path):
+    data = _settings(["odoo"], ["odoo"])
+    del data["s"]["test"]["repositories"][0]["path"]
+    with pytest.raises(ConfigError, match="path"):
+        parse_servers(data)
+    data["s"]["status"] = "draft"
+    draft = parse_servers(data)["s"]
+    assert not draft.active and draft.instances == {} and "missing 'path'" in draft.error
+    path = tmp_path / "servers.yaml"
+    save_servers(path, {"s": draft})
+    assert load_servers(path) == {"s": draft}

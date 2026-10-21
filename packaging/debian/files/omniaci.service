@@ -15,6 +15,9 @@ WorkingDirectory=/var/lib/omniaci
 ExecStart=/opt/omniaci/venv/bin/omniaci serve -c ${OMNIACI_CONFIG} --host ${OMNIACI_HOST} --port ${OMNIACI_PORT}
 Restart=on-failure
 RestartSec=5
+# stop only OmniaCI: the Odoo instances it starts itself (restart type
+# process) keep running across its restarts and upgrades
+KillMode=process
 # no NoNewPrivileges: the restart of the Odoo services goes through sudo
 
 [Install]

@@ -211,9 +211,10 @@ async def test_config_invalid_and_busy(client, env):
     settings = env["settings"]
     before = settings.servers_file.read_text()
     bad = {"test": {"database": "x"}}
+    # a live server is not replaced by settings that cannot pass the checks
     resp = await client.post("/api/servers/save", headers=POST,
-                             json={"original": "srv", "name": "srv", "server": bad})
-    assert resp.status_code == 400 and "missing" in resp.json()["error"]
+                             json={"original": "srv", "name": "srv", "server": bad, "activate": True})
+    assert resp.status_code == 400 and "incomplete" in resp.json()["checks"][0]["detail"]
     resp = await client.post("/api/servers/save", headers=POST,
                              json={"original": None, "name": "bad/name", "server": bad})
     assert resp.status_code == 400
@@ -372,3 +373,134 @@ async def test_backup_and_download(client, env):
     for bad in ("/backups/srv/test/" + result["file"], "/backups/srv/production/..%2F..%2Fjobs",
                 "/backups/srv/production/x.txt"):
         assert (await client.get(bad, headers={"Authorization": AUTH})).status_code == 404, bad
+
+
+async def test_breadcrumbs(client, env):
+    import re
+
+    def crumbs(html):
+        nav = re.search(r'<nav class="crumbs".*?</nav>', html, re.S).group(0)
+        return re.findall(r'<(?:a href="([^"]*)"|span aria-current="page")>([^<]*)<', nav)
+
+    get = lambda url: client.get(url, headers={"Authorization": AUTH})
+    assert crumbs((await get("/servers/srv?view=test")).text) == [("/", "Servers"), ("/servers/srv", "srv"), ("", "Test")]
+    assert crumbs((await get("/servers/srv/production/log")).text)[-2:] == [
+        ("/servers/srv?view=production", "Production"), ("", "Log")]
+    assert crumbs((await get("/config/srv/edit")).text) == [("/config", "Configuration"), ("", "Edit srv")]
+    resp = await client.post("/servers/srv/test/pull", headers=POST)
+    job_id = resp.headers["location"].rsplit("/", 1)[1]
+    await wait_job(client, job_id)
+    assert crumbs((await get(f"/jobs/{job_id}")).text) == [
+        ("/", "Servers"), ("/servers/srv", "srv"), ("/servers/srv?view=test", "Test"), ("", "Git pull srv/test")]
+    assert 'class="crumbs"' not in (await get("/")).text  # top level pages have none
+
+
+async def test_read_odoo_config(client, env):
+    tmp = env["tmp"]
+    odoo, addons = tmp / "production" / "odoo", tmp / "production" / "addons"
+    (addons / "sub").mkdir()
+    conf = tmp / "read.conf"
+    conf.write_text(f"[options]\naddons_path = {addons}/sub,\n    {odoo},\n    {addons},\n"
+                    f"    {tmp}/missing\ndb_name = False\ndbfilter = ^PROD$\nlogfile = /var/log/x.log\n")
+    resp = await client.post("/api/odoo-config", headers=POST, json={"path": str(conf)})
+    data = resp.json()
+    assert resp.status_code == 200, data
+    assert data["database"] == "PROD" and data["log_file"] == "/var/log/x.log"
+    assert data["repositories"] == [
+        {"name": "addons", "path": str(addons), "remote": "origin", "branch": "main"},
+        {"name": "odoo", "path": str(odoo), "remote": "origin", "branch": "main"},
+    ]
+    assert any("missing: no such folder" in n for n in data["notes"])
+    assert any("odoo-bin" in n for n in data["notes"])
+
+    conf.write_text("[options]\ndb_name = A,B\n")
+    data = (await client.post("/api/odoo-config", headers=POST, json={"path": str(conf)})).json()
+    assert data["database"] is None and data["log_file"] is None and data["repositories"] == []
+    assert any("several databases" in n for n in data["notes"])
+
+    for path, error in ((tmp / "none.conf", "cannot read"), (env["tmp"] / "odoo.log", "no [options]")):
+        resp = await client.post("/api/odoo-config", headers=POST, json={"path": str(path)})
+        assert resp.status_code == 400 and error in resp.json()["error"]
+
+
+async def test_incomplete_draft(client, env):
+    settings = env["settings"]
+    from omniaci.config import load_servers
+
+    draft = {"production": {"database": "DB", "odoo_config": "/etc/odoo.conf",
+                            "repositories": [{"name": "odoo", "remote": "origin", "branch": "20.0"}]}}
+    resp = await client.post("/api/servers/save", headers=POST,
+                             json={"original": None, "name": "V20", "server": draft})
+    assert resp.status_code == 200 and resp.json()["status"] == "draft", resp.text
+    # kept as entered, also after a restart
+    saved = load_servers(settings.servers_file)["V20"]
+    assert saved.instances == {} and saved.data == draft and "missing 'path'" in saved.error
+    page = (await client.get("/config", headers={"Authorization": AUTH})).text
+    assert "Incomplete: servers.V20.production" in page
+    edit = (await client.get("/config/V20/edit", headers={"Authorization": AUTH})).text
+    assert '"odoo_config": "/etc/odoo.conf"' in edit
+    # not live and cannot be activated until complete
+    assert (await client.get("/servers/V20", headers={"Authorization": AUTH})).status_code == 404
+    data = (await client.post("/api/servers/V20/test", headers=POST)).json()
+    assert not data["ok"] and data["status"] == "draft" and "incomplete" in data["checks"][0]["detail"]
+    resp = await client.post("/api/servers/save", headers=POST,
+                             json={"original": "V20", "name": "V20", "server": draft, "activate": True})
+    assert resp.status_code == 200 and resp.json()["status"] == "draft"
+    assert not resp.json()["checks"][0]["ok"]
+    # completed, it parses again
+    draft["production"]["repositories"][0]["path"] = "/opt/odoo"
+    draft["production"].update(log_file="/l", venv_bin="/v", restart={"type": "systemd", "service": "o"})
+    resp = await client.post("/api/servers/save", headers=POST,
+                             json={"original": "V20", "name": "V20", "server": draft})
+    srv = settings.servers["V20"]
+    assert resp.status_code == 200 and srv.error is None and srv.production.database == "DB"
+
+
+async def test_stop_button(client, env):
+    from .test_ops import process_instance
+
+    get = lambda url: client.get(url, headers={"Authorization": AUTH})
+    assert (await client.post("/servers/srv/test/stop", headers=POST)).status_code == 400
+    assert "/stop" not in (await get("/servers/srv")).text
+    srv = env["settings"].servers["srv"]
+    instance = process_instance(env["tmp"])
+    instance.server, instance.role = "srv", "test"
+    srv.instances["test"] = instance
+    page = (await get("/servers/srv?view=test")).text
+    assert ">Start</button>" in page and "/stop" not in page and "stopped" in page
+    from omniaci import ops
+    await ops.restart_process(ops.Job(id="t", title="t", instances=[], source="t"), instance)
+    try:
+        page = (await get("/servers/srv?view=test")).text
+        assert ">Restart</button>" in page and "/servers/srv/test/stop" in page
+        resp = await client.post("/servers/srv/test/stop", headers=POST)
+        data = await wait_job(client, resp.headers["location"].rsplit("/", 1)[1])
+        assert data["status"] == "success" and ops.managed_pid(instance) is None
+    finally:
+        pid = ops.managed_pid(instance)
+        if pid:
+            await ops.stop_process(ops.Job(id="t", title="t", instances=[], source="t"), instance, pid)
+
+
+async def test_jobs_server_column_and_filter(client, env):
+    get = lambda url: client.get(url, headers={"Authorization": AUTH})
+    ids = []
+    for role in ("test", "production"):
+        resp = await client.post(f"/servers/srv/{role}/pull", headers=POST)
+        ids.append(resp.headers["location"].rsplit("/", 1)[1])
+        await wait_job(client, ids[-1])
+    jobs = client.app.state.jobs
+    other = jobs.submit("Git pull other/test", ["other/test"], "manual: bob", lambda job: asyncio.sleep(0))
+    await wait_job(client, other.id)
+
+    page = (await get("/jobs")).text
+    assert "<th>Server</th>" in page and 'href="/jobs?server=srv"' in page and "3 jobs" in page
+    assert '<option value="other"' in page  # a server only the jobs know
+    page = (await get("/jobs?server=srv")).text
+    assert "2 jobs" in page and other.id not in page and all(i in page for i in ids)
+    page = (await get("/jobs?q=BOB")).text
+    assert "1 job." in page and other.id in page and ids[0] not in page
+    page = (await get("/jobs?server=srv&q=production")).text
+    assert "1 job." in page and ids[1] in page and ids[0] not in page
+    assert "No jobs match." in (await get("/jobs?server=nope")).text
+    assert 'href="/jobs?server=srv"' in (await get("/servers/srv")).text

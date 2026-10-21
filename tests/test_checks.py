@@ -51,3 +51,18 @@ async def test_repository_problems_are_reported(env):
 def test_passed_ignores_warnings():
     assert checks.passed([checks.Check("x", "a", False, "", checks.WARNING)])
     assert not checks.passed([checks.Check("x", "a", False, "")])
+
+
+async def test_process_type_checks(tmp_path):
+    from omniaci import checks
+
+    from .test_ops import process_instance
+
+    instance = process_instance(tmp_path)
+    result = {c.name: c for c in await checks._instance_checks(instance)}
+    assert result["Log folder"].ok and result["odoo-bin"].ok
+    assert not result["Odoo process"].ok and result["Odoo process"].level == checks.WARNING
+    assert "Service" not in result and "Restart permission" not in result and "Log file" not in result
+    instance.odoo_bin.unlink()
+    result = {c.name: c for c in await checks._instance_checks(instance)}
+    assert not result["odoo-bin"].ok and result["odoo-bin"].level == checks.ERROR
