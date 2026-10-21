@@ -25,6 +25,10 @@ RESTART_TIMEOUT = 300
 # and seconds it has to stop on SIGTERM before SIGKILL
 START_WAIT = 5
 STOP_TIMEOUT = 60
+# pip may build packages from source (psycopg2, lxml...)
+PIP_TIMEOUT = 1800
+# what OmniaCI runs in an instance's venv: click-odoo-update, click-odoo-backupdb
+CLI_PACKAGE = "click-odoo-contrib"
 
 
 async def run(
@@ -452,6 +456,42 @@ async def restart_process(job: Job, instance: Instance) -> None:
     if own is not None:
         await stop_process(job, instance, own)
     await start_process(job, instance)
+
+
+def requirement_files(instance: Instance) -> list[Path]:
+    """Odoo's requirements.txt (next to odoo-bin), then each repository's."""
+    found = []
+    odoo_bin = find_odoo_bin(instance)
+    candidates = [odoo_bin.parent] if odoo_bin is not None else []
+    for folder in candidates + [r.path for r in instance.repositories]:
+        path = folder / "requirements.txt"
+        if path.is_file() and path not in found:
+            found.append(path)
+    return found
+
+
+async def pip_install(job: Job, instance: Instance, args: list[str]) -> None:
+    await run(
+        job,
+        [instance.venv_bin / "python", "-m", "pip", "install", "--disable-pip-version-check", *args],
+        timeout=PIP_TIMEOUT,
+    )
+
+
+async def install_requirements(job: Job, instance: Instance) -> None:
+    """pip install, in the instance's venv, the requirements of Odoo and of
+    every repository, in one resolution."""
+    files = requirement_files(instance)
+    if not files:
+        raise JobFailed("no requirements.txt next to odoo-bin nor in the repositories")
+    job.log("--- requirements: " + ", ".join(str(f) for f in files))
+    await pip_install(job, instance, [arg for f in files for arg in ("-r", str(f))])
+
+
+async def install_cli(job: Job, instance: Instance) -> None:
+    """pip install the scripts OmniaCI runs in the instance's venv."""
+    job.log(f"--- {CLI_PACKAGE} in {instance.venv_bin}")
+    await pip_install(job, instance, [CLI_PACKAGE])
 
 
 async def backup(job: Job, instance: Instance, backup_dir: Path) -> Path:

@@ -316,6 +316,34 @@ def create_app(settings: Settings) -> FastAPI:
             )
         )
 
+    @app.post("/servers/{server}/{role}/pip-requirements")
+    async def action_pip_requirements(request: Request, server: str, role: str,
+                                      user: Principal = Depends(developer)):
+        instance = get_instance(server, role)
+        return started(
+            request,
+            jobs.submit(
+                f"pip install requirements {instance.key}",
+                [instance.key],
+                f"manual: {user}",
+                lambda job: ops.install_requirements(job, instance),
+            )
+        )
+
+    @app.post("/servers/{server}/{role}/pip-cli")
+    async def action_pip_cli(request: Request, server: str, role: str,
+                             user: Principal = Depends(developer)):
+        instance = get_instance(server, role)
+        return started(
+            request,
+            jobs.submit(
+                f"pip install {ops.CLI_PACKAGE} {instance.key}",
+                [instance.key],
+                f"manual: {user}",
+                lambda job: ops.install_cli(job, instance),
+            )
+        )
+
     @app.get("/api/servers/{server}/{role}/addons")
     async def addons(server: str, role: str):
         instance = get_instance(server, role)

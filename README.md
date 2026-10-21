@@ -14,6 +14,8 @@ config file, a log file and a systemd or init.d service.
 | Update modules | ✓ | ✓ | a popup asks: the changed modules (`click-odoo-update`) or chosen ones (`odoo-bin -u … --stop-after-init --workers=0`), and whether to restart after |
 | Restart | ✓ | ✓ | the instance's systemd or init.d restart, or OmniaCI's own start of `odoo-bin` (see below) |
 | Backup | ✓ | ✓ | `click-odoo-backupdb` → `<backup_dir>/<server>/<role>/<db>_<timestamp>.zip` |
+| pip requirements | ✓ | ✓ | `<venv_bin>/python -m pip install -r` the `requirements.txt` next to `odoo-bin` and that of every repository having one, in one call |
+| pip click-odoo | ✓ | ✓ | `<venv_bin>/python -m pip install click-odoo-contrib`, the scripts OmniaCI runs in the venv |
 | Merge test to production | | ✓ | backup production, merge, push, update modules, restart production |
 | Log | ✓ | ✓ | `tail -F` of the Odoo log in the browser, with an "errors only" filter |
 

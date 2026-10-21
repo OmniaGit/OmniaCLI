@@ -774,3 +774,41 @@ async def test_own_password(client):
     assert resp.status_code == 200, resp.text
     assert (await client.get("/", headers=luca)).status_code == 401
     assert (await client.get("/", headers={"Authorization": auth_of("luca", "luca-pass-2")})).status_code == 200
+
+
+async def test_pip_buttons(client, env):
+    settings = client.app.state.settings
+    inst = settings.instance("srv", "test")
+    calls = env["tmp"] / "pip.log"
+    python = inst.venv_bin / "python"
+    python.write_text(f'#!/bin/sh\necho "python $*" >> {calls}\n')
+    python.chmod(0o755)
+    headers = {"Authorization": basic("dev"), "Origin": f"http://{HOST}"}
+    page = (await client.get("/servers/srv?view=test", headers=headers)).text
+    assert "/servers/srv/test/pip-requirements" in page and "/servers/srv/test/pip-cli" in page
+    assert "pip-requirements" not in (await client.get("/servers/srv?view=test",
+                                                        headers={"Authorization": basic("viewer")})).text
+
+    # no requirements.txt anywhere: the job says so
+    resp = await client.post("/servers/srv/test/pip-requirements", headers=headers)
+    data = await wait_job(client, resp.headers["location"].rsplit("/", 1)[1])
+    assert data["status"] == "failed" and "no requirements.txt" in data["error"]
+
+    odoo, addons = inst.repository("odoo").path, inst.repository("addons").path
+    (odoo / "odoo-bin").write_text("")
+    (odoo / "requirements.txt").write_text("lxml\n")
+    (addons / "requirements.txt").write_text("requests\n")
+    resp = await client.post("/servers/srv/test/pip-requirements", headers=headers)
+    data = await wait_job(client, resp.headers["location"].rsplit("/", 1)[1])
+    assert data["status"] == "success" and data["source"] == "manual: dev", data
+    # Odoo's first, once even though odoo-bin is in a repository too
+    assert calls.read_text().splitlines() == [
+        f"python -m pip install --disable-pip-version-check -r {odoo}/requirements.txt -r {addons}/requirements.txt"]
+
+    resp = await client.post("/servers/srv/test/pip-cli", headers=headers)
+    data = await wait_job(client, resp.headers["location"].rsplit("/", 1)[1])
+    assert data["status"] == "success" and data["title"] == "pip install click-odoo-contrib srv/test"
+    assert calls.read_text().splitlines()[-1] == "python -m pip install --disable-pip-version-check click-odoo-contrib"
+    for url in ("/servers/srv/test/pip-requirements", "/servers/srv/test/pip-cli"):
+        resp = await client.post(url, headers={"Authorization": basic("viewer"), "Origin": f"http://{HOST}"})
+        assert resp.status_code == 403
