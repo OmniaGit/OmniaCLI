@@ -3,10 +3,10 @@ set -e
 
 case "$1" in
     remove)
-        rm -rf /opt/omniaci/venv /opt/omniaci/venv.old
+        rm -rf /opt/omniaci/venv /opt/omniaci/venv.old /opt/omniaci/python /opt/omniaci/python.old /opt/omniaci/.python.*
         ;;
     purge)
-        rm -rf /opt/omniaci/venv /opt/omniaci/venv.old
+        rm -rf /opt/omniaci/venv /opt/omniaci/venv.old /opt/omniaci/python /opt/omniaci/python.old /opt/omniaci/.python.*
         rm -f /etc/omniaci/omniaci.yaml /etc/omniaci/initial-admin-password
         rmdir /etc/omniaci 2>/dev/null || true
         # the configuration and the job history go; the backups stay

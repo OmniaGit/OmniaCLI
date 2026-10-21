@@ -5,27 +5,94 @@ VENV=/opt/omniaci/venv
 CONFIG=/etc/omniaci/omniaci.yaml
 PASSWORD_FILE=/etc/omniaci/initial-admin-password
 
-# Build the venv with the system python3 and the dependencies locked for it.
-# The previous venv is kept until the new one is complete.
-build_venv() {
-    pyver=$(python3 -c 'import sys; print("py%d%d" % sys.version_info[:2])')
-    lock="/opt/omniaci/requirements/$pyver.txt"
-    if [ ! -f "$lock" ]; then
-        echo "omniaci: python3 $(python3 -V 2>&1) is not supported: no $lock" >&2
+BUNDLED=/opt/omniaci/python
+# The Python for a machine without any python3.10+ (Debian 11 has 3.9): a
+# python-build-standalone build, downloaded once and checked against its sha256
+BUNDLED_URL=https://github.com/astral-sh/python-build-standalone/releases/download/20261020/cpython-3.12.15%2B20261020-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz
+BUNDLED_SHA256=7d6ef1164fb94c4b60d913340610fc7e0ef8e3d1b705aa5628b299b08cbdd4b5
+
+# Print py<major><minor> of a Python 3.10+ that can build the venv, fail otherwise.
+usable() {
+    "$1" -c 'import sys, ssl, zlib, ensurepip, venv
+assert sys.version_info >= (3, 10)
+print("py%d%d" % sys.version_info[:2])' 2>/dev/null
+}
+
+# Download the bundled Python into $BUNDLED, unless it is there already. The
+# previous one is kept in $BUNDLED.old until the venv is built on the new one.
+fetch_bundled() {
+    [ "$(cat "$BUNDLED/.sha256" 2>/dev/null)" = "$BUNDLED_SHA256" ] && return 0
+    if [ "$(uname -m)" != x86_64 ]; then
+        echo "omniaci: no python3.10 or newer here, and the bundled Python is for x86_64 only: install python3.10+" >&2
         exit 1
     fi
+    echo "omniaci: $(python3 -V 2>&1) and no python3.10+ here: downloading Python 3.12 into $BUNDLED"
+    tmp=$(mktemp -d /opt/omniaci/.python.XXXXXX)
+    if ! python3 - "$BUNDLED_URL" "$BUNDLED_SHA256" "$tmp/python.tar.gz" <<'EOF'
+import hashlib, sys, urllib.request
+url, sha256, dest = sys.argv[1:]
+digest = hashlib.sha256()
+with urllib.request.urlopen(url, timeout=60) as response, open(dest, "wb") as out:
+    for chunk in iter(lambda: response.read(1 << 20), b""):
+        digest.update(chunk)
+        out.write(chunk)
+if digest.hexdigest() != sha256:
+    sys.exit("sha256 %s, expected %s" % (digest.hexdigest(), sha256))
+EOF
+    then
+        rm -rf "$tmp"
+        echo "omniaci: Python could not be downloaded from $BUNDLED_URL (is github.com reachable?)" >&2
+        exit 1
+    fi
+    tar -xzf "$tmp/python.tar.gz" -C "$tmp"
+    echo "$BUNDLED_SHA256" > "$tmp/python/.sha256"
+    rm -rf "$BUNDLED.old"
+    [ -d "$BUNDLED" ] && mv "$BUNDLED" "$BUNDLED.old"
+    mv "$tmp/python" "$BUNDLED"
+    rm -rf "$tmp"
+}
+
+# The Python of the venv: the system python3 when it is 3.10+, otherwise a
+# local python3.10+ (the newest), otherwise the bundled one. Each must have a
+# lock for its version.
+pick_python() {
+    for py in python3 python3.13 python3.12 python3.11 python3.10 \
+              /usr/local/bin/python3.13 /usr/local/bin/python3.12 \
+              /usr/local/bin/python3.11 /usr/local/bin/python3.10; do
+        py_bin=$(command -v "$py") || continue
+        pyver=$(usable "$py_bin") || continue
+        [ -f "/opt/omniaci/requirements/$pyver.txt" ] && return 0
+    done
+    fetch_bundled
+    py_bin="$BUNDLED/bin/python3"
+    pyver=$(usable "$py_bin") && [ -f "/opt/omniaci/requirements/$pyver.txt" ] && return 0
+    echo "omniaci: the bundled Python $py_bin cannot build the venv" >&2
+    exit 1
+}
+
+# Build the venv and install the dependencies locked for its Python.
+# The previous venv (and bundled Python) is kept until the new one is complete.
+build_venv() {
+    pick_python
+    lock="/opt/omniaci/requirements/$pyver.txt"
     rm -rf "$VENV.old"
     [ -d "$VENV" ] && mv "$VENV" "$VENV.old"
-    echo "omniaci: installing the Python dependencies ($pyver) in $VENV"
-    if python3 -m venv "$VENV" \
+    echo "omniaci: installing the Python dependencies ($py_bin, $pyver) in $VENV"
+    if "$py_bin" -m venv "$VENV" \
         && "$VENV/bin/pip" install -q --disable-pip-version-check --no-cache-dir -r "$lock" \
         && "$VENV/bin/pip" install -q --disable-pip-version-check --no-cache-dir --no-deps \
             /opt/omniaci/dist/omniaci-*.whl; then
-        rm -rf "$VENV.old"
+        rm -rf "$VENV.old" "$BUNDLED.old"
+        # a local Python took the place of the bundled one
+        case "$py_bin" in "$BUNDLED"/*) ;; *) rm -rf "$BUNDLED" ;; esac
     else
         echo "omniaci: the venv could not be built (is PyPI reachable?)" >&2
         rm -rf "$VENV"
         [ -d "$VENV.old" ] && mv "$VENV.old" "$VENV"
+        if [ -d "$BUNDLED.old" ]; then
+            rm -rf "$BUNDLED"
+            mv "$BUNDLED.old" "$BUNDLED"
+        fi
         exit 1
     fi
 }

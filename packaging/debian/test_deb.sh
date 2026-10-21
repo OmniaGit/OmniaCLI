@@ -4,13 +4,16 @@
 # admin password logs in, a server saved through the API is pulled and its
 # (dummy) Odoo service restarted through sudo, then reinstall, remove, purge.
 #
+# An image named <image>+localpy also gets a working python3.12 and a broken
+# python3.13 in /usr/local/bin: the venv must be built on the python3.12.
+#
 # Usage: packaging/debian/test_deb.sh <package.deb> [image ...]
 set -euo pipefail
 
 DEB="$(readlink -f "${1:?usage: test_deb.sh <package.deb> [image ...]}")"
 shift
 IMAGES=("$@")
-[ ${#IMAGES[@]} -gt 0 ] || IMAGES=(debian:11 ubuntu:22.04 debian:12 ubuntu:24.04 debian:13)
+[ ${#IMAGES[@]} -gt 0 ] || IMAGES=(debian:11 debian:11+localpy ubuntu:22.04 debian:12 ubuntu:24.04 debian:13)
 HERE="$(cd "$(dirname "$0")" && pwd)"
 LOGS="$(mktemp -d)"
 
@@ -35,6 +38,15 @@ PW="$(cat /etc/omniaci/initial-admin-password)"
 [ "$(curl -s -o /dev/null -w '%{http_code}' localhost:8090/)" = 401 ] || fail "no 401 without login"
 [ "$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$PW" localhost:8090/)" = 200 ] || fail "admin login"
 echo "python: $(/opt/omniaci/venv/bin/python -V), $(/opt/omniaci/venv/bin/pip freeze | grep -iE '^(fastapi|starlette)==' | tr '\n' ' ')"
+VENV_HOME="$(sed -n 's/^home = //p' /opt/omniaci/venv/pyvenv.cfg)"
+echo "venv built on $VENV_HOME"
+[ "$VENV_HOME" = "$EXPECT_HOME" ] || fail "venv built on $VENV_HOME, expected $EXPECT_HOME"
+/opt/omniaci/venv/bin/python -c 'import mcp' || fail "mcp not installed"
+if [ "$EXPECT_HOME" = /opt/omniaci/python/bin ]; then
+    grep -q 'downloading Python' /tmp/install.log || fail "bundled Python not downloaded"
+else
+    [ ! -e /opt/omniaci/python ] || fail "/opt/omniaci/python created with a usable local Python"
+fi
 
 step "a server with a git repository and a dummy Odoo service"
 cat > /etc/systemd/system/odoo-dummy.service <<'EOF'
@@ -116,7 +128,8 @@ PY
 
 step "reinstall keeps config, servers and password"
 HASH_BEFORE="$(sha256sum /etc/omniaci/omniaci.yaml)"
-dpkg -i /opt/omniaci-test/omniaci.deb >/dev/null 2>&1 || fail "reinstall"
+dpkg -i /opt/omniaci-test/omniaci.deb > /tmp/reinstall.log 2>&1 || { tail -20 /tmp/reinstall.log; fail "reinstall"; }
+grep -q 'downloading Python' /tmp/reinstall.log && fail "bundled Python downloaded again on reinstall"
 for i in $(seq 30); do curl -s -o /dev/null localhost:8090 && break; sleep 1; done
 systemctl is-active --quiet omniaci || fail "service not active after reinstall"
 [ "$(sha256sum /etc/omniaci/omniaci.yaml)" = "$HASH_BEFORE" ] || fail "config changed by reinstall"
@@ -126,6 +139,7 @@ step "remove and purge"
 apt-get remove -y -qq omniaci >/dev/null 2>&1 || fail "remove"
 systemctl is-active --quiet omniaci && fail "service still running after remove"
 [ ! -e /opt/omniaci/venv ] || fail "venv left after remove"
+[ ! -e /opt/omniaci/python ] || fail "bundled Python left after remove"
 [ -e /etc/omniaci/omniaci.yaml ] || fail "config removed by remove"
 apt-get purge -y -qq omniaci >/dev/null 2>&1 || fail "purge"
 [ ! -e /etc/omniaci ] || fail "/etc/omniaci left after purge"
@@ -133,8 +147,20 @@ apt-get purge -y -qq omniaci >/dev/null 2>&1 || fail "purge"
 echo "ALL CHECKS PASSED"
 EOS
 
+# the Python a local python3.12 is taken from: the package's bundled one
+BUNDLED_URL="$(dpkg-deb --ctrl-tarfile "$DEB" | tar -xO ./postinst | sed -n 's/^BUNDLED_URL=//p')"
+
 test_one() {
-    local image="$1" tag="omniaci-test-${1//[:\/]/-}" log="$LOGS/${1//[:\/]/_}.log" cid
+    local image="${1%+localpy}" tag="omniaci-test-${1//[:\/+]/-}" log="$LOGS/${1//[:\/+]/_}.log" cid
+    local expect=/usr/bin localpy=true
+    if [ "$1" != "$image" ]; then
+        expect=/usr/local/bin
+        localpy="curl -sfL '$BUNDLED_URL' | tar -xz -C /usr/local/lib \
+ && ln -s /usr/local/lib/python/bin/python3.12 /usr/local/bin/python3.12 \
+ && printf '#!/bin/sh\\nexit 1\\n' > /usr/local/bin/python3.13 && chmod 755 /usr/local/bin/python3.13"
+    elif [ "$image" = debian:11 ]; then
+        expect=/opt/omniaci/python/bin
+    fi
     {
         docker build -q -t "$tag" - >/dev/null <<EOF
 FROM $image
@@ -142,7 +168,8 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN if grep -q '^11' /etc/debian_version 2>/dev/null; then \
       sed -i 's#http://deb.debian.org/debian-security#http://archive.debian.org/debian-security#' /etc/apt/sources.list; fi \
  && apt-get update -qq && apt-get install -y -qq systemd systemd-sysv sudo curl >/dev/null \
- && rm -f /usr/sbin/policy-rc.d
+ && rm -f /usr/sbin/policy-rc.d \
+ && $localpy
 # (the images forbid service starts with policy-rc.d exit 101: a real machine does not)
 CMD ["/sbin/init"]
 EOF
@@ -152,7 +179,7 @@ EOF
             docker exec "$cid" systemctl is-system-running 2>/dev/null | grep -qE 'running|degraded' && break
             sleep 1
         done
-        docker exec "$cid" bash -c "apt-get update -qq >/dev/null; $CHECKS"
+        docker exec -e EXPECT_HOME="$expect" "$cid" bash -c "apt-get update -qq >/dev/null; $CHECKS"
         local rc=$?
         docker rm -f "$cid" >/dev/null
         return $rc
@@ -165,7 +192,7 @@ for image in "${IMAGES[@]}"; do
 done
 wait
 for image in "${IMAGES[@]}"; do
-    log="$LOGS/${image//[:\/]/_}.log"
+    log="$LOGS/${image//[:\/+]/_}.log"
     echo "===== $image"
     cat "$log"
     grep -q "ALL CHECKS PASSED" "$log" || status=1

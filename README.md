@@ -59,8 +59,12 @@ config file, a log file and a systemd or init.d service.
 
 ## Install from the Debian package
 
-Supported: Debian 11, 12, 13 and Ubuntu 22.04, 24.04 (amd64), each with its
-system `python3`.
+Supported: Debian 11, 12, 13 and Ubuntu 22.04, 24.04 (amd64). OmniaCI needs
+Python 3.10 or newer: the package uses the system `python3` when it is 3.10+,
+otherwise (Debian 11, Python 3.9) a local `python3.10`+ already installed (in
+the `PATH` or `/usr/local/bin`, the newest first), otherwise it downloads a
+Python 3.12 (python-build-standalone, checked against its sha256) into
+`/opt/omniaci/python`.
 
 ```bash
 sudo apt install ./omniaci_<version>_all.deb
@@ -71,11 +75,12 @@ The package:
 
 - creates the system user `omniaci` and runs the service `omniaci` as that
   user, on `127.0.0.1:8090` (change it in `/etc/default/omniaci`);
-- builds `/opt/omniaci/venv` at installation with the system `python3` and the
-  dependency versions locked for that Python (`packaging/debian/requirements`).
-  **The machine must reach PyPI while installing.** After an upgrade of the
-  system Python (a distribution upgrade), rebuild it with
-  `sudo dpkg-reconfigure omniaci`;
+- builds `/opt/omniaci/venv` at installation with that Python and the
+  dependency versions locked for it (`packaging/debian/requirements`).
+  **The machine must reach PyPI while installing**, and also `github.com`
+  when the Python 3.12 has to be downloaded. After an upgrade or a removal of
+  the Python the venv was built on (a distribution upgrade, a local Python
+  removed), rebuild it with `sudo dpkg-reconfigure omniaci`;
 - creates `/etc/omniaci/omniaci.yaml` once, with a random password for
   `admin`; upgrades never change it;
 - keeps the servers file, the jobs and the backups in `/var/lib/omniaci`;
@@ -187,8 +192,8 @@ kept next to it (`.pid`).
 ## MCP interface
 
 OmniaCI serves an MCP endpoint at `/mcp` (streamable HTTP) for AI clients.
-It needs the `mcp` SDK, so Python 3.10 or newer: on Python 3.9 (Debian 11)
-OmniaCI runs without it.
+It needs the `mcp` SDK, so Python 3.10 or newer, which the package always
+provides: OmniaCI installed by hand on Python 3.9 runs without it.
 
 | Tool | What it does |
 |---|---|
