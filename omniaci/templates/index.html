@@ -2,6 +2,14 @@
 {% block content %}
 <h1>Servers</h1>
 {% if drafts %}<p class="muted">{{ drafts | length }} draft server{{ "s" if drafts | length > 1 }} not live yet: see <a href="/config">Configuration</a>.</p>{% endif %}
+{% if total > 1 or q %}
+<form class="actions job-filter" method="get" action="/" style="margin: 0 0 12px">
+  <input type="search" name="q" value="{{ q }}" placeholder="Search server, database, repository, branch…" aria-label="Search servers">
+  <button>Search</button>
+  {% if q %}<a class="button" href="/">Clear</a>{% endif %}
+</form>
+{% if q %}<p class="muted">{{ servers | length }} of {{ total }} server{{ "" if total == 1 else "s" }}.</p>{% endif %}
+{% endif %}
 <div class="panel">
   <div class="scroll">
   <table class="server-rows">
@@ -28,7 +36,8 @@
       </td>
     </tr>
     {% else %}
-    <tr><td colspan="3" class="muted">No live servers. Add one in <a href="/config">Configuration</a>, then use Test &amp; activate.</td></tr>
+    {% if q %}<tr><td colspan="3" class="muted">No servers match.</td></tr>{% else %}
+    <tr><td colspan="3" class="muted">No live servers. Add one in <a href="/config">Configuration</a>, then use Test &amp; activate.</td></tr>{% endif %}
     {% endfor %}
   </table>
   </div>

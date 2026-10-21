@@ -27,6 +27,7 @@ from .config import (
     load_settings,
     parse_servers,
     save_servers,
+    filter_servers,
     server_to_dict,
 )
 from .jobs import JobManager, filter_jobs
@@ -141,13 +142,18 @@ def create_app(settings: Settings) -> FastAPI:
         return srv
 
     @app.get("/")
-    async def index(request: Request):
+    async def index(request: Request, q: str = ""):
+        """The live servers, filtered by text (name, database, service,
+        repositories and branches)."""
         instances = settings.all_instances()
+        live = settings.active_servers()
         return _TEMPLATES.TemplateResponse(
             request,
             "index.html",
             {
-                "servers": settings.active_servers(),
+                "servers": filter_servers(live, q),
+                "total": len(live),
+                "q": q,
                 "drafts": [s for s in settings.servers.values() if not s.active],
                 "busy": {i.key: jobs.is_busy(i.key) for i in instances},
                 "jobs": jobs.recent(10),

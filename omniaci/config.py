@@ -123,6 +123,22 @@ class Server:
         return self.instances.get("test")
 
 
+def filter_servers(servers: list[Server], query: str = "") -> list[Server]:
+    """The servers containing every word of query (name, and of each instance
+    database, service, repository names and branches), case insensitive."""
+    words = query.lower().split()
+    if not words:
+        return servers
+
+    def text(server):
+        parts = [server.name]
+        for inst in server.instances.values():
+            parts += [inst.database, inst.restart.service]
+            parts += [f"{r.name} {r.branch}" for r in inst.repositories]
+        return " ".join(parts).lower()
+    return [s for s in servers if all(w in text(s) for w in words)]
+
+
 @dataclass
 class Settings:
     users: dict[str, str]

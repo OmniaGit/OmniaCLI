@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import dataclasses
 import datetime
 
 import httpx
@@ -521,3 +522,24 @@ async def test_jobs_server_column_and_filter(client, env):
     assert "1 job." in page and ids[1] in page and ids[0] not in page
     assert "No jobs match." in (await get("/jobs?server=nope")).text
     assert 'href="/jobs?server=srv"' in (await get("/servers/srv")).text
+
+
+async def test_servers_filter(client, env):
+    get = lambda url: client.get(url, headers={"Authorization": AUTH})
+    # one server: no filter to show
+    assert 'name="q"' not in (await get("/")).text
+    settings = client.app.state.settings
+    srv = settings.servers["srv"]
+    settings.servers["other"] = dataclasses.replace(srv, name="other", instances={
+        role: dataclasses.replace(inst, server="other", database=f"OTHER_{role}")
+        for role, inst in srv.instances.items()
+    })
+
+    page = (await get("/")).text
+    assert 'name="q"' in page and 'href="/servers/other"' in page and 'href="/servers/srv"' in page
+    page = (await get("/?q=other_TEST")).text  # a database, any case
+    assert "1 of 2 servers." in page and 'href="/servers/other"' in page
+    assert 'href="/servers/srv"' not in page and 'href="/">Clear' in page
+    page = (await get("/?q=addons+test")).text  # every word: a repository and a branch
+    assert "2 of 2 servers." in page
+    assert "No servers match." in (await get("/?q=srv+OTHER_")).text
