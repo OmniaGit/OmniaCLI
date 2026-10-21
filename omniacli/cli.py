@@ -1,3 +1,5 @@
+# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Command line: serve the web application, hash passwords, check a config."""
 
 from __future__ import annotations

@@ -1,3 +1,5 @@
+# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Links: this instance ("mine") operating a customer's instance (the one of
 conftest's env, where the link omnia is a developer), in the same process."""
 
@@ -11,7 +13,7 @@ import yaml
 from omniacli.app import create_app
 from omniacli.config import parse_settings
 
-from .conftest import LINK_TOKEN, PASSWORD, TOKEN, USER_HASH, hash_token
+from .conftest import LINK_TOKEN, BasicAsSession, PASSWORD, TOKEN, USER_HASH, hash_token
 
 HOST = "mine.test"
 
@@ -54,7 +56,7 @@ async def mine(env, tmp_path):
     }, base_dir=conf)
     network = Network(customer)
     app = create_app(settings, link_transport=network)
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=f"http://{HOST}") as c:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=BasicAsSession(app)), base_url=f"http://{HOST}") as c:
         c.app, c.customer, c.network = app, customer, network
         yield c
 
@@ -87,19 +89,26 @@ async def test_proxy_asks_the_encoding_the_browser_accepts(mine):
 
 
 async def test_servers_page_lists_the_links_servers(mine):
+    # lazy: the page comes without asking the links, its tables follow
     page = (await mine.get("/", headers=as_user("admin"))).text
+    assert "cliente › srv" not in page and 'data-lazy="/dashboard/servers?q="' in page
+    assert "Loading the servers of the linked instances" in page
+    page = (await mine.get("/dashboard/servers", headers=as_user("admin"))).text
     assert "cliente › srv" in page and 'href="/links/cliente/servers/srv?view=both"' in page
     assert 'data-link="cliente" data-key="srv/test"' in page
     assert "Link <strong>down</strong>: cannot connect" in page
     # the filter knows the link, the database and the branch of a remote server
     for q in ("cliente", "DB_test", "addons test"):
-        page = (await mine.get(f"/?q={q}", headers=as_user("admin"))).text
+        assert f'data-lazy="/dashboard/servers?q={q.replace(" ", "%20")}"' in (
+            await mine.get(f"/?q={q}", headers=as_user("admin"))).text
+        page = (await mine.get(f"/dashboard/servers?q={q}", headers=as_user("admin"))).text
         assert "cliente › srv" in page and "1 of 1 server." in page, q
-    page = (await mine.get("/?q=nothing", headers=as_user("admin"))).text
+    page = (await mine.get("/dashboard/servers?q=nothing", headers=as_user("admin"))).text
     assert "No servers match." in page and "down" not in page
     # tokens do not see the links
     page = (await mine.get("/", headers={"Authorization": f"Bearer {TOKEN}"})).text
-    assert "cliente" not in page
+    assert "cliente" not in page and "data-lazy" not in page
+    assert "cliente" not in (await mine.get("/dashboard/servers", headers={"Authorization": f"Bearer {TOKEN}"})).text
 
 
 async def test_proxied_pages_and_actions(mine):
@@ -191,7 +200,7 @@ async def test_groups_with_linked_servers(mine):
     assert 'data-member="cliente/srv"' in page and 'data-member="cliente/*"' in page
     body = {"groups": [{"name": "Customers", "members": ["cliente/*"]}]}
     assert (await mine.post("/api/groups/save", json=body, headers=headers)).json() == {"ok": True}
-    page = (await mine.get("/", headers=headers)).text
+    page = (await mine.get("/dashboard/servers", headers=headers)).text
     assert "<h2>Customers <span" in page and "cliente › srv" in page
     assert page.index("<h2>Customers") < page.index("cliente › srv")
     # the linked instance's own page has no groups of ours

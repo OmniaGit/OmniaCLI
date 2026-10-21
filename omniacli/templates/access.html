@@ -1,3 +1,4 @@
+{# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C · SPDX-License-Identifier: AGPL-3.0-or-later -#}
 {% extends "base.html" %}
 {% block title %}Access log · OmniaCLI{% endblock %}
 {% block crumbs %}{% from "_crumbs.html" import crumbs with context %}
@@ -5,7 +6,7 @@
 {% endblock %}
 {% block content %}
 <h1>Access log</h1>
-<p class="muted">A <strong>login</strong> is the first request of a user, a link or an MCP token after 30 minutes without requests from the same address;
+<p class="muted">A user's <strong>login</strong> and <strong>logout</strong> are those of the login page; a link or an MCP token logs in with its first request after 30 minutes without requests from the same address;
 a <strong>failed</strong> login is a wrong password or token; every <strong>MCP</strong> call is listed with its method and tool.
 Saved in <span class="mono">{{ log_file }}</span>.</p>
 <form class="actions job-filter" method="get" action="{{ prefix }}/access" style="margin: 0 0 12px">
@@ -21,9 +22,9 @@ Saved in <span class="mono">{{ log_file }}</span>.</p>
     {% for e in entries %}
     <tr>
       <td class="mono">{{ e.time | replace("T", " ") }}</td>
-      <td class="{{ 'error' if e.event == 'failed' }}">{{ {"login": "Login", "failed": "Failed login", "mcp": "MCP call"}.get(e.event, e.event) }}</td>
+      <td class="{{ 'error' if e.event == 'failed' }}">{{ {"login": "Login", "logout": "Logout", "failed": "Failed login", "mcp": "MCP call"}.get(e.event, e.event) }}</td>
       <td>{{ e.name or "—" }}</td>
-      <td>{{ {"user": "password", "link": "link", "token": "MCP token (API)", "mcp": "MCP"}.get(e.kind, e.kind) }}</td>
+      <td>{{ {"user": "login page", "link": "link", "token": "MCP token (API)", "mcp": "MCP"}.get(e.kind, e.kind) }}</td>
       <td class="mono">{{ e.ip }}</td>
       <td class="mono">{% if e.kind == "link" and e.detail and e.event != "failed" %}acting for {{ e.detail }}{% else %}{{ e.detail }}{% endif %}</td>
     </tr>

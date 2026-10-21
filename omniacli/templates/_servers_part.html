@@ -1,0 +1,86 @@
+{# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C · SPDX-License-Identifier: AGPL-3.0-or-later -#}
+{# The server tables of the Dashboard: rendered with the page, or, when there
+   are links, first with this instance's servers only and then again, with
+   the links' servers, by /dashboard/servers (lazy: a slow link never holds
+   the page back). #}
+{% from "_icons.html" import icon %}
+{% if q %}<p class="muted">{{ rows | length }} of {{ total }} server{{ "" if total == 1 else "s" }}{{ " here; the linked instances' are loading" if lazy }}.</p>{% endif %}
+{% for e in link_errors %}<div class="banner">Link <strong>{{ e.link }}</strong>: {{ e.error }}</div>{% endfor %}
+{% macro server_table(rows) %}
+<div class="panel">
+  <div class="scroll">
+  <table class="server-rows">
+    <tr><th>Server</th><th>Odoo, CPU of the last 15 minutes</th><th></th></tr>
+    {% for row in rows %}
+    <tr>
+      <td><a href="{{ row.base }}/servers/{{ row.name }}"><strong>{{ row.label }}</strong></a>
+        {% if row.link %}<br><span class="muted">linked instance {{ row.link }}</span>{% endif %}
+        {% for role in row.roles %}{% if row.busy[role] %}<br><span class="status running">job running on {{ role }}</span>{% endif %}{% endfor %}</td>
+      <td class="sparks">
+        {% for role in row.roles %}
+        <div class="spark-row" data-link="{{ row.link }}" data-key="{{ row.name }}/{{ role }}">
+          <span class="role {{ role }}">{{ "Prod" if role == "production" else "Test" }}</span>
+          <svg class="spark" role="img" aria-label="CPU of {{ row.label }} {{ role }}"></svg>
+          <span class="spark-value mono">–</span>
+          {% if row.web.get(role) %}
+          {# Odoo itself, on this computer's localhost: a new tab #}
+          {% set port = row.web[role] %}
+          {% set web = "http://localhost:" ~ port %}
+          <a class="odoo-link mono" href="{{ web }}" target="_blank" rel="noopener" title="Open {{ web }} in a new tab">:{{ port }} ↗</a>
+          {% endif %}
+          {% set st = row.state.get(role) %}
+          {% if st %}
+          {# the same buttons as on the server page, as icons #}
+          {% set rt = row.restart.get(role, "") %}
+          {% set url = row.base ~ "/servers/" ~ row.name ~ "/" ~ role %}
+          {% set off = "disabled" if row.busy[role] else "" %}
+          {% set what = row.label ~ " " ~ role %}
+          <span class="run-state {{ st }}" title="Odoo {{ st if st != 'unknown' else 'state unknown' }}">{{ {"running": "running", "stopped": "stopped"}.get(st, "?") }}</span>
+          {% if can_restart %}
+          <span class="run-buttons">
+            {% if st != "running" and rt in ("process", "systemd") %}
+            <form method="post" action="{{ url }}/{{ 'restart' if rt == 'process' else 'start' }}" onsubmit="return confirm('Start Odoo of {{ what }}?')">
+              <button class="icon-btn btn-start" title="Start" aria-label="Start {{ what }}" {{ off }}>{{ icon("start") }}</button></form>
+            {% endif %}
+            {% if st != "stopped" and rt in ("process", "systemd") %}
+            <form method="post" action="{{ url }}/stop" onsubmit="return confirm('Stop Odoo of {{ what }}? It stays stopped, also for the auto update, until Start.')">
+              <button class="icon-btn btn-stop" title="Stop" aria-label="Stop {{ what }}" {{ off }}>{{ icon("stop") }}</button></form>
+            {% endif %}
+            {% if rt != "process" or st == "running" %}
+            <form method="post" action="{{ url }}/restart" onsubmit="return confirm('Restart Odoo of {{ what }}?')">
+              <button class="icon-btn btn-restart" title="Restart" aria-label="Restart {{ what }}" {{ off }}>{{ icon("restart") }}</button></form>
+            {% endif %}
+          </span>
+          {% endif %}
+          {% endif %}
+        </div>
+        {% endfor %}
+      </td>
+      <td>
+        <div class="actions" style="margin: 0">
+          {% if "test" in row.roles %}<a class="button" href="{{ row.base }}/servers/{{ row.name }}?view=test">Test</a>{% endif %}
+          {% if "production" in row.roles %}<a class="button" href="{{ row.base }}/servers/{{ row.name }}?view=production">Production</a>{% endif %}
+          {% if row.roles | length == 2 %}<a class="button" href="{{ row.base }}/servers/{{ row.name }}?view=both">Both</a>{% endif %}
+        </div>
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  </div>
+</div>
+{% endmacro %}
+{% for section in sections %}
+{% if section.name %}
+<details class="group" open>
+  <summary><h2>{{ section.name }} <span class="muted">({{ section.rows | length }})</span></h2></summary>
+  {{ server_table(section.rows) }}
+</details>
+{% else %}
+{{ server_table(section.rows) }}
+{% endif %}
+{% else %}
+{% if not lazy %}
+<div class="panel"><p class="muted" style="margin: 0">{% if q %}No servers match.{% else %}No live servers.{% if is_admin %} Add one in <a href="{{ prefix }}/config">Servers</a>, then use Test &amp; activate.{% endif %}{% endif %}</p></div>
+{% endif %}
+{% endfor %}
+{% if lazy %}<p class="muted links-loading">Loading the servers of the linked instances…</p>{% endif %}

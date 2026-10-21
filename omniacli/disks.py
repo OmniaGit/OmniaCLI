@@ -1,3 +1,5 @@
+# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """The free space of this machine's disks, and what OmniaCLI keeps on each.
 
 The disks are the mounted filesystems of a real disk or network share type

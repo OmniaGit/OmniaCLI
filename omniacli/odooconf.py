@@ -1,3 +1,5 @@
+# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Read an instance's settings from its Odoo config file, for the server form.
 
 From the config: the database (db_name, or an exact ^name$ dbfilter), the log

@@ -1,9 +1,37 @@
 # OmniaCLI
 
-A small web service, protected by HTTP Basic authentication, that deploys
-Odoo instances. Each **server** has a **production** and/or a **test**
-instance. An instance has one or more git working copies, a database, an Odoo
-config file, a log file and a systemd or init.d service.
+Manage many Odoo instances from a single web interface.
+
+OmniaCLI is a small web service, behind a login page, that deploys and
+operates Odoo instances from git. Each **server** has a **production** and/or
+a **test** instance. An instance has one or more git working copies, a
+database, an Odoo config file, a log file and a systemd service, an init.d
+script, or an Odoo that OmniaCLI starts itself.
+
+- **Dashboard**: every server with the state of its Odoo, Start / Stop /
+  Restart, its CPU, and the CPU, network and disks of the machine.
+- **Deploy**: git pull, update of the changed modules, restart; auto update
+  in a time window; merge of what was tested into production, after a backup.
+- **Backups** of database and filestore, to download.
+- **Logs** in the browser, with an "errors only" filter.
+- **Links**: operate the OmniaCLI of other machines from your own.
+- **MCP**: AI clients (Claude Code and others) read, update test instances
+  and back them up through a token.
+- Users with roles (user, developer, admin), an access log, and a Help page.
+
+## Quick start
+
+On Debian 11–13 or Ubuntu 22.04/24.04 (amd64):
+
+```bash
+wget https://github.com/OmniaGit/OmniaCLI/releases/latest/download/OmniaCLI.deb
+sudo apt install ./OmniaCLI.deb
+sudo cat /etc/omniacli/initial-admin-password     # the password of user admin
+```
+
+OmniaCLI listens on `127.0.0.1:8090`: put an HTTPS reverse proxy in front of
+it (see [Login and security](#login-and-security)), open it, log in as
+`admin`, and add your servers on the **Servers** page.
 
 ## What it does
 
@@ -79,10 +107,17 @@ the `PATH` or `/usr/local/bin`, the newest first), otherwise it downloads a
 Python 3.12 (python-build-standalone, checked against its sha256) into
 `/opt/omniacli/python`.
 
+Every [release](https://github.com/OmniaGit/OmniaCLI/releases) has the
+package as `omniacli_<version>_all.deb`, and as `OmniaCLI.deb`, whose link
+always gives the latest one.
+
 ```bash
 sudo apt install ./omniacli_<version>_all.deb
 sudo cat /etc/omniacli/initial-admin-password     # password of user admin
 ```
+
+An upgrade is the same `apt install` of a newer package: the configuration,
+the servers, the users, the jobs and the backups stay.
 
 The package:
 
@@ -103,18 +138,41 @@ The package:
 ### Build and test the package
 
 ```bash
-packaging/debian/build_deb.sh              # test build -> share, omniacli_<year>.1.<n>_all.deb
-packaging/debian/build_deb.sh --release    # release build of branch <year> -> share, OmniaCLI.deb
-packaging/debian/build_deb.sh --check DIR  # the working tree, into DIR, no tag
-packaging/debian/test_deb.sh <deb>         # install and check it in Docker, systemd included
-packaging/debian/make_locks.sh             # regenerate the dependency locks, with the tests
+packaging/debian/build_deb.sh                  # test build -> ARTEFACTS, omniacli_<year>.1.<n>_all.deb
+packaging/debian/build_deb.sh --release        # release build of branch <year> -> ARTEFACTS, OmniaCLI.deb
+packaging/debian/build_deb.sh --check DIR      # the working tree, into DIR, no tag
+packaging/debian/build_deb.sh --ci VERSION DIR # the checked out commit with VERSION, into DIR (the CI)
+packaging/debian/test_deb.sh <deb> [image ...] # install and check it in Docker, systemd included
+packaging/debian/make_locks.sh                 # regenerate the dependency locks, with the tests
 ```
+
+The package is built from a commit (`git archive`), never from uncommitted
+files, except with `--check`. Its version is `<year>.1.<n>`. The test and
+release builds number `n` one above every `omniacli-v<year>.1.*` tag and every
+package already in `ARTEFACTS` (a folder of the build machine, set by the
+environment variable), and tag the built commit. `PYTHON` is the Python that
+builds the wheel.
+
+### Releases on GitHub
+
+Publishing a GitHub release builds its package
+(`.github/workflows/release.yml`):
+
+1. tag the commit to release with its version, `omniacli-v<year>.1.<n>`, and
+   publish a release on that tag;
+2. the workflow runs the tests, builds the package with
+   `build_deb.sh --ci <version>` and attaches `omniacli_<version>_all.deb`
+   and `OmniaCLI.deb` to the release;
+3. it then installs the package in Debian 12 and Ubuntu 24.04 containers with
+   systemd and checks it end to end (`test_deb.sh`). A failure there marks
+   the run as failed: the package is already attached, so delete it from the
+   release, or publish a fixed release.
 
 ## Install by hand
 
 ```bash
 python3.11 -m venv /opt/omniacli/venv
-/opt/omniacli/venv/bin/pip install /path/to/OmniaCLI
+/opt/omniacli/venv/bin/pip install git+https://github.com/OmniaGit/OmniaCLI.git
 ```
 
 The `click-odoo-*` scripts import the instance's own `odoo` package. So
@@ -198,10 +256,15 @@ the last admin cannot be demoted or deleted. Every user who logs in with a
 password changes it from their own page (their name, top right), unless it is
 set in the main config.
 
+The **Help** page (menu Help, developers and admins) explains step by step
+how to create a link, how to connect an MCP client and every field of the
+server form, with example data only.
+
 The **Access log** (Users page, admins) lists the logins with date, time and
-address: HTTP Basic sends the password with every request, so a login is the
-first request of a user, link or MCP token after 30 minutes without requests
-from the same address. Every wrong password or token is listed, and so is
+address: a user's login is the login form; a link or an MCP token, which send
+their token with every request, log in with their first request after 30
+minutes without requests from the same address. Logouts, every wrong password
+or token, and the logins refused for too many failures are listed, and so is
 every call to `/mcp`, with its JSON-RPC method and tool. It is kept in
 `access.jsonl` in the logs folder next to `jobs_dir` (`/var/lib/omniacli/logs`
 for the package); past 5 MiB it moves to `access.jsonl.1`.
@@ -226,7 +289,7 @@ The linking instance sends the token as `Authorization: Bearer <token>`.
 It may also send `X-OmniaCLI-Prefix` (the path it serves these pages under,
 e.g. `/links/customer`: every link in the pages starts with it) and
 `X-OmniaCLI-User` (its user acting through the link: the jobs record
-`manual: link omniasolutions (matteo)`), and `X-OmniaCLI-Role-Cap` (that
+`manual: link omniasolutions (anna)`), and `X-OmniaCLI-Role-Cap` (that
 user's role on the linking instance: the link acts with the lower of it and
 its own). They are honoured for link tokens only. `GET /api/info` answers
 with the version and the caller's role, `GET /api/servers` with the live
@@ -355,14 +418,14 @@ client on the **Users** page (the token is shown once), or by hand: add its
 hash to `auth.tokens`:
 
 ```bash
-omniacli new-token matteo-laptop --role admin
+omniacli new-token dev-laptop --role admin
 ```
 
 ```yaml
 auth:
   users: ...
   tokens:
-    matteo-laptop: {token: "sha256$...", role: admin}
+    dev-laptop: {token: "sha256$...", role: admin}
 ```
 
 A token has a role, as a user does: `user` reads, `developer` also runs
@@ -387,10 +450,25 @@ POST to them.
 omniacli serve -c omniacli.yaml --host 127.0.0.1 --port 8090
 ```
 
-Basic authentication sends the password with every request. So expose
-OmniaCLI only through an HTTPS reverse proxy that keeps the `Host` header:
-POSTs are accepted only when their `Origin` matches `Host`, which blocks
-cross-site requests.
+### Login and security
+
+Users log in on the login page; the browser then holds a session cookie
+(`HttpOnly`, `SameSite=Strict`, `Secure` over HTTPS) for **8 hours** from the
+login, and **Log out** ends it on the server. The server keeps only a hash of
+each session, in `sessions.json` next to `jobs_dir` (mode 600), so a restart
+does not log anybody out; a changed password or a deleted user ends that
+user's sessions at once. After 5 wrong logins within 15 minutes from an
+address or for a user name, every further try waits 30 seconds, doubled each
+time up to 15 minutes. HTTP Basic is not accepted: scripts and AI clients use
+tokens (MCP), other OmniaCLI instances use link tokens.
+
+Every page is sent with `X-Frame-Options: DENY` and `Content-Security-Policy:
+frame-ancestors 'none'` (no framing by other sites), `X-Content-Type-Options:
+nosniff`, `Referrer-Policy: same-origin`, and over HTTPS
+`Strict-Transport-Security`. Expose OmniaCLI only through an HTTPS reverse
+proxy that keeps the `Host` header: POSTs are accepted only when their
+`Origin` matches `Host`, which blocks cross-site requests, and the password
+must never travel in clear.
 
 ## Develop
 
@@ -401,3 +479,18 @@ pytest
 
 The tests use real git repositories in a temporary folder, and fake
 `click-odoo-*` scripts and restart commands.
+
+## License
+
+Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C.
+
+OmniaCLI is free software: you can redistribute it and/or modify it under
+the terms of the GNU Affero General Public License as published by the Free
+Software Foundation, either version 3 of the License, or (at your option) any
+later version. It is distributed in the hope that it will be useful, but
+WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License
+in [LICENSE](LICENSE) for more details.
+
+Whoever runs a modified OmniaCLI for users over a network must offer those
+users the source code of that version (section 13 of the license).

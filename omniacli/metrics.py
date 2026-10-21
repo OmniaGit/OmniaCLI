@@ -1,3 +1,5 @@
+# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Sample the CPU and memory used by every instance's Odoo processes.
 
 A systemd instance is measured on its unit's cgroup (cgroup v2): CPU from

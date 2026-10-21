@@ -1,3 +1,4 @@
+{# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C · SPDX-License-Identifier: AGPL-3.0-or-later -#}
 <!doctype html>
 <html lang="en">
 <head>
@@ -61,6 +62,7 @@ header strong { font-size: 16px; }
 .brand-name span { color: var(--accent); }
 .head-end { margin-left: auto; display: flex; align-items: center; gap: 14px; }
 .theme-toggle { padding: 3px 9px; font-size: 15px; line-height: 1; }
+.logout { margin: 0; } .logout-button { padding: 3px 10px; }
 .link-bar { padding: 8px 20px; background: var(--accent); color: var(--bg); }
 .link-bar a { color: var(--bg); text-decoration: underline; }
 .ok { color: var(--ok); }
@@ -174,6 +176,13 @@ svg.spark { width: 160px; height: 28px; display: block; }
 .sum-disk .warn { color: var(--warn); }
 @media (prefers-reduced-motion: reduce) { .fold.closed .fold-summary { animation: none; } }
 .chart-line-2 { stroke: var(--series-2); }
+.site-foot { max-width: 1400px; margin: 0 auto; padding: 8px 20px 20px; font-size: 12px; }
+.help { max-width: 900px; line-height: 1.6; }
+.help h2 { font-size: 19px; margin: 28px 0 8px; padding-top: 8px; border-top: 1px solid var(--border); }
+.help h3 { font-size: 15px; margin: 20px 0 6px; }
+.help pre.console { white-space: pre; overflow-x: auto; }
+.help-toc { margin: 12px 0 8px; } .help-toc ol { margin: 6px 0 0; }
+.help-table { margin: 6px 0 12px; } .help-table td:first-child { white-space: nowrap; }
 .icon { width: 14px; height: 14px; flex: none; }
 button .icon { margin-right: 6px; vertical-align: -2px; }
 /* every group has its separator on the left, and the box clips the one
@@ -238,8 +247,10 @@ summary { cursor: pointer; color: var(--muted); }
   {% if is_admin %}<a href="{{ prefix }}/config">Servers</a>
   <a href="{{ prefix }}/users">Users</a>
   <a href="{{ prefix }}/links">Links</a>{% endif %}
+  {% if can_act %}<a href="{{ prefix }}/help">Help</a>{% endif %}
   <span class="head-end">
-    {% if account %}<a href="{{ prefix }}/account" title="Your account and password">{{ account }}</a>{% endif %}
+    {% if account %}<a href="{{ prefix }}/account" title="Your account and password">{{ account }}</a>
+    <form method="post" action="/logout" class="logout"><button class="logout-button">Log out</button></form>{% endif %}
     <button type="button" class="theme-toggle" id="theme-toggle"></button>
   </span>
 </header>
@@ -268,5 +279,7 @@ summary { cursor: pointer; color: var(--muted); }
 {% block crumbs %}{% endblock %}
 {% block content %}{% endblock %}
 </main>
+<footer class="site-foot muted">OmniaCLI · © 2026 OmniaSolutions S.n.c di Boscolo Matteo &amp; C · free software under the
+  <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">GNU AGPL v3</a></footer>
 </body>
 </html>

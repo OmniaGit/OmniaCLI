@@ -1,11 +1,15 @@
 [build-system]
-requires = ["setuptools>=64"]
+# 77: the license as an SPDX expression (PEP 639)
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "omniacli"
 version = "2026.1.0"
 description = "Web service to deploy and test Odoo instances"
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE"]
+authors = [{name = "OmniaSolutions S.n.c di Boscolo Matteo & C"}]
 requires-python = ">=3.9"
 dependencies = [
     "fastapi>=0.110",

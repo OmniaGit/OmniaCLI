@@ -1,3 +1,5 @@
+# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Links to other OmniaCLI instances: this one serves their pages under
 /links/<name>/ and lists their servers, acting with the link token they gave
 (see auth.links on their side)."""

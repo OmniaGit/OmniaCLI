@@ -1,3 +1,4 @@
+{# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C · SPDX-License-Identifier: AGPL-3.0-or-later -#}
 {% extends "base.html" %}
 {% block content %}
 {% from "_icons.html" import icon %}
@@ -7,90 +8,16 @@
   {% if is_admin and not prefix %}<a class="button" href="/groups">Edit groups</a>{% endif %}
 </div>
 <div class="fold-body"><div class="fold-inner">
-{% if total > 1 or q %}
+{% if total > 1 or q or lazy %}
 <form class="actions job-filter" method="get" action="{{ prefix }}/" style="margin: 0 0 12px">
   <input type="search" name="q" value="{{ q }}" placeholder="Search server, database, repository, branch…" aria-label="Search servers">
   <button>Search</button>
   {% if q %}<a class="button" href="{{ prefix }}/">Clear</a>{% endif %}
 </form>
-{% if q %}<p class="muted">{{ rows | length }} of {{ total }} server{{ "" if total == 1 else "s" }}.</p>{% endif %}
 {% endif %}
-{% for e in link_errors %}<div class="banner">Link <strong>{{ e.link }}</strong>: {{ e.error }}</div>{% endfor %}
-{% macro server_table(rows) %}
-<div class="panel">
-  <div class="scroll">
-  <table class="server-rows">
-    <tr><th>Server</th><th>Odoo, CPU of the last 15 minutes</th><th></th></tr>
-    {% for row in rows %}
-    <tr>
-      <td><a href="{{ row.base }}/servers/{{ row.name }}"><strong>{{ row.label }}</strong></a>
-        {% if row.link %}<br><span class="muted">linked instance {{ row.link }}</span>{% endif %}
-        {% for role in row.roles %}{% if row.busy[role] %}<br><span class="status running">job running on {{ role }}</span>{% endif %}{% endfor %}</td>
-      <td class="sparks">
-        {% for role in row.roles %}
-        <div class="spark-row" data-link="{{ row.link }}" data-key="{{ row.name }}/{{ role }}">
-          <span class="role {{ role }}">{{ "Prod" if role == "production" else "Test" }}</span>
-          <svg class="spark" role="img" aria-label="CPU of {{ row.label }} {{ role }}"></svg>
-          <span class="spark-value mono">–</span>
-          {% if row.web.get(role) %}
-          {# Odoo itself, on this computer's localhost: a new tab #}
-          {% set port = row.web[role] %}
-          {% set web = "http://localhost:" ~ port %}
-          <a class="odoo-link mono" href="{{ web }}" target="_blank" rel="noopener" title="Open {{ web }} in a new tab">:{{ port }} ↗</a>
-          {% endif %}
-          {% set st = row.state.get(role) %}
-          {% if st %}
-          {# the same buttons as on the server page, as icons #}
-          {% set rt = row.restart.get(role, "") %}
-          {% set url = row.base ~ "/servers/" ~ row.name ~ "/" ~ role %}
-          {% set off = "disabled" if row.busy[role] else "" %}
-          {% set what = row.label ~ " " ~ role %}
-          <span class="run-state {{ st }}" title="Odoo {{ st if st != 'unknown' else 'state unknown' }}">{{ {"running": "running", "stopped": "stopped"}.get(st, "?") }}</span>
-          {% if can_restart %}
-          <span class="run-buttons">
-            {% if st != "running" and rt in ("process", "systemd") %}
-            <form method="post" action="{{ url }}/{{ 'restart' if rt == 'process' else 'start' }}" onsubmit="return confirm('Start Odoo of {{ what }}?')">
-              <button class="icon-btn btn-start" title="Start" aria-label="Start {{ what }}" {{ off }}>{{ icon("start") }}</button></form>
-            {% endif %}
-            {% if st != "stopped" and rt in ("process", "systemd") %}
-            <form method="post" action="{{ url }}/stop" onsubmit="return confirm('Stop Odoo of {{ what }}? It stays stopped, also for the auto update, until Start.')">
-              <button class="icon-btn btn-stop" title="Stop" aria-label="Stop {{ what }}" {{ off }}>{{ icon("stop") }}</button></form>
-            {% endif %}
-            {% if rt != "process" or st == "running" %}
-            <form method="post" action="{{ url }}/restart" onsubmit="return confirm('Restart Odoo of {{ what }}?')">
-              <button class="icon-btn btn-restart" title="Restart" aria-label="Restart {{ what }}" {{ off }}>{{ icon("restart") }}</button></form>
-            {% endif %}
-          </span>
-          {% endif %}
-          {% endif %}
-        </div>
-        {% endfor %}
-      </td>
-      <td>
-        <div class="actions" style="margin: 0">
-          {% if "test" in row.roles %}<a class="button" href="{{ row.base }}/servers/{{ row.name }}?view=test">Test</a>{% endif %}
-          {% if "production" in row.roles %}<a class="button" href="{{ row.base }}/servers/{{ row.name }}?view=production">Production</a>{% endif %}
-          {% if row.roles | length == 2 %}<a class="button" href="{{ row.base }}/servers/{{ row.name }}?view=both">Both</a>{% endif %}
-        </div>
-      </td>
-    </tr>
-    {% endfor %}
-  </table>
-  </div>
+<div id="server-sections" {% if lazy %}data-lazy="{{ prefix }}/dashboard/servers?q={{ q | urlencode }}"{% endif %}>
+{% include "_servers_part.html" %}
 </div>
-{% endmacro %}
-{% for section in sections %}
-{% if section.name %}
-<details class="group" open>
-  <summary><h2>{{ section.name }} <span class="muted">({{ section.rows | length }})</span></h2></summary>
-  {{ server_table(section.rows) }}
-</details>
-{% else %}
-{{ server_table(section.rows) }}
-{% endif %}
-{% else %}
-<div class="panel"><p class="muted" style="margin: 0">{% if q %}No servers match.{% else %}No live servers.{% if is_admin %} Add one in <a href="{{ prefix }}/config">Servers</a>, then use Test &amp; activate.{% endif %}{% endif %}</p></div>
-{% endfor %}
 </div></div>
 </section>
 <section class="fold" data-fold="machine">
@@ -167,15 +94,16 @@
 <script>
 (function () {
   const WINDOW = 15 * 60;
-  const rows = [...document.querySelectorAll(".spark-row")];
-  // this instance's load, and that of each linked instance through its link
-  const sources = [...new Set(rows.map((r) => r.dataset.link))];
   async function load(link) {
     const base = link ? "/links/" + encodeURIComponent(link) : "{{ prefix }}";
     const resp = await fetch(base + "/api/metrics?since=" + (Math.floor(Date.now() / 1000) - WINDOW));
     return resp.json();
   }
   async function refresh() {
+    // the rows change when the linked instances' servers arrive
+    const rows = [...document.querySelectorAll(".spark-row")];
+    // this instance's load, and that of each linked instance through its link
+    const sources = [...new Set(rows.map((r) => r.dataset.link))];
     const loaded = await Promise.all(sources.map((link) => load(link).catch(() => null)));
     const metrics = Object.fromEntries(sources.map((link, i) => [link, loaded[i]]));
     try {
@@ -192,6 +120,24 @@
   }
   refresh();
   setInterval(() => { if (!document.hidden) refresh(); }, 5000);
+  window.addEventListener("omniacli:servers", refresh);
+})();
+</script>
+<script>
+(function () {
+  // lazy: the linked instances' servers, once they answer
+  const box = document.getElementById("server-sections");
+  if (!box || !box.dataset.lazy) return;
+  fetch(box.dataset.lazy).then((resp) => {
+    if (!resp.ok) throw new Error("HTTP " + resp.status);
+    return resp.text();
+  }).then((html) => {
+    box.innerHTML = html;
+    window.dispatchEvent(new Event("omniacli:servers"));
+  }).catch((e) => {
+    const note = box.querySelector(".links-loading");
+    if (note) { note.textContent = "The servers of the linked instances could not be loaded (" + e.message + ")."; note.className = "error"; }
+  });
 })();
 </script>
 <script>

@@ -1,3 +1,5 @@
+# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Read a log file in steps, like tail -F, for a page that polls it.
 
 The page asks again every few seconds with the position it reached: no

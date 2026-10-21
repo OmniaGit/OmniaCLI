@@ -1,10 +1,12 @@
+# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Who logged in, when and from where: the access log.
 
-HTTP Basic sends the password with every request, so there is no login
-request: a login is the first request of a user (or of a link, or of an MCP
-token reading the API) after SESSION_GAP without requests from the same
-address. A wrong password or an unknown token is logged every time. Every
-call to /mcp is logged, with its JSON-RPC method and tool.
+A user's login and logout are those of the login form. A link or an MCP token
+sends its token with every request, so its login is its first request after
+SESSION_GAP without requests from the same address. A wrong password, a
+login refused for too many failures and an unknown token are logged every
+time. Every call to /mcp is logged, with its JSON-RPC method and tool.
 
 One JSON object per line in access.jsonl, next to the instances' logs; past
 MAX_BYTES the file moves to access.jsonl.1 (the previous one is dropped).
@@ -30,7 +32,7 @@ class AccessLog:
         self._seen: dict[tuple, float] = {}
 
     def record(self, event: str, kind: str, name: str, ip: str = "", detail: str = "") -> None:
-        """event: login, failed or mcp; kind: user, link, token or mcp."""
+        """event: login, logout, failed or mcp; kind: user, link, token or mcp."""
         entry = {
             "time": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
             "event": event, "kind": kind, "name": name, "ip": ip, "detail": detail,

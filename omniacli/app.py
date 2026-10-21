@@ -1,3 +1,5 @@
+# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """The OmniaCLI web application."""
 
 from __future__ import annotations
@@ -11,12 +13,13 @@ import re
 from dataclasses import asdict
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, quote, urlsplit
 
 import httpx
 from fastapi import Body, Depends, FastAPI, HTTPException, Request, status
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from fastapi.exception_handlers import http_exception_handler
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from fastapi.templating import Jinja2Templates
 from starlette.background import BackgroundTask
 
@@ -53,6 +56,7 @@ from .links import LIST_TIMEOUT, LinkClients, describe_error, link_headers
 from .logtail import read_since
 from .metrics import Sampler
 from .scheduler import AutoUpdater
+from .sessions import COOKIE, LIFETIME, LoginLimiter, SessionStore
 
 
 def _page_context(request: Request) -> dict:
@@ -76,9 +80,10 @@ _TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"),
 # centred on a transparent square); served without login, like any favicon.
 _STATIC = Path(__file__).parent / "static"
 _BACKUP_NAME = re.compile(r"[A-Za-z0-9._-]+\.zip")
-_ICONS = {"/favicon.ico": ("favicon.ico", "image/x-icon"),
-          "/icon-180.png": ("icon-180.png", "image/png")}
-_basic = HTTPBasic(realm="OmniaCLI", auto_error=False)
+# served without login: the icons, and the background of the login page
+_PUBLIC_FILES = {"/favicon.ico": ("favicon.ico", "image/x-icon"),
+                 "/icon-180.png": ("icon-180.png", "image/png"),
+                 "/login-background.jpg": ("login-background.jpg", "image/jpeg")}
 # what a linked instance sends: the path it serves our pages under, and the
 # name of its user acting through the link
 _PREFIX_HEADER = "x-omniacli-prefix"
@@ -105,11 +110,20 @@ def _version() -> str:
 
 
 def _same_origin(request: Request) -> bool:
-    """Reject cross-site form posts: the browser sends Basic credentials anyway."""
+    """Reject cross-site form posts: the browser may send the session cookie
+    with them (SameSite=Strict should stop it; this does whatever the browser)."""
     source = request.headers.get("origin") or request.headers.get("referer")
     if not source:
         return False
     return urlsplit(source).netloc == request.headers.get("host")
+
+
+def _next_path(value: str) -> str:
+    """Where to go after the login: a path of this site only, never another site."""
+    value = value or "/"
+    if not value.startswith("/") or value.startswith("//") or "\\" in value:
+        return "/"
+    return value
 
 
 def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
@@ -123,8 +137,11 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
     sampler = Sampler(settings)
     link_clients = LinkClients(link_transport)
     access_log = AccessLog(settings.logs_dir / "access.jsonl")
+    # the browsers' logins: next to the jobs, like the access log
+    sessions = SessionStore(settings.jobs_dir.parent / "sessions.json")
+    limiter = LoginLimiter()
 
-    def identify(request: Request, credentials: Optional[HTTPBasicCredentials]) -> Principal:
+    def identify(request: Request) -> Principal:
         scheme, _, token = request.headers.get("authorization", "").partition(" ")
         if scheme.lower() == "bearer":
             token = token.strip()
@@ -149,31 +166,27 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             if cap in ACCESS_ROLES and ACCESS_ROLES.index(cap) < ACCESS_ROLES.index(role):
                 role = cap
             return Principal(name, role, "link", on_behalf if _ON_BEHALF.fullmatch(on_behalf) else "")
-        if credentials is None or not authenticator.check(credentials.username, credentials.password):
-            raise HTTPException(
-                status.HTTP_401_UNAUTHORIZED,
-                "Invalid credentials",
-                headers={"WWW-Authenticate": 'Basic realm="OmniaCLI"'},
-            )
+        # a browser: the session of the login form
+        name = sessions.user(request.cookies.get(COOKIE), settings.users)
+        if name is None:
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Login required")
         if request.method not in ("GET", "HEAD") and not _same_origin(request):
             raise HTTPException(status.HTTP_403_FORBIDDEN, "Cross-site request refused")
-        return Principal(credentials.username, settings.user_role(credentials.username))
+        return Principal(name, settings.user_role(name))
 
-    def current_user(
-        request: Request, credentials: Optional[HTTPBasicCredentials] = Depends(_basic)
-    ) -> Principal:
+    def current_user(request: Request) -> Principal:
         ip = request.client.host if request.client else ""
         try:
-            user = identify(request, credentials)
+            user = identify(request)
         except HTTPException as exc:
-            # a browser asks first without credentials: only wrong ones count
-            if exc.status_code == 401 and (credentials is not None or "bearer" in (exc.headers or {}).get("WWW-Authenticate", "").lower()):
-                kind = "user" if credentials is not None else "token"
-                name = credentials.username if credentials is not None else ""
-                access_log.record("failed", kind, name[:64], ip, f"{request.method} {request.url.path}"[:200])
+            # a wrong token; a missing session is no failure (the login form counts those)
+            if exc.status_code == 401 and "bearer" in (exc.headers or {}).get("WWW-Authenticate", "").lower():
+                access_log.record("failed", "token", "", ip, f"{request.method} {request.url.path}"[:200])
             raise
-        # a link: who acts there through it
-        access_log.seen(user.kind, user.name, ip, user.on_behalf)
+        if user.kind != "user":
+            # a link (with who acts there through it) or a token: a login is
+            # its first request after a pause; a user's login is the form's
+            access_log.seen(user.kind, user.name, ip, user.on_behalf)
         request.state.user = user
         return user
 
@@ -222,15 +235,84 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
     app.state.settings, app.state.jobs, app.state.updater = settings, jobs, updater
     app.state.sampler = sampler
     app.state.access_log = access_log
+    app.state.sessions, app.state.authenticator = sessions, authenticator
 
-    async def icon(request: Request):
-        name, media_type = _ICONS[request.url.path]
+    @app.middleware("http")
+    async def security_headers(request: Request, call_next):
+        response = await call_next(request)
+        # no page of OmniaCLI inside another site's frame (clickjacking)
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Content-Security-Policy", "frame-ancestors 'none'")
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("Referrer-Policy", "same-origin")
+        if request.url.scheme == "https":
+            response.headers.setdefault("Strict-Transport-Security", "max-age=31536000")
+        return response
+
+    @app.exception_handler(StarletteHTTPException)
+    async def to_login(request: Request, exc: StarletteHTTPException):
+        """A browser without a session opening a page goes to the login form."""
+        if (exc.status_code == 401 and request.method == "GET"
+                and "text/html" in request.headers.get("accept", "")
+                and not request.headers.get("authorization")):
+            target = request.url.path + (f"?{request.url.query}" if request.url.query else "")
+            return RedirectResponse(f"/login?next={quote(target)}", status.HTTP_303_SEE_OTHER)
+        return await http_exception_handler(request, exc)
+
+    async def public_file(request: Request):
+        name, media_type = _PUBLIC_FILES[request.url.path]
         return FileResponse(_STATIC / name, media_type=media_type,
                             headers={"Cache-Control": "public, max-age=86400"})
 
+    def login_page(request: Request, next_path: str, error: str = "", code: int = 200):
+        return _TEMPLATES.TemplateResponse(request, "login.html", {"next": next_path, "error": error},
+                                           status_code=code)
+
+    async def login(request: Request):
+        """The login form (GET) and its check (POST): a session cookie of
+        LIFETIME, failed tries limited per address and user name."""
+        if request.method == "GET":
+            next_path = _next_path(request.query_params.get("next", "/"))
+            if sessions.user(request.cookies.get(COOKIE), settings.users):
+                return RedirectResponse(next_path, status.HTTP_303_SEE_OTHER)
+            return login_page(request, next_path)
+        if not _same_origin(request):
+            return HTMLResponse("Cross-site login refused", status_code=403)
+        form = parse_qs((await request.body()).decode("utf-8", "replace"))
+        name = (form.get("username") or [""])[0].strip()[:64]
+        password = (form.get("password") or [""])[0]
+        next_path = _next_path((form.get("next") or ["/"])[0])
+        ip = request.client.host if request.client else ""
+        wait = limiter.wait(ip, name)
+        if wait:
+            access_log.record("failed", "user", name, ip, f"too many failed logins: wait {wait} s")
+            return login_page(request, next_path, f"Too many failed logins: try again in {wait} seconds.", 429)
+        if not name or not await asyncio.to_thread(authenticator.check, name, password):
+            limiter.failed(ip, name)
+            access_log.record("failed", "user", name, ip, "login form")
+            return login_page(request, next_path, "Wrong user name or password.", 401)
+        limiter.succeeded(ip, name)
+        access_log.record("login", "user", name, ip, "login form")
+        response = RedirectResponse(next_path, status.HTTP_303_SEE_OTHER)
+        set_session_cookie(request, response, sessions.create(name, settings.users[name]))
+        return response
+
+    def set_session_cookie(request: Request, response, token: str) -> None:
+        response.set_cookie(COOKIE, token, max_age=LIFETIME, httponly=True, samesite="strict",
+                            secure=request.url.scheme == "https", path="/")
+
     # Starlette routes: the app's login dependency does not apply to them
-    for path in _ICONS:
-        app.add_route(path, icon, methods=["GET"])
+    for path in _PUBLIC_FILES:
+        app.add_route(path, public_file, methods=["GET"])
+    app.add_route("/login", login, methods=["GET", "POST"])
+
+    @app.post("/logout")
+    async def logout(request: Request, me: Principal = Depends(current_user)):
+        sessions.drop(request.cookies.get(COOKIE))
+        access_log.record("logout", me.kind, me.name, request.client.host if request.client else "")
+        response = RedirectResponse("/login", status.HTTP_303_SEE_OTHER)
+        response.delete_cookie(COOKIE, path="/")
+        return response
     if mcp_route is not None:
         app.router.routes.append(mcp_route)  # its own bearer token check
 
@@ -306,10 +388,10 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         found = await asyncio.gather(*(one(link) for link in settings.link_targets.values()))
         return [row for rows in found for row in rows]
 
-    @app.get("/")
-    async def index(request: Request, q: str = "", me: Principal = Depends(current_user)):
-        """The live servers, this instance's and its links', filtered by text
-        (link, name, database, service, repositories and branches)."""
+    async def server_sections(request: Request, q: str, me: Principal, with_links: bool) -> dict:
+        """The Dashboard's server tables: this instance's live servers, and
+        with_links those of every link (asked to them), filtered by text (link,
+        name, database, service, repositories and branches)."""
         live = settings.active_servers()
         states = await run_states(live)
         rows = [
@@ -324,7 +406,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             }
             for srv in live
         ]
-        remote = await remote_servers(me)
+        remote = await remote_servers(me) if with_links else []
         errors = [r for r in remote if "error" in r]
         rows += [r for r in remote if "error" not in r]
         # each row under the first group that has it, the rest under "Other"
@@ -335,21 +417,35 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         sections = [{"name": g.name, "rows": [r for r in shown if r["group"] == g.name]} for g in settings.groups]
         sections.append({"name": "Other servers" if settings.groups else "",
                          "rows": [r for r in shown if not r["group"]]})
-        return _TEMPLATES.TemplateResponse(
-            request,
-            "index.html",
-            {
-                "rows": shown,
-                "sections": [sec for sec in sections if sec["rows"]],
-                "link_errors": [e for e in errors if matches(e["link"], q)],
-                # the load and disks of this machine, and of every link that answered
-                "machine_links": [name for name in settings.link_targets
-                               if me.kind == "user" and name not in {e["link"] for e in errors}],
-                "total": len(rows),
-                "q": q,
-                "jobs": jobs.recent(10),
-            },
-        )
+        return {
+            "rows": shown,
+            "sections": [sec for sec in sections if sec["rows"]],
+            "link_errors": [e for e in errors if matches(e["link"], q)],
+            "total": len(rows),
+            "q": q,
+            "lazy": False,
+        }
+
+    @app.get("/")
+    async def index(request: Request, q: str = "", me: Principal = Depends(current_user)):
+        """The Dashboard. With links, their servers come after the page
+        (/dashboard/servers): a link that answers slowly never holds it back."""
+        lazy = me.kind == "user" and bool(settings.link_targets)
+        context = await server_sections(request, q, me, with_links=False)
+        context.update({
+            "lazy": lazy,
+            # the load and disks of this machine, and of every link (a link
+            # that does not answer says so in its panel)
+            "machine_links": list(settings.link_targets) if me.kind == "user" else [],
+            "jobs": jobs.recent(10),
+        })
+        return _TEMPLATES.TemplateResponse(request, "index.html", context)
+
+    @app.get("/dashboard/servers")
+    async def dashboard_servers(request: Request, q: str = "", me: Principal = Depends(current_user)):
+        """The Dashboard's server tables with the links' servers (lazy part)."""
+        context = await server_sections(request, q, me, with_links=True)
+        return _TEMPLATES.TemplateResponse(request, "_servers_part.html", context)
 
     @app.get("/servers/{server}")
     async def server_page(request: Request, server: str, view: str = "both"):
@@ -975,6 +1071,13 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             },
         )
 
+    @app.get("/help", dependencies=[Depends(developer)])
+    async def help_page(request: Request):
+        """How to create a link and how to connect an MCP client."""
+        # seen through a link, the address the browser knows is the other instance's
+        base = "https://<address of this OmniaCLI>" if prefix_of(request) else str(request.base_url).rstrip("/")
+        return _TEMPLATES.TemplateResponse(request, "help.html", {"base_url": base})
+
     @app.get("/access", dependencies=[Depends(admin)])
     async def access_page(request: Request, q: str = ""):
         """The access log: logins, failed logins and MCP calls, the newest first."""
@@ -1224,7 +1327,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         )
 
     @app.post("/api/account/password")
-    async def account_password(payload: dict = Body(...), me: Principal = Depends(current_user)):
+    async def account_password(request: Request, payload: dict = Body(...), me: Principal = Depends(current_user)):
         password_user(me)
         current, password = str(payload.get("current") or ""), str(payload.get("password") or "")
         async with access_lock:
@@ -1236,7 +1339,13 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
                 return refuse(f"The password needs at least {_MIN_PASSWORD} characters")
             web = web_copy()
             web.users[me.name] = await asyncio.to_thread(hash_password, password)
-            return await store_access(web) or {"ok": True}
+            refused = await store_access(web)
+            if refused:
+                return refused
+            # the new password ends every session of the user: a new one for this browser
+            response = JSONResponse({"ok": True})
+            set_session_cookie(request, response, sessions.create(me.name, settings.users[me.name]))
+            return response
 
     return app
 

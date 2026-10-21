@@ -1,3 +1,5 @@
+# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """The actions run on an instance: git pull, module update, restart, backup, merge."""
 
 from __future__ import annotations

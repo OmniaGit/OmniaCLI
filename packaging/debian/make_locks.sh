@@ -1,4 +1,6 @@
 #!/bin/bash
+# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # Resolve, in a container of every target distribution, the newest versions of
 # OmniaCLI's dependencies that its system python3 accepts, write them as a lock
 # file requirements/py<major><minor>.txt, and run the test suite against them.

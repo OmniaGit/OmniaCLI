@@ -1,4 +1,6 @@
-"""HTTP Basic authentication with PBKDF2 password hashes, bearer tokens (for
+# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""Password checks with PBKDF2 hashes (the login form), bearer tokens (for
 MCP clients and for linked OmniaCLI instances) stored as their SHA-256, and the
 roles that decide what each caller may do."""
 
@@ -51,7 +53,7 @@ def hash_token(token: str) -> str:
 
 @dataclass(frozen=True)
 class Principal:
-    """Who makes a request: a user (Basic), an MCP token or a linked instance."""
+    """Who makes a request: a user (login form), an MCP token or a linked instance."""
 
     name: str
     role: str
@@ -72,11 +74,10 @@ class Principal:
 
 
 class Authenticator:
-    """Check Basic credentials against the configured users.
+    """Check a user's password against the configured users (the login form).
 
-    The browser sends the credentials with every request (pages, job polling,
-    log stream), so a successful PBKDF2 check is remembered for the life of
-    the process, keyed by a keyed hash of the password, never the password.
+    A successful PBKDF2 check is remembered for the life of the process,
+    keyed by a keyed hash of the password, never the password.
     """
 
     def __init__(self, users: dict[str, str], tokens: dict[str, str] | None = None,

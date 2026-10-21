@@ -1,3 +1,5 @@
+# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C
+# SPDX-License-Identifier: AGPL-3.0-or-later
 import asyncio
 import base64
 import dataclasses
@@ -10,7 +12,7 @@ import pytest
 from omniacli.app import create_app
 from omniacli.logtail import read_since
 
-from .conftest import LINK_TOKEN, LINK_VIEW_TOKEN, PASSWORD, TOKEN, clone, commit, sh
+from .conftest import BasicAsSession, LINK_TOKEN, LINK_VIEW_TOKEN, PASSWORD, TOKEN, clone, commit, sh
 
 AUTH = "Basic " + base64.b64encode(f"admin:{PASSWORD}".encode()).decode()
 HOST = "omniacli.test"
@@ -34,7 +36,7 @@ async def client(env):
     if task.done():
         task.result()
     try:
-        transport = httpx.ASGITransport(app=app)
+        transport = httpx.ASGITransport(app=BasicAsSession(app))
         async with httpx.AsyncClient(transport=transport, base_url=f"http://{HOST}") as c:
             c.app = app
             yield c
@@ -431,24 +433,112 @@ async def test_disks_api(client, env, monkeypatch):
     assert 'class="disk-list"' in page.text and "/api/disks" in page.text
 
 
-async def test_access_log(client, env):
-    import base64 as b64
+LOGIN_HEADERS = {"Origin": f"http://{HOST}", "Content-Type": "application/x-www-form-urlencoded"}
 
+
+async def form_login(client, user, password, next_path="/"):
+    from urllib.parse import urlencode
+
+    return await client.post("/login", headers=LOGIN_HEADERS,
+                             content=urlencode({"username": user, "password": password, "next": next_path}))
+
+
+async def test_access_log(client, env):
     log = client.app.state.access_log
     assert log.path == env["settings"].logs_dir / "access.jsonl"
-    assert (await client.get("/")).status_code == 401  # no credentials: not a failure
+    assert (await client.get("/")).status_code == 401  # no session: not a failure
     assert log.recent() == []
-    bad = "Basic " + b64.b64encode(b"admin:wrong").decode()
-    assert (await client.get("/", headers={"Authorization": bad})).status_code == 401
-    for _ in range(3):  # one session: one login
-        assert (await client.get("/jobs", headers={"Authorization": AUTH})).status_code == 200
+    assert (await form_login(client, "admin", "wrong")).status_code == 401
+    resp = await form_login(client, "admin", PASSWORD, "/jobs")
+    assert resp.status_code == 303 and resp.headers["location"] == "/jobs"
+    for _ in range(3):  # pages of the session: no more logins
+        assert (await client.get("/jobs")).status_code == 200
     entries = log.recent()
     assert [(e["event"], e["kind"], e["name"]) for e in entries] == [
         ("login", "user", "admin"), ("failed", "user", "admin")]
-    assert entries[0]["time"][:4].isdigit() and entries[1]["detail"] == "GET /"
-    page = await client.get("/access", headers={"Authorization": AUTH})
+    assert entries[0]["time"][:4].isdigit() and entries[1]["detail"] == "login form"
+    page = await client.get("/access")
     assert page.status_code == 200 and "Failed login" in page.text
-    assert "Failed login" not in (await client.get("/access?q=login+jobs", headers={"Authorization": AUTH})).text
+    assert "Failed login" not in (await client.get("/access?q=nothing-matches")).text
+
+
+async def test_login_form_session_and_logout(client, env):
+    from omniacli.sessions import COOKIE
+
+    # a browser without a session goes to the form, and back after it
+    resp = await client.get("/jobs?server=srv", headers={"Accept": "text/html"})
+    assert resp.status_code == 303 and resp.headers["location"] == "/login?next=/jobs%3Fserver%3Dsrv"
+    page = await client.get("/login?next=/jobs", headers={"Accept": "text/html"})
+    assert page.status_code == 200 and 'name="next" value="/jobs"' in page.text
+    assert "/login-background.jpg" in page.text
+    image = await client.get("/login-background.jpg")
+    assert image.status_code == 200 and image.headers["content-type"] == "image/jpeg"
+    # never another site after the login, never a login from another site
+    resp = await form_login(client, "admin", PASSWORD, "//evil.example/x")
+    assert resp.status_code == 303 and resp.headers["location"] == "/"
+    cookie = resp.headers["set-cookie"]
+    assert cookie.startswith(f"{COOKIE}=") and "HttpOnly" in cookie and "SameSite=strict" in cookie
+    assert "Max-Age=28800" in cookie
+    assert (await client.get("/jobs")).status_code == 200
+    client.cookies.clear()
+    from urllib.parse import urlencode
+    body = urlencode({"username": "admin", "password": PASSWORD})
+    resp = await client.post("/login", content=body, headers={**LOGIN_HEADERS, "Origin": "http://evil.example"})
+    assert resp.status_code == 403
+    # every page answers with the anti-framing headers
+    assert resp.headers["x-frame-options"] == "DENY"
+    assert (await client.get("/favicon.ico")).headers["content-security-policy"] == "frame-ancestors 'none'"
+
+    # Basic is gone: credentials in the header open nothing
+    import base64 as b64
+    raw = httpx.ASGITransport(app=client.app)
+    async with httpx.AsyncClient(transport=raw, base_url=f"http://{HOST}") as plain:
+        basic_admin = "Basic " + b64.b64encode(f"admin:{PASSWORD}".encode()).decode()
+        assert (await plain.get("/jobs", headers={"Authorization": basic_admin})).status_code == 401
+
+    # logout ends the session on the server too
+    await form_login(client, "admin", PASSWORD)
+    token = client.cookies[COOKIE]
+    resp = await client.post("/logout", headers={"Origin": f"http://{HOST}"})
+    assert resp.status_code == 303 and resp.headers["location"] == "/login"
+    client.cookies.set(COOKIE, token)
+    assert (await client.get("/jobs")).status_code == 401
+    assert [e["event"] for e in client.app.state.access_log.recent()][:2] == ["logout", "login"]
+
+
+async def test_failed_logins_wait(client, monkeypatch):
+    for _ in range(5):
+        assert (await form_login(client, "dev", "wrong")).status_code == 401
+    # the right password must wait too: no check is made meanwhile
+    resp = await form_login(client, "dev", PASSWORD)
+    assert resp.status_code == 429 and "Too many failed logins" in resp.text
+    # another user from the same address waits as well
+    assert (await form_login(client, "admin", PASSWORD)).status_code == 429
+    import time
+    real = time.time
+    monkeypatch.setattr(time, "time", lambda: real() + 31)
+    assert (await form_login(client, "dev", PASSWORD)).status_code == 303
+
+
+async def test_session_ends(client, env, monkeypatch):
+    import time
+
+    from omniacli.sessions import COOKIE, SessionStore
+
+    await form_login(client, "admin", PASSWORD)
+    assert (await client.get("/jobs")).status_code == 200
+    # kept across a restart of OmniaCLI
+    again = SessionStore(client.app.state.sessions.path)
+    assert again.user(client.cookies[COOKIE], env["settings"].users) == "admin"
+    # 8 hours after the login
+    real = time.time
+    monkeypatch.setattr(time, "time", lambda: real() + 8 * 3600 + 1)
+    assert (await client.get("/jobs")).status_code == 401
+    monkeypatch.setattr(time, "time", real)
+    # a new password ends the user's sessions
+    assert (await client.get("/jobs")).status_code == 200
+    env["settings"].users["admin"] = "pbkdf2_sha256$1$00$00"
+    assert (await client.get("/jobs")).status_code == 401
 
 
 def test_http_port(tmp_path):
@@ -476,6 +566,15 @@ async def test_dashboard_state_buttons_and_odoo_link(client, env):
     servers = (await client.get("/api/servers", headers={"Authorization": AUTH})).json()
     assert servers[0]["instances"]["test"]["state"] == "unknown"
     assert servers[0]["instances"]["test"]["port"] == 8123
+
+
+async def test_help_for_developers_and_admins(client):
+    for user in ("admin", "dev"):
+        page = await client.get("/help", headers={"Authorization": basic(user)})
+        assert page.status_code == 200 and "Create link token" in page.text, user
+        assert f"http://{HOST}/mcp" in page.text and 'href="/help"' in page.text
+    assert (await client.get("/help", headers={"Authorization": basic("viewer")})).status_code == 403
+    assert 'href="/help"' not in (await client.get("/", headers={"Authorization": basic("viewer")})).text
 
 
 async def test_favicon_without_login(client):
@@ -911,6 +1010,11 @@ async def test_own_password(client):
     assert "at least 8" in resp.json()["error"]
     resp = await client.post("/api/account/password", json={"current": "luca-pass-1", "password": "luca-pass-2"}, headers=luca)
     assert resp.status_code == 200, resp.text
+    # the new password ended luca's sessions, and this browser got a new one
+    from omniacli.sessions import COOKIE
+    assert resp.headers["set-cookie"].startswith(f"{COOKIE}=")
+    assert (await client.get("/")).status_code == 200
+    client.cookies.clear()
     assert (await client.get("/", headers=luca)).status_code == 401
     assert (await client.get("/", headers={"Authorization": auth_of("luca", "luca-pass-2")})).status_code == 200
 

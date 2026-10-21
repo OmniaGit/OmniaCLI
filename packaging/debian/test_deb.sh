@@ -1,4 +1,6 @@
 #!/bin/bash
+# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # Install an OmniaCLI .deb in a container with a real systemd, for every target
 # distribution, and check it end to end: the service starts, the generated
 # admin password logs in, a server saved through the API is pulled and its
@@ -22,6 +24,12 @@ read -r -d '' CHECKS <<'EOS' || true
 set -euo pipefail
 step() { echo "--- $*"; }
 fail() { echo "CHECK FAILED: $*"; exit 1; }
+# the login form, as a browser fills it: the session cookie in /tmp/cookies-<user>
+login() {
+    [ "$(curl -s -o /dev/null -w '%{http_code}' -c "/tmp/cookies-$1" -H "Origin: http://localhost:8090" \
+          --data-urlencode "username=$1" --data-urlencode "password=$2" localhost:8090/login)" = 303 ] \
+        || fail "login of $1"
+}
 export DEBIAN_FRONTEND=noninteractive
 
 step "install"
@@ -36,7 +44,11 @@ systemctl is-enabled --quiet omniacli || fail "service not enabled"
 visudo -cf /etc/sudoers.d/omniacli >/dev/null || fail "sudoers file invalid"
 PW="$(cat /etc/omniacli/initial-admin-password)"
 [ "$(curl -s -o /dev/null -w '%{http_code}' localhost:8090/)" = 401 ] || fail "no 401 without login"
-[ "$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$PW" localhost:8090/)" = 200 ] || fail "admin login"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -H "Origin: http://localhost:8090" -d "username=admin&password=wrong" localhost:8090/login)" = 401 ] \
+    || fail "wrong password accepted"
+login admin "$PW"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/cookies-admin localhost:8090/)" = 200 ] || fail "admin login"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$PW" localhost:8090/)" = 401 ] || fail "HTTP Basic still accepted"
 echo "python: $(/opt/omniacli/venv/bin/python -V), $(/opt/omniacli/venv/bin/pip freeze | grep -iE '^(fastapi|starlette)==' | tr '\n' ' ')"
 VENV_HOME="$(sed -n 's/^home = //p' /opt/omniacli/venv/pyvenv.cfg)"
 echo "venv built on $VENV_HOME"
@@ -68,7 +80,7 @@ git clone -q -b main /srv/remote.git /srv/odoo && chown -R omniacli:omniacli /sr
 mkdir -p /srv/venv/bin && printf '#!/bin/sh\necho "update $*"\n' > /srv/venv/bin/click-odoo-update
 chmod 755 /srv/venv/bin/click-odoo-update
 touch /srv/odoo.conf /srv/odoo.log
-API=(-s -u "admin:$PW" -H "Origin: http://localhost:8090" -H "Content-Type: application/json")
+API=(-s -b /tmp/cookies-admin -H "Origin: http://localhost:8090" -H "Content-Type: application/json")
 curl "${API[@]}" localhost:8090/api/servers/save -d '{"original": null, "name": "demo", "server": {"production": {
   "database": "DEMO", "odoo_config": "/srv/odoo.conf", "log_file": "/srv/odoo.log", "venv_bin": "/srv/venv/bin",
   "restart": {"type": "systemd", "service": "odoo-dummy", "sudo": true},
@@ -82,7 +94,8 @@ curl "${API[@]}" localhost:8090/api/access/users/save \
   -d '{"name": "anna", "role": "developer", "password": "anna-pass-1", "new": true}' | grep -q '"ok":true' \
   || fail "user not saved"
 [ "$(stat -c '%U %a' /var/lib/omniacli/users.yaml)" = "omniacli 600" ] || fail "users.yaml owner or mode"
-[ "$(curl -s -o /dev/null -w '%{http_code}' -u anna:anna-pass-1 localhost:8090/api/info)" = 200 ] || fail "new user login"
+login anna anna-pass-1
+[ "$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/cookies-anna localhost:8090/api/info)" = 200 ] || fail "new user login"
 
 step "a link to itself: token from the Users page, link from the Links page, pages through the proxy"
 LINK_TOKEN="$(curl "${API[@]}" localhost:8090/api/access/links/save -d '{"name": "self", "role": "developer", "new": true}' \
@@ -92,7 +105,7 @@ curl "${API[@]}" localhost:8090/api/links/save \
   || fail "link not saved"
 [ "$(stat -c '%U %a' /var/lib/omniacli/links.yaml)" = "omniacli 600" ] || fail "links.yaml owner or mode"
 curl "${API[@]}" -X POST localhost:8090/api/links/me/test | grep -q '"role":"developer"' || fail "Test link"
-curl -s -u "admin:$PW" -H "Accept: text/html" localhost:8090/links/me/ | grep -q "Linked instance <strong>me</strong>" \
+curl -s -b /tmp/cookies-admin -H "Accept: text/html" localhost:8090/links/me/ | grep -q "Linked instance <strong>me</strong>" \
   || fail "page through the link"
 
 step "Test & activate: the checks that can pass here"
@@ -114,7 +127,7 @@ sed -i 's/status: draft/status: active/' /var/lib/omniacli/servers.yaml
 systemctl restart omniacli
 for i in $(seq 30); do curl -s -o /dev/null localhost:8090 && break; sleep 1; done
 # links.yaml read again at startup: the link lists this instance's server
-curl -s -u "admin:$PW" localhost:8090/ | grep -q "me › demo" || fail "linked server row"
+curl -s -b /tmp/cookies-admin localhost:8090/dashboard/servers | grep -q "me › demo" || fail "linked server row"
 
 step "git pull + restart through the web service"
 git -C /srv/dev commit -q --allow-empty -m two && git -C /srv/dev push -q origin main
@@ -122,12 +135,12 @@ PID_BEFORE="$(systemctl show -p MainPID --value odoo-dummy)"
 LOCATION="$(curl "${API[@]}" -o /dev/null -w '%{redirect_url}' -X POST localhost:8090/servers/demo/production/pull-restart)"
 JOB="${LOCATION##*/}"
 for i in $(seq 60); do
-    STATUS="$(curl -s -u "admin:$PW" "localhost:8090/api/jobs/$JOB" | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])')"
+    STATUS="$(curl -s -b /tmp/cookies-admin "localhost:8090/api/jobs/$JOB" | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])')"
     case "$STATUS" in success|failed|interrupted) break ;; esac
     sleep 1
 done
 if [ "$STATUS" != success ]; then
-    curl -s -u "admin:$PW" "localhost:8090/api/jobs/$JOB" | python3 -c 'import json,sys; d=json.load(sys.stdin); print("\n".join(d["lines"]))'
+    curl -s -b /tmp/cookies-admin "localhost:8090/api/jobs/$JOB" | python3 -c 'import json,sys; d=json.load(sys.stdin); print("\n".join(d["lines"]))'
     fail "pull-restart job $STATUS"
 fi
 [ "$(git -C /srv/odoo log -1 --format=%s)" = two ] || fail "repository not pulled"
@@ -141,24 +154,25 @@ echo "omniacli ALL=(root) NOPASSWD: $SYSTEMCTL --no-ask-password stop odoo-dummy
 visudo -cf /etc/sudoers.d/omniacli >/dev/null || fail "sudoers invalid with start and stop"
 curl "${API[@]}" localhost:8090/api/access/users/save \
   -d '{"name": "luca", "role": "user", "password": "luca-pass-1", "new": true}' | grep -q '"ok":true' || fail "user luca not saved"
-LUCA=(-s -u luca:luca-pass-1 -H "Origin: http://localhost:8090")
-curl -s -u luca:luca-pass-1 localhost:8090/servers/demo | grep -q "service active" || fail "service state not shown"
+login luca luca-pass-1
+LUCA=(-s -b /tmp/cookies-luca -H "Origin: http://localhost:8090")
+curl -s -b /tmp/cookies-luca localhost:8090/servers/demo | grep -q "service active" || fail "service state not shown"
 for action in stop start restart; do
     PID_BEFORE="$(systemctl show -p MainPID --value odoo-dummy)"
     LOCATION="$(curl "${LUCA[@]}" -o /dev/null -w '%{redirect_url}' -X POST localhost:8090/servers/demo/production/$action)"
     [ -n "$LOCATION" ] || fail "$action refused to role user"
     JOB="${LOCATION##*/}"
     for i in $(seq 60); do
-        STATUS="$(curl -s -u "admin:$PW" "localhost:8090/api/jobs/$JOB" | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])')"
+        STATUS="$(curl -s -b /tmp/cookies-admin "localhost:8090/api/jobs/$JOB" | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])')"
         case "$STATUS" in success|failed|interrupted) break ;; esac
         sleep 1
     done
-    [ "$STATUS" = success ] || { curl -s -u "admin:$PW" "localhost:8090/api/jobs/$JOB"; fail "$action job $STATUS"; }
+    [ "$STATUS" = success ] || { curl -s -b /tmp/cookies-admin "localhost:8090/api/jobs/$JOB"; fail "$action job $STATUS"; }
     STATE="$(systemctl is-active odoo-dummy || true)"
     echo "$action by luca: odoo-dummy $STATE (pid $PID_BEFORE -> $(systemctl show -p MainPID --value odoo-dummy))"
     case "$action" in
         stop) [ "$STATE" = inactive ] || fail "not stopped"
-              curl -s -u luca:luca-pass-1 localhost:8090/servers/demo | grep -q "/servers/demo/production/start" || fail "no Start button when stopped" ;;
+              curl -s -b /tmp/cookies-luca localhost:8090/servers/demo | grep -q "/servers/demo/production/start" || fail "no Start button when stopped" ;;
         start) [ "$STATE" = active ] || fail "not started" ;;
         restart) [ "$STATE" = active ] && [ "$(systemctl show -p MainPID --value odoo-dummy)" != "$PID_BEFORE" ] || fail "not restarted" ;;
     esac
@@ -168,7 +182,7 @@ done
 
 step "load metrics of the systemd unit, read as user omniacli"
 sleep 12
-curl -s -u "admin:$PW" "localhost:8090/api/metrics?server=demo" > /tmp/metrics.json
+curl -s -b /tmp/cookies-admin "localhost:8090/api/metrics?server=demo" > /tmp/metrics.json
 python3 - <<'PY' || fail "metrics"
 import json
 info = json.load(open("/tmp/metrics.json"))["instances"]["demo/production"]
@@ -239,11 +253,11 @@ runas_checks || fail "run_as checks with the sudoers line"
 wait_job() {
     local job="$1" status
     for i in $(seq 120); do
-        status="$(curl -s -u "admin:$PW" "localhost:8090/api/jobs/$job" | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])')"
+        status="$(curl -s -b /tmp/cookies-admin "localhost:8090/api/jobs/$job" | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])')"
         case "$status" in success|failed|interrupted) break ;; esac
         sleep 1
     done
-    curl -s -u "admin:$PW" "localhost:8090/api/jobs/$job" | python3 -c 'import json,sys; print("\n".join(json.load(sys.stdin)["lines"]))' > /tmp/job.log
+    curl -s -b /tmp/cookies-admin "localhost:8090/api/jobs/$job" | python3 -c 'import json,sys; print("\n".join(json.load(sys.stdin)["lines"]))' > /tmp/job.log
     [ "$status" = success ] || { cat /tmp/job.log; return 1; }
 }
 JOB="$(curl "${API[@]}" localhost:8090/api/servers/runas/test/update -d '{"mode": "changed"}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["job"])')"
@@ -256,7 +270,7 @@ grep -o 'backup as .*' /tmp/job.log
 BACKUP="$(ls /var/lib/omniacli/backups/runas/test/)"
 [ "$(cat "/var/lib/omniacli/backups/runas/test/$BACKUP")" = dump ] || fail "backup file"
 ls /var/tmp | grep -q omniacli-backup && fail "backup staging folder left in /var/tmp"
-[ "$(curl -s -u "admin:$PW" "localhost:8090/backups/runas/test/$BACKUP")" = dump ] || fail "backup made as odoo not downloadable"
+[ "$(curl -s -b /tmp/cookies-admin "localhost:8090/backups/runas/test/$BACKUP")" = dump ] || fail "backup made as odoo not downloadable"
 LOCATION="$(curl "${API[@]}" -o /dev/null -w '%{redirect_url}' -X POST localhost:8090/servers/runas/test/pip-requirements)"
 wait_job "${LOCATION##*/}" || fail "pip requirements as odoo"
 [ "$(stat -c %U "$SITE/six.py")" = odoo ] || fail "six not installed by odoo"
@@ -271,7 +285,7 @@ grep -q 'downloading Python' /tmp/reinstall.log && fail "bundled Python download
 for i in $(seq 30); do curl -s -o /dev/null localhost:8090 && break; sleep 1; done
 systemctl is-active --quiet omniacli || fail "service not active after reinstall"
 [ "$(sha256sum /etc/omniacli/omniacli.yaml)" = "$HASH_BEFORE" ] || fail "config changed by reinstall"
-curl -s -u "admin:$PW" localhost:8090/ | grep -q demo || fail "server lost after reinstall"
+curl -s -b /tmp/cookies-admin localhost:8090/ | grep -q demo || fail "server lost after reinstall (or its session)"
 
 step "remove and purge"
 apt-get remove -y -qq omniacli >/dev/null 2>&1 || fail "remove"

@@ -1,4 +1,6 @@
 #!/bin/bash
+# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # Build the OmniaCLI Debian package and put it on the share.
 #
 #   packaging/debian/build_deb.sh             test build: the branch with the
@@ -10,6 +12,11 @@
 #                                             tree, uncommitted files included,
 #                                             version <year>.1.0~check, into DIR;
 #                                             no tag, nothing on the share
+#   packaging/debian/build_deb.sh --ci VERSION DIR
+#                                             CI build (GitHub release): the
+#                                             checked out commit (HEAD), with the
+#                                             release's version <year>.1.<n>, into
+#                                             DIR; no tag, nothing on the share
 #
 # The package is built from the branch's commit (git archive), never from the
 # working tree. Its version is <year>.1.<n>, n one above every number the tags
@@ -35,9 +42,15 @@ die() { echo "build_deb: $*" >&2; exit 1; }
 
 release=""
 check=""
+ci=""
 case "${1:-}" in
     --release) release=1 ;;
     --check) check="${2:?--check needs an output folder}" ;;
+    --ci)
+        ci="${2:?--ci needs the version and an output folder}"
+        check="${3:?--ci needs an output folder}"
+        [[ "$ci" =~ ^[0-9]{4}\.1\.[0-9]+$ ]] || die "--ci: version $ci is not <year>.1.<n>"
+        ;;
     "") ;;
     *) die "unknown argument $1" ;;
 esac
@@ -78,7 +91,12 @@ trap 'rm -rf "$WORK"' EXIT
 SRC="$WORK/src"
 PKG="$WORK/pkg"
 mkdir -p "$SRC"
-if [ -n "$check" ]; then
+if [ -n "$ci" ]; then
+    COMMIT="$(git -C "$ROOT" rev-parse HEAD)"
+    VERSION="$ci"
+    echo "OmniaCLI ${COMMIT:0:8} -> omniacli $VERSION (CI build)"
+    git -C "$ROOT" archive "$COMMIT" | tar -x -C "$SRC"
+elif [ -n "$check" ]; then
     VERSION="$SERIES.0~check"
     echo "OmniaCLI working tree -> omniacli $VERSION (check build)"
     (cd "$ROOT" && git ls-files -z -co --exclude-standard | tar --null -T - -c) | tar -x -C "$SRC"
@@ -109,7 +127,9 @@ install -m 644 "$FILES/omniacli.service" "$PKG/usr/lib/systemd/system/omniacli.s
 install -m 644 "$FILES/omniacli.yaml.in" "$PKG/usr/share/omniacli/omniacli.yaml.in"
 install -m 644 "$FILES/default" "$PKG/etc/default/omniacli"
 install -m 440 "$FILES/sudoers" "$PKG/etc/sudoers.d/omniacli"
-install -m 644 "$SRC/README.md" "$SRC/servers.example.yaml" "$PKG/usr/share/doc/omniacli/"
+install -m 644 "$SRC/README.md" "$SRC/servers.example.yaml" "$SRC/LICENSE" "$PKG/usr/share/doc/omniacli/"
+printf 'OmniaCLI\nCopyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C\nLicense: AGPL-3.0-or-later (GNU Affero General Public License v3 or later),\nfull text in /usr/share/doc/omniacli/LICENSE\n' \
+    > "$PKG/usr/share/doc/omniacli/copyright"
 install -m 755 "$FILES/postinst" "$FILES/prerm" "$FILES/postrm" "$PKG/DEBIAN/"
 printf '/etc/default/omniacli\n/etc/sudoers.d/omniacli\n' > "$PKG/DEBIAN/conffiles"
 SIZE="$(du -sk --exclude=DEBIAN "$PKG" | cut -f1)"

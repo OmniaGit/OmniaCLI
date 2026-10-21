@@ -1,3 +1,5 @@
+# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """The checks "Test & activate" runs before a server goes live.
 
 Every check looks at the real thing (the file, the database, the remote, the

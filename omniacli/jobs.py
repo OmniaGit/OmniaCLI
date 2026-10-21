@@ -1,3 +1,5 @@
+# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Background jobs: one per action, with a log, a status and a history on disk."""
 
 from __future__ import annotations

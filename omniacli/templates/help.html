@@ -1,0 +1,307 @@
+{# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C · SPDX-License-Identifier: AGPL-3.0-or-later -#}
+{% extends "base.html" %}
+{% block title %}Help · OmniaCLI{% endblock %}
+{% block crumbs %}{% from "_crumbs.html" import crumbs with context %}
+{{ crumbs([("Dashboard", "/"), ("Help", None)]) }}
+{% endblock %}
+{% block content %}
+<div class="help">
+<h1>Help</h1>
+<p class="muted">How to operate another OmniaCLI through a <strong>link</strong>, how to connect an AI client to the
+<strong>MCP server</strong>, and what every field of the server form means. The addresses, names and paths below are
+examples: replace them with yours. The steps marked <em>admin</em> need the admin role on the instance where they are done.</p>
+<nav class="panel help-toc">
+  <strong>Contents</strong>
+  <ol>
+    <li><a href="#links">Links to other OmniaCLI instances</a></li>
+    <li><a href="#mcp">The MCP server</a></li>
+    <li><a href="#servers">Adding a server: the fields and the configurations</a></li>
+  </ol>
+</nav>
+
+<section id="links">
+<h2>1. Links to other OmniaCLI instances</h2>
+<p>A link lets the users of <strong>your</strong> OmniaCLI see and operate the servers of <strong>another</strong>
+OmniaCLI (a customer's machine, for example) from your own pages. Below, <em>the remote</em> is the instance you want
+to reach, <em>your instance</em> is the one you log in to.</p>
+
+<h3>What a link gives you</h3>
+<ul>
+  <li>The remote's live servers on your Dashboard, as <span class="mono">&lt;link&gt; › &lt;server&gt;</span>, with
+    their load, state and Start / Stop / Restart buttons. A link that does not answer is shown as an error above the
+    list.</li>
+  <li>The remote's pages under <span class="mono">/links/&lt;link&gt;/</span> on your instance, with a bar that says
+    which instance you are on. Every action runs on the remote and is recorded there as
+    <span class="mono">manual: link &lt;its name for you&gt; (&lt;your user&gt;)</span>.</li>
+  <li>You act there with the <strong>lower</strong> of your role on your instance and the link's role on the remote.</li>
+  <li>Only users who log in with a password use links; MCP tokens do not.</li>
+  <li>Draft servers of the remote are not listed: a link shows its active servers only.</li>
+</ul>
+
+<h3>Step 1 — on the remote: create the link token <em>(admin)</em></h3>
+<ol>
+  <li>Open the remote's <strong>Users</strong> page, section <strong>Links</strong>.</li>
+  <li>Name the link after who connects, for example <span class="mono">omniasolutions</span>, and choose its role:
+    <strong>user</strong> (watch, restart, start and stop Odoo), <strong>developer</strong> (also pull, update,
+    backup, pip) or <strong>admin</strong> (everything).</li>
+  <li>Press <strong>Create link token</strong> and copy the token. It is shown <strong>only once</strong>; the remote
+    keeps only its hash. If it is lost, revoke the link and create a new one.</li>
+</ol>
+<p>Without the web interface, on the remote's shell:</p>
+<pre class="console mono">omniacli new-link-token omniasolutions --role developer</pre>
+<p>It prints the token and a line to add under <span class="mono">auth.links</span> of the main configuration
+(<span class="mono">/etc/omniacli/omniacli.yaml</span> for the package); restart OmniaCLI afterwards
+(<span class="mono">sudo systemctl restart omniacli</span>): the main configuration is read at startup only.</p>
+
+<h3>Step 2 — on your machine: trust the remote's certificate</h3>
+<p>Your instance checks the remote's HTTPS certificate. It must name the host of the URL in its
+<em>subjectAltName</em>: the IP address when the URL uses an IP, the DNS name otherwise.</p>
+<ul>
+  <li><strong>A certificate from a public CA</strong> (Let's Encrypt and the like): nothing to do, leave the CA file
+    empty.</li>
+  <li><strong>A self-signed certificate, or one from the customer's own CA</strong>: save that certificate (or the CA's)
+    on your machine and give its path as the link's <strong>CA file</strong>.</li>
+</ul>
+<p>To save a self-signed certificate (replace host and port):</p>
+<pre class="console mono">openssl s_client -connect 192.0.2.10:8443 &lt;/dev/null 2&gt;/dev/null \
+  | openssl x509 &gt; /etc/omniacli/192.0.2.10.pem
+openssl x509 -in /etc/omniacli/192.0.2.10.pem -noout -subject -ext subjectAltName -fingerprint -sha256</pre>
+<p><strong>Check the fingerprint</strong> against the one read on the remote itself
+(<span class="mono">sudo openssl x509 -in &lt;nginx certificate&gt; -noout -fingerprint -sha256</span>): what
+<span class="mono">openssl s_client</span> downloads is whatever answers on that address. The file must be readable by
+the user that runs OmniaCLI (<span class="mono">omniacli</span> for the package).</p>
+
+<h3>Step 3 — on your instance: add the link <em>(admin)</em></h3>
+<p>Open the <strong>Links</strong> page and fill in the last row:</p>
+<table class="help-table">
+  <tr><th>Field</th><th>Value</th></tr>
+  <tr><td>Link</td><td>a name: letters, digits, <span class="mono">. _ -</span>. It becomes part of the URLs
+    (<span class="mono">/links/&lt;name&gt;/</span>), so the customer's name is a good choice.</td></tr>
+  <tr><td>URL</td><td>the remote's address, <span class="mono">https://host[:port][/path]</span>, for example
+    <span class="mono">https://192.0.2.10:8443</span>. An <span class="mono">http://</span> URL is accepted but the
+    token travels in clear: use it only through a VPN or an SSH tunnel.</td></tr>
+  <tr><td>Token</td><td>the token of step 1.</td></tr>
+  <tr><td>CA file</td><td>empty for a public CA, otherwise the path of step 2.</td></tr>
+</table>
+<p>Press <strong>Add link</strong>, then <strong>Test link</strong>: it shows the remote's OmniaCLI version and the role
+you get there. The links and their tokens are saved in the links file of your instance, readable by its owner only.</p>
+
+<h3>When it does not work</h3>
+<table class="help-table">
+  <tr><th>What you see</th><th>Why</th></tr>
+  <tr><td>the other instance refused the token</td><td>wrong or revoked token: create a new one on the remote and
+    paste it in the Token field (an empty Token field keeps the saved one).</td></tr>
+  <tr><td>cannot connect (… certificate verify failed …)</td><td>the certificate is not trusted (step 2), or it does not
+    name the host of the URL.</td></tr>
+  <tr><td>cannot connect / no answer in time</td><td>address, port, firewall, or the remote is down.</td></tr>
+  <tr><td>no OmniaCLI with links there</td><td>the URL reaches something else: check host, port and path.</td></tr>
+  <tr><td>"Not available: that OmniaCLI is older"</td><td>the remote runs an older OmniaCLI: its servers are listed,
+    but not the newer parts of the Dashboard (state, buttons, machine charts, disks). Update it.</td></tr>
+</table>
+<p>Behind nginx, the remote must pass on the request headers <span class="mono">Authorization</span> and
+<span class="mono">X-OmniaCLI-*</span>; nginx passes request headers on by default.</p>
+
+<h3>Removing a link</h3>
+<p>On the remote, <strong>Revoke</strong> it on the Users page: it stops working at once. On your instance,
+<strong>Delete</strong> it on the Links page.</p>
+</section>
+
+<section id="mcp">
+<h2>2. The MCP server</h2>
+<p>OmniaCLI serves an MCP endpoint (streamable HTTP) for AI clients such as Claude Code:</p>
+<pre class="console mono">{{ base_url }}/mcp</pre>
+<p>A client authenticates with a <strong>bearer token</strong>, never with a user's password. Every call is listed in
+the <strong>Access log</strong> (Users page, admins), with the token, the address and the tool.</p>
+
+<h3>Token roles</h3>
+<table class="help-table">
+  <tr><th>Role</th><th>The client may</th></tr>
+  <tr><td>user</td><td>read: <span class="mono">list_servers</span>, <span class="mono">server_status</span>,
+    <span class="mono">read_log</span>, <span class="mono">list_jobs</span>, <span class="mono">get_job</span>,
+    <span class="mono">pending_updates</span>, <span class="mono">dev_setup</span></td></tr>
+  <tr><td>developer</td><td>also <span class="mono">update_test</span> (git pull, update of the changed modules and
+    restart of a <strong>test</strong> instance) and <span class="mono">backup_test</span>, and download backups</td></tr>
+  <tr><td>admin</td><td>also <span class="mono">backup</span> and <span class="mono">list_backups</span> of any instance
+    (production too), <span class="mono">read_server</span> (a server's whole configuration) and
+    <span class="mono">add_draft_server</span> (a new server, always a draft). With an admin token,
+    <span class="mono">dev_setup</span>, <span class="mono">backup</span> and <span class="mono">list_backups</span> also
+    reach the draft servers.</td></tr>
+</table>
+<p>A client sees only the tools of its role. A token saved without a role (before roles existed) is a
+<strong>developer</strong>. The role can be changed at any time on the Users page; it applies to the next call.
+No token makes a draft server live: that is <strong>Test &amp; activate</strong> on the web interface, by an admin.</p>
+
+<h3>Step 1 — create the token <em>(admin)</em></h3>
+<ol>
+  <li>Open the <strong>Users</strong> page, section <strong>MCP tokens</strong>.</li>
+  <li>Name it after the client, for example <span class="mono">dev-laptop</span>, choose its role and press
+    <strong>Create MCP token</strong>.</li>
+  <li>Copy the token: a string of about 43 letters, digits, <span class="mono">-</span> and
+    <span class="mono">_</span>. It is shown <strong>only once</strong>.</li>
+</ol>
+<p class="banner" style="border-color: var(--warn); color: var(--text)">The
+<span class="mono">sha256$…</span> value in the users file is the token's <strong>hash</strong>, not the token: the
+token cannot be recovered from it, and a client that sends it is refused. A lost token is revoked and created again.</p>
+<p>Without the web interface, on the server's shell:</p>
+<pre class="console mono">omniacli new-token dev-laptop --role admin</pre>
+<p>It prints the token and a line to add under <span class="mono">auth.tokens</span> of the main configuration; restart
+OmniaCLI afterwards.</p>
+
+<h3>Step 2 — add the server to the client</h3>
+<p>In Claude Code, on the machine of the client:</p>
+<pre class="console mono">claude mcp add --scope user --transport http omniacli {{ base_url }}/mcp \
+  --header "Authorization: Bearer &lt;token&gt;"</pre>
+<ul>
+  <li><span class="mono">--scope user</span> makes it available in every project; without it, it is registered for the
+    folder the command runs in only.</li>
+  <li>To replace it: <span class="mono">claude mcp remove omniacli</span> (in the same scope), then add it again.</li>
+  <li>Check with <span class="mono">claude mcp list</span>, or <span class="mono">/mcp</span> inside a session.</li>
+  <li>Over HTTPS with a self-signed certificate, the client must trust that certificate as well (step 2 of the
+    links); how depends on the client.</li>
+</ul>
+
+<h3>Downloading a backup</h3>
+<p><span class="mono">backup</span>, <span class="mono">backup_test</span> and <span class="mono">list_backups</span>
+answer with a <span class="mono">download</span> path. The zip (database dump and filestore) is an HTTP GET on that
+path with the same header:</p>
+<pre class="console mono">curl -fH "Authorization: Bearer &lt;token&gt;" -o backup.zip \
+  {{ base_url }}/backups/&lt;server&gt;/&lt;role&gt;/&lt;file&gt;.zip</pre>
+<p>Add <span class="mono">--cacert &lt;certificate&gt;</span> for a self-signed certificate.</p>
+
+<h3>When it does not work</h3>
+<table class="help-table">
+  <tr><th>What you see</th><th>Why</th></tr>
+  <tr><td>HTTP 401, "Server rejected the configured Authorization header"</td><td>the client sends a wrong token: the
+    hash instead of the token, a part of it, or a revoked one. The Access log shows these calls as
+    <em>Failed login</em> through MCP.</td></tr>
+  <tr><td>"… needs an MCP token with role …"</td><td>the token's role is too low for that tool: change it on the Users
+    page.</td></tr>
+  <tr><td>"… is a draft: not live until Test &amp; activate …"</td><td>the tool works on active servers only; with an
+    admin token, <span class="mono">dev_setup</span>, <span class="mono">backup</span> and
+    <span class="mono">list_backups</span> reach drafts too.</td></tr>
+  <tr><td>"… is a draft saved incomplete: …"</td><td>the draft misses settings: complete it on the Servers page.</td></tr>
+  <tr><td>404 on <span class="mono">/mcp</span></td><td>OmniaCLI runs on Python older than 3.10, without the MCP
+    library. The package always installs a Python that has it.</td></tr>
+</table>
+</section>
+
+<section id="servers">
+<h2>3. Adding a server: the fields and the configurations</h2>
+<p>The <strong>Servers</strong> page (admins) lists every server, live or draft, with <strong>New server</strong>,
+<strong>Edit</strong>, <strong>Clone</strong> (the configuration only: no database, no files), <strong>Set to
+draft</strong> and <strong>Delete</strong> (the configuration only: databases and files are not touched). A server is a
+<strong>name</strong> and up to two <strong>instances</strong>, <em>production</em> and <em>test</em>: tick the ones
+it has, at least one.</p>
+
+<h3>Draft and live</h3>
+<ul>
+  <li><strong>Save as draft</strong> saves without any check, also incomplete. A draft is not live: it is not on the
+    Dashboard, has no actions and no auto update.</li>
+  <li><strong>Save, test &amp; activate</strong> (or <strong>Test &amp; activate</strong> on the Servers page) runs the
+    checks: config and paths readable, click-odoo scripts in the venv and Odoo importable, the database reachable,
+    every repository on its branch without local changes, the service found, sudo allowed, production and test on
+    separate databases and working copies, the backup folder writable. If they all pass, the server goes live; the dialog lists each check.</li>
+  <li>On a live server, <strong>Test &amp; save</strong> saves the change only if every check passes, otherwise the
+    server stays as it was; <strong>Save as draft</strong> takes it offline.</li>
+  <li>A server with a running job cannot be edited or deleted. Every save keeps the previous servers file as
+    <span class="mono">.bak</span>.</li>
+</ul>
+
+<h3>The server</h3>
+<table class="help-table">
+  <tr><th>Field</th><th>Meaning</th></tr>
+  <tr><td>Name</td><td>letters, digits, <span class="mono">. _ -</span>, starting with a letter or a digit. It is part
+    of the URLs and of the backup folders, for example <span class="mono">CUSTOMER_V18</span>.</td></tr>
+</table>
+
+<h3>Each instance</h3>
+<p>Fill in <strong>Odoo config file</strong> first and press <strong>Reload</strong>: OmniaCLI reads the database
+(<span class="mono">db_name</span>, or an exact <span class="mono">^name$</span> <span class="mono">dbfilter</span>),
+the log file (<span class="mono">logfile</span>) and the git repositories that hold the
+<span class="mono">addons_path</span> folders, with their branch and remote. What it cannot find is listed under the
+fields.</p>
+<table class="help-table">
+  <tr><th>Field</th><th>Meaning</th></tr>
+  <tr><td>Database</td><td>the Odoo database of the instance: modules are updated and backups taken on it.</td></tr>
+  <tr><td>Odoo config file</td><td>the <span class="mono">odoo.conf</span> the instance runs with, for example
+    <span class="mono">/etc/odoo/customer-test.conf</span>.</td></tr>
+  <tr><td>Log file</td><td>the Odoo log shown on the Log page and read by <span class="mono">read_log</span>. With
+    restart type <em>process</em> it is set by OmniaCLI (Odoo's output, in its logs folder).</td></tr>
+  <tr><td>Venv bin</td><td>the <span class="mono">bin</span> folder of the virtualenv that runs this Odoo, for example
+    <span class="mono">/opt/odoo/venvs/odoo18/bin</span>. OmniaCLI runs <span class="mono">click-odoo-update</span> and
+    <span class="mono">click-odoo-backupdb</span> from it; <strong>pip requirements</strong> and <strong>pip
+    click-odoo</strong> install into it.</td></tr>
+  <tr><td>Run as</td><td>the system user of the Odoo service (often <span class="mono">odoo</span>). The venv's
+    programs (update, backup, pip, checks) run as that user with <span class="mono">sudo -n -u</span>, so they reach the
+    database, the filestore and the venv as Odoo does. Empty: as the user running OmniaCLI. Git always runs as
+    OmniaCLI's user. Not with restart type <em>process</em>.</td></tr>
+  <tr><td>HTTP port</td><td>restart type <em>process</em> only: the port Odoo listens on, passed as
+    <span class="mono">--http-port</span> (<span class="mono">--xmlrpc-port</span> before Odoo 11), which wins over the
+    config. Empty: the port of the config. It applies at the next Start or Restart.</td></tr>
+  <tr><td>odoo-bin</td><td>the <span class="mono">odoo-bin</span> used by <strong>Update modules</strong> (a chosen
+    list of modules) and by restart type <em>process</em>. Empty: the first repository that has one.</td></tr>
+  <tr><td>Restart with</td><td>how Odoo is restarted, started and stopped: see the three configurations below.</td></tr>
+  <tr><td>Service name</td><td>the systemd unit or the init.d script, for example
+    <span class="mono">odoo-customer-test</span>.</td></tr>
+  <tr><td>Use sudo -n</td><td>run the service command through <span class="mono">sudo -n</span> (no password prompt:
+    sudoers must allow it, see below).</td></tr>
+  <tr><td>Update changed modules</td><td>after a pull, update the modules whose files changed
+    (<span class="mono">click-odoo-update</span>, which keeps a hash of every installed module in the database).</td></tr>
+  <tr><td>Auto update</td><td>check the remotes every <strong>Every (minutes)</strong>; when there are new commits,
+    pull, update the changed modules and restart. An Odoo someone stopped stays stopped.</td></tr>
+  <tr><td>Every (minutes)</td><td>the interval of the auto update check, 1 or more (default 10).</td></tr>
+  <tr><td>Time window</td><td><span class="mono">HH:MM-HH:MM</span>: the auto update runs only inside it; a window
+    may cross midnight (<span class="mono">20:00-06:00</span>). Empty: always.</td></tr>
+</table>
+
+<h3>Repositories</h3>
+<table class="help-table">
+  <tr><th>Column</th><th>Meaning</th></tr>
+  <tr><td>Name</td><td>unique in the instance. A test repository needs a production repository of the same name:
+    <strong>Merge test to production</strong> pairs them by name.</td></tr>
+  <tr><td>Path</td><td>the git working copy on this machine.</td></tr>
+  <tr><td>Remote</td><td>the git remote to pull from (default <span class="mono">origin</span>).</td></tr>
+  <tr><td>Branch</td><td>the branch the working copy must be on: a pull is
+    <span class="mono">git pull --ff-only &lt;remote&gt; &lt;branch&gt;</span>, and it is refused when the working copy is
+    on another branch.</td></tr>
+</table>
+<p>A working copy with uncommitted changes is refused by a pull, except on a <strong>test instance without auto
+update</strong>: there someone may be working, so the changes are kept (and git refuses to overwrite them).</p>
+
+<h3>The three restart configurations</h3>
+<table class="help-table">
+  <tr><th>Restart with</th><th>What OmniaCLI does</th><th>Needs</th></tr>
+  <tr><td>systemd</td><td><span class="mono">systemctl --no-ask-password restart|start|stop &lt;service&gt;</span>; the
+    pages show the unit's state, with Start and Stop.</td><td>with sudo, a sudoers line per command and service.</td></tr>
+  <tr><td>init.d</td><td><span class="mono">/etc/init.d/&lt;service&gt; restart</span>; Restart only, the state is
+    unknown.</td><td>with sudo, a sudoers line.</td></tr>
+  <tr><td>process</td><td>OmniaCLI starts <span class="mono">odoo-bin -c &lt;config&gt;</span> itself, in the instance's
+    venv, and stops it with a signal; Odoo outlives a restart of OmniaCLI. It refuses to start when another process
+    already runs with the same config. No service name, no Run as.</td><td>nothing: it runs as OmniaCLI's user.</td></tr>
+</table>
+<p>The sudoers lines go in <span class="mono">/etc/sudoers.d/omniacli</span> (the package installs it with examples,
+all commented); a failed check prints the exact lines. Examples, with your service names and paths:</p>
+<pre class="console mono">omniacli ALL=(root) NOPASSWD: /usr/bin/systemctl --no-ask-password restart odoo-customer-test
+omniacli ALL=(root) NOPASSWD: /usr/bin/systemctl --no-ask-password start odoo-customer-test
+omniacli ALL=(root) NOPASSWD: /usr/bin/systemctl --no-ask-password stop odoo-customer-test
+omniacli ALL=(root) NOPASSWD: /etc/init.d/odoo-customer-test restart
+omniacli ALL=(odoo) NOPASSWD:SETENV: /opt/odoo/venvs/odoo18/bin/</pre>
+<p>The last line is for <strong>Run as</strong> <span class="mono">odoo</span>: it allows the programs of that venv
+folder, and <span class="mono">SETENV</span> passes <span class="mono">PYTHONPATH</span>. Check a sudoers file with
+<span class="mono">sudo visudo -cf /etc/sudoers.d/omniacli</span>.</p>
+
+<h3>Typical configurations</h3>
+<ul>
+  <li><strong>A customer server with a systemd service per instance</strong>: production and test, restart
+    <em>systemd</em> with sudo, Run as the Odoo user, auto update on test (for example every 10 minutes), off on
+    production; production gets the tested commits with <strong>Merge test to production</strong>, which backs it up
+    first.</li>
+  <li><strong>A development or demo machine</strong>: one test instance, restart <em>process</em>, an HTTP port per
+    instance when several run on the same machine; no sudo needed.</li>
+  <li><strong>An old server with init.d scripts</strong>: restart <em>init.d</em>; Restart only, no Start and Stop.</li>
+  <li><strong>A test instance someone develops on</strong>: auto update off, so a pull keeps their uncommitted
+    changes.</li>
+</ul>
+</section>
+</div>
+{% endblock %}

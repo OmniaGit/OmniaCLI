@@ -1,3 +1,5 @@
+# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C
+# SPDX-License-Identifier: AGPL-3.0-or-later
 import os
 import subprocess
 from pathlib import Path
@@ -164,3 +166,33 @@ def env(tmp_path, fake_venv, restart_calls):
         base_dir=servers_file.parent,
     )
     return {"settings": settings, "remotes": remotes, "tmp": tmp_path, "calls": restart_calls}
+
+
+class BasicAsSession:
+    """The tests send HTTP Basic credentials, as OmniaCLI took them before the
+    login form: this turns valid ones into the session cookie the form would
+    give (one per user), and drops wrong ones, so every page is reached the
+    way a browser reaches it now."""
+
+    def __init__(self, app):
+        self.app = app
+        self._cookies = {}
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            headers = [(k, v) for k, v in scope["headers"] if k != b"authorization"]
+            basic = dict(scope["headers"]).get(b"authorization", b"")
+            if basic.lower().startswith(b"basic "):
+                import base64
+
+                from omniacli.sessions import COOKIE
+
+                user, _, password = base64.b64decode(basic[6:]).decode().partition(":")
+                state = self.app.state
+                if state.authenticator.check(user, password):
+                    key = (user, password)
+                    if key not in self._cookies or not state.sessions.user(self._cookies[key], state.settings.users):
+                        self._cookies[key] = state.sessions.create(user, state.settings.users[user])
+                    headers.append((b"cookie", f"{COOKIE}={self._cookies[key]}".encode()))
+                scope = dict(scope, headers=headers)
+        await self.app(scope, receive, send)
