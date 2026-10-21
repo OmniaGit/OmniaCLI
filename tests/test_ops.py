@@ -201,6 +201,15 @@ async def test_run_timeout_kills_what_ignores_sigterm(monkeypatch):
         await ops.run(job(), ["sh", "-c", 'trap "" TERM; exec sleep 30'], timeout=0.2)
 
 
+async def test_failure_names_the_program_past_sudo(fake_sudo):
+    assert ops._program(["sudo", "-n", "-u", "odoo", "PYTHONPATH=/o", "/v/bin/click-odoo-update", "-c"]) \
+        == "click-odoo-update"
+    assert ops._program(["sudo", "-n", "systemctl", "restart", "x"]) == "systemctl"
+    assert ops._program(["/v/bin/python", "-m", "pip"]) == "python"
+    with pytest.raises(JobFailed, match="^false exited with code 1$"):
+        await ops.run(job(), ops.as_user("odoo", ["false"]))
+
+
 async def test_run_timeout():
     j = job()
     with pytest.raises(JobFailed, match="did not finish"):

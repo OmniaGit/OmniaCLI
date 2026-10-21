@@ -49,6 +49,16 @@ def as_user(run_as: str | None, cmd: list, env: dict | None = None) -> list:
     return ["sudo", "-n", "-u", run_as, *extra, *cmd]
 
 
+def _program(cmd: list) -> str:
+    """The name of the program a command runs, past sudo and its options."""
+    args = [str(c) for c in cmd]
+    if args and Path(args[0]).name == "sudo":
+        args = args[1:]
+        while args and (args[0].startswith("-") or "=" in args[0]):
+            args = args[2:] if args[0] == "-u" else args[1:]
+    return Path(args[0]).name if args else "sudo"
+
+
 async def _terminate(proc: asyncio.subprocess.Process) -> None:
     proc.terminate()
     try:
@@ -92,9 +102,9 @@ async def run(
         returncode = await asyncio.wait_for(stream(), timeout)
     except asyncio.TimeoutError:
         await _terminate(proc)
-        raise JobFailed(f"{Path(str(cmd[0])).name} did not finish within {timeout:.0f} s")
+        raise JobFailed(f"{_program(cmd)} did not finish within {timeout:.0f} s")
     if check and returncode:
-        raise JobFailed(f"{Path(str(cmd[0])).name} exited with code {returncode}")
+        raise JobFailed(f"{_program(cmd)} exited with code {returncode}")
     return returncode
 
 
