@@ -1,11 +1,11 @@
 {% extends "base.html" %}
 {% block title %}Links · OmniaCLI{% endblock %}
 {% block crumbs %}{% from "_crumbs.html" import crumbs with context %}
-{{ crumbs([("Configuration", "/config"), ("Links", None)]) }}
+{{ crumbs([("Dashboard", "/"), ("Links", None)]) }}
 {% endblock %}
 {% block content %}
 <h1>Links</h1>
-<p class="muted">Other OmniaCLI instances this one operates: their servers are listed on the Servers page and their pages open here, under <span class="mono">/links/&lt;name&gt;/</span>.
+<p class="muted">Other OmniaCLI instances this one operates: their servers are listed on the Dashboard and their pages open here, under <span class="mono">/links/&lt;name&gt;/</span>.
 The other instance creates the token on its <strong>Users</strong> page and decides its role; here each user acts there with at most their own role.
 Saved in <span class="mono">{{ links_file }}</span>, readable by its owner only: it holds the tokens.</p>
 <div id="error" class="banner" hidden></div>
@@ -59,7 +59,7 @@ Saved in <span class="mono">{{ links_file }}</span>, readable by its owner only:
       if (await post("save", body)) location.reload();
     };
     row.querySelector("[data-delete]").onclick = async () => {
-      if (!confirm(`Delete link ${name}? Its servers leave the Servers page.`)) return;
+      if (!confirm(`Delete link ${name}? Its servers leave the Dashboard.`)) return;
       if (await post("delete", {name})) location.reload();
     };
     row.querySelector("[data-test]").onclick = async () => {

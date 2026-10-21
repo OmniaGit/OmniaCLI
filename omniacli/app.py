@@ -20,8 +20,9 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.templating import Jinja2Templates
 from starlette.background import BackgroundTask
 
-from . import checks, ops
-from .odooconf import read_odoo_config
+from . import checks, disks, ops
+from .accesslog import AccessLog
+from .odooconf import http_port, read_odoo_config
 from .auth import ROLES as ACCESS_ROLES
 from .auth import Authenticator, Principal, hash_password, hash_token, new_token, verify_password
 from .config import (
@@ -34,6 +35,7 @@ from .config import (
     LinkAccess,
     LinkTarget,
     Settings,
+    TOKEN_DEFAULT_ROLE,
     load_settings,
     matches,
     parse_groups,
@@ -120,6 +122,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
     updater = AutoUpdater(settings, jobs)
     sampler = Sampler(settings)
     link_clients = LinkClients(link_transport)
+    access_log = AccessLog(settings.logs_dir / "access.jsonl")
 
     def identify(request: Request, credentials: Optional[HTTPBasicCredentials]) -> Principal:
         scheme, _, token = request.headers.get("authorization", "").partition(" ")
@@ -127,11 +130,11 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             token = token.strip()
             name = authenticator.token_name(token)
             if name is not None:
-                # an MCP client's token: it may read (and download backups);
-                # its actions go through the MCP tools only
+                # an MCP client's token: it may read what its role allows (and
+                # download backups); its actions go through the MCP tools only
                 if request.method not in ("GET", "HEAD"):
                     raise HTTPException(status.HTTP_403_FORBIDDEN, "A token may only read")
-                return Principal(name, "admin", "token")
+                return Principal(name, settings.token_role(name), "token")
             name = authenticator.link_name(token)
             if name is None:
                 raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid token",
@@ -159,7 +162,18 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
     def current_user(
         request: Request, credentials: Optional[HTTPBasicCredentials] = Depends(_basic)
     ) -> Principal:
-        user = identify(request, credentials)
+        ip = request.client.host if request.client else ""
+        try:
+            user = identify(request, credentials)
+        except HTTPException as exc:
+            # a browser asks first without credentials: only wrong ones count
+            if exc.status_code == 401 and (credentials is not None or "bearer" in (exc.headers or {}).get("WWW-Authenticate", "").lower()):
+                kind = "user" if credentials is not None else "token"
+                name = credentials.username if credentials is not None else ""
+                access_log.record("failed", kind, name[:64], ip, f"{request.method} {request.url.path}"[:200])
+            raise
+        # a link: who acts there through it
+        access_log.seen(user.kind, user.name, ip, user.on_behalf)
         request.state.user = user
         return user
 
@@ -179,7 +193,9 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
     else:
         from .mcp_server import create_mcp
 
-        mcp_route, mcp_manager = create_mcp(settings, jobs, updater, sampler, authenticator)
+        # add_draft_server is defined further down, with the configuration's lock
+        mcp_route, mcp_manager = create_mcp(settings, jobs, updater, sampler, authenticator, access_log,
+                                            lambda name, data: add_draft_server(name, data))
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -205,6 +221,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
     )
     app.state.settings, app.state.jobs, app.state.updater = settings, jobs, updater
     app.state.sampler = sampler
+    app.state.access_log = access_log
 
     async def icon(request: Request):
         name, media_type = _ICONS[request.url.path]
@@ -217,8 +234,8 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
     if mcp_route is not None:
         app.router.routes.append(mcp_route)  # its own bearer token check
 
-    def get_instance(server: str, role: str) -> Instance:
-        instance = settings.instance(server, role)
+    def get_instance(server: str, role: str, drafts: bool = False) -> Instance:
+        instance = settings.instance(server, role, drafts)
         if instance is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, f"No instance {server}/{role}")
         return instance
@@ -235,8 +252,24 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             raise HTTPException(status.HTTP_404_NOT_FOUND, f"No active server {name}")
         return srv
 
+    async def run_state(inst: Instance) -> str:
+        """running, stopped or unknown (an init.d service, a unit not found)."""
+        if inst.restart.type == "process":
+            return "running" if ops.managed_pid(inst) else "stopped"
+        state = await ops.service_state(inst)
+        if state in ("active", "activating", "reloading"):
+            return "running"
+        if state in ("inactive", "failed", "deactivating"):
+            return "stopped"
+        return "unknown"
+
+    async def run_states(servers) -> dict[str, str]:
+        """{instance key: run_state} of the servers' instances, asked together."""
+        insts = [i for srv in servers for i in srv.instances.values()]
+        return dict(zip([i.key for i in insts], await asyncio.gather(*(run_state(i) for i in insts))))
+
     async def remote_servers(me: Principal) -> list[dict]:
-        """The servers of every link, as Servers page rows: an error row for a
+        """The servers of every link, as Dashboard rows: an error row for a
         link that does not answer. Only for a user who logs in here."""
         if me.kind != "user":
             return []
@@ -262,6 +295,10 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
                     "base": f"/links/{link.name}",
                     "roles": [r for r in ("production", "test") if r in instances],
                     "busy": {r: bool(i.get("busy")) for r, i in instances.items()},
+                    # a linked OmniaCLI older than the state: no buttons
+                    "state": {r: i["state"] for r, i in instances.items() if i.get("state")},
+                    "restart": {r: i.get("restart", "") for r, i in instances.items()},
+                    "web": {r: i["port"] for r, i in instances.items() if i.get("port")},
                     "text": " ".join(text),
                 })
             return rows
@@ -273,14 +310,19 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
     async def index(request: Request, q: str = "", me: Principal = Depends(current_user)):
         """The live servers, this instance's and its links', filtered by text
         (link, name, database, service, repositories and branches)."""
+        live = settings.active_servers()
+        states = await run_states(live)
         rows = [
             {
                 "link": "", "name": srv.name, "label": srv.name, "base": prefix_of(request),
                 "roles": [r for r in ("production", "test") if r in srv.instances],
                 "busy": {r: jobs.is_busy(i.key) for r, i in srv.instances.items()},
+                "state": {r: states[i.key] for r, i in srv.instances.items()},
+                "restart": {r: i.restart.type for r, i in srv.instances.items()},
+                "web": {r: port for r, i in srv.instances.items() if (port := i.http_port or http_port(i.odoo_config))},
                 "text": server_text(srv),
             }
-            for srv in settings.active_servers()
+            for srv in live
         ]
         remote = await remote_servers(me)
         errors = [r for r in remote if "error" in r]
@@ -300,9 +342,11 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
                 "rows": shown,
                 "sections": [sec for sec in sections if sec["rows"]],
                 "link_errors": [e for e in errors if matches(e["link"], q)],
+                # the load and disks of this machine, and of every link that answered
+                "machine_links": [name for name in settings.link_targets
+                               if me.kind == "user" and name not in {e["link"] for e in errors}],
                 "total": len(rows),
                 "q": q,
-                "drafts": [s for s in settings.servers.values() if not s.active],
                 "jobs": jobs.recent(10),
             },
         )
@@ -345,7 +389,9 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
 
     @app.get("/api/servers")
     async def server_list():
-        """The live servers, with what the Servers page shows and filters on."""
+        """The live servers, with what the Dashboard shows and filters on."""
+        live = settings.active_servers()
+        states = await run_states(live)
         return [
             {
                 "name": srv.name,
@@ -355,24 +401,34 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
                         "service": inst.restart.service,
                         "repositories": [{"name": r.name, "branch": r.branch} for r in inst.repositories],
                         "busy": jobs.is_busy(inst.key),
+                        "state": states[inst.key],
+                        "restart": inst.restart.type,
+                        "port": inst.http_port or http_port(inst.odoo_config),
                     }
                     for role, inst in srv.instances.items()
                 },
             }
-            for srv in settings.active_servers()
+            for srv in live
         ]
 
     @app.get("/api/metrics")
-    async def metrics(since: int = 0, server: Optional[str] = None):
-        """{cores, interval, instances: {key: {source, points}}}."""
+    async def metrics(since: int = 0, server: Optional[str] = None, machine_only: bool = False):
+        """{cores, interval, machine: [points], instances: {key: {source, points}}};
+        machine_only: no instances (the Dashboard's machine charts)."""
         data = {}
-        for inst in settings.all_instances():
+        for inst in [] if machine_only else settings.all_instances():
             if server is None or inst.server == server:
                 data[inst.key] = {
                     "source": sampler.source.get(inst.key, ""),
                     "points": sampler.series(inst.key, since),
                 }
-        return {"cores": sampler.cores, "interval": 5, "instances": data}
+        return {"cores": sampler.cores, "interval": 5, "machine": sampler.machine_series(since),
+                "instances": data}
+
+    @app.get("/api/disks")
+    async def disk_space():
+        """This machine's disks: size, free space and what is kept on each."""
+        return {"disks": await disks.disks(settings)}
 
     @app.post("/servers/{server}/{role}/pull")
     async def action_pull(request: Request, server: str, role: str, user: Principal = Depends(developer)):
@@ -591,8 +647,9 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         ]
 
     @app.get("/backups/{server}/{role}/{name}", dependencies=[Depends(developer)])
-    async def backup_download(server: str, role: str, name: str):
-        instance = get_instance(server, role)
+    async def backup_download(server: str, role: str, name: str, me: Principal = Depends(current_user)):
+        # an admin also backs up draft servers (MCP), and downloads their backups
+        instance = get_instance(server, role, drafts=me.can("admin"))
         folder = backup_folder(instance).resolve()
         path = (folder / name).resolve()
         # only a zip directly in this instance's backup folder
@@ -652,7 +709,9 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         job = jobs.get(job_id)
         if job is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "No such job")
-        return _TEMPLATES.TemplateResponse(request, "job.html", {"job": job})
+        # a draft or deleted server has no page: its crumb goes to its jobs
+        live = [srv.name for srv in settings.active_servers()]
+        return _TEMPLATES.TemplateResponse(request, "job.html", {"job": job, "live": live})
 
     @app.get("/api/jobs/{job_id}")
     async def job_json(job_id: str, since: int = 0):
@@ -784,15 +843,37 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             "checks": [c.to_dict() for c in report] if report is not None else None,
         }
 
-    async def store(servers):
-        """Write the servers file and make it current; a response on error."""
-        try:
-            save_servers(settings.servers_file, servers)
-        except OSError as exc:
-            return refuse(f"Cannot write {settings.servers_file}: {exc}", 500)
+    async def write_servers(servers):
+        """Write the servers file and make it current (OSError when it cannot)."""
+        save_servers(settings.servers_file, servers)
         settings.servers = servers
         await updater.reload()
+
+    async def store(servers):
+        """write_servers; a response on error."""
+        try:
+            await write_servers(servers)
+        except OSError as exc:
+            return refuse(f"Cannot write {settings.servers_file}: {exc}", 500)
         return None
+
+    async def add_draft_server(name: str, data: dict):
+        """A new server, always a draft (from MCP): it goes live only with
+        Test & activate on the web. ConfigError when it cannot be added."""
+        async with config_lock:
+            if name in settings.servers:
+                raise ConfigError(f"A server named {name} already exists")
+            if not isinstance(data, dict):
+                raise ConfigError("the server must be a mapping of production and test")
+            try:
+                parsed = parse_servers({name: {**data, "status": "draft"}}, settings.logs_dir)[name]
+            except (TypeError, ValueError, AttributeError) as exc:
+                raise ConfigError(str(exc)) from exc
+            try:
+                await write_servers({**settings.servers, name: parsed})
+            except OSError as exc:
+                raise ConfigError(f"Cannot write {settings.servers_file}: {exc}") from exc
+            return parsed
 
     @app.post("/api/servers/{name}/test", dependencies=[Depends(admin)])
     async def config_test(name: str):
@@ -846,7 +927,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
 
     def web_copy() -> Access:
         web = settings.web
-        return Access(dict(web.users), dict(web.roles), dict(web.tokens), dict(web.links))
+        return Access(dict(web.users), dict(web.roles), dict(web.tokens), dict(web.links), dict(web.token_roles))
 
     async def store_access(web: Access):
         """Write the users file and make it current; a response on error."""
@@ -887,10 +968,21 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
                           for n in sorted(settings.users)],
                 "links": [{"name": n, "role": link.role, "fixed": n in fixed.links}
                           for n, link in sorted(settings.links.items())],
-                "tokens": [{"name": n, "fixed": n in fixed.tokens} for n in sorted(settings.tokens)],
+                "tokens": [{"name": n, "role": settings.token_role(n), "fixed": n in fixed.tokens}
+                           for n in sorted(settings.tokens)],
                 "users_file": settings.users_file,
                 "roles": ACCESS_ROLES,
             },
+        )
+
+    @app.get("/access", dependencies=[Depends(admin)])
+    async def access_page(request: Request, q: str = ""):
+        """The access log: logins, failed logins and MCP calls, the newest first."""
+        entries = await asyncio.to_thread(access_log.recent, 5000)
+        found = [e for e in entries if matches(" ".join(str(v) for v in e.values()), q)]
+        return _TEMPLATES.TemplateResponse(
+            request, "access.html",
+            {"entries": found[:500], "total": len(found), "q": q, "log_file": access_log.path},
         )
 
     @app.post("/api/access/users/save")
@@ -948,16 +1040,20 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             return await store_access(web) or {"ok": True, "token": token}
 
     @app.post("/api/access/tokens/save", dependencies=[Depends(admin)])
-    async def token_create(payload: dict = Body(...)):
-        """Create an MCP token: it is in the answer, once."""
+    async def token_save(payload: dict = Body(...)):
+        """Create an MCP token (new: true; it is in the answer, once) or change its role."""
         name = str(payload.get("name") or "").strip()
+        role = str(payload.get("role") or TOKEN_DEFAULT_ROLE)
+        new = bool(payload.get("new"))
         async with access_lock:
-            refused = check_name("Token", name, settings.fixed.tokens, settings.tokens, True)
+            refused = check_name("Token", name, settings.fixed.tokens, settings.tokens, new) or check_role(role)
             if refused:
                 return refused
             web = web_copy()
-            token = new_token()
-            web.tokens[name] = hash_token(token)
+            token = new_token() if new else None
+            if token:
+                web.tokens[name] = hash_token(token)
+            web.token_roles[name] = role
             return await store_access(web) or {"ok": True, "token": token}
 
     @app.post("/api/access/{kind}/delete", dependencies=[Depends(admin)])
@@ -974,6 +1070,8 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
                 return refused
             web = web_copy()
             del getattr(web, kind)[name]
+            if kind == "tokens":
+                web.token_roles.pop(name, None)
             return await store_access(web) or {"ok": True}
 
     # --- links to other OmniaCLI instances -------------------------------
@@ -1084,7 +1182,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         return StreamingResponse(resp.aiter_raw(), status_code=resp.status_code, headers=kept,
                                  background=BackgroundTask(resp.aclose))
 
-    # --- groups of the Servers page ------------------------------------
+    # --- groups of the Dashboard ----------------------------------------
 
     @app.get("/groups")
     async def groups_page(request: Request, me: Principal = Depends(admin)):

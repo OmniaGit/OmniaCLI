@@ -1,11 +1,11 @@
 {% extends "base.html" %}
 {% block title %}Groups · OmniaCLI{% endblock %}
 {% block crumbs %}{% from "_crumbs.html" import crumbs with context %}
-{{ crumbs([("Servers", "/"), ("Groups", None)]) }}
+{{ crumbs([("Dashboard", "/"), ("Groups", None)]) }}
 {% endblock %}
 {% block content %}
 <h1>Groups</h1>
-<p class="muted">The headings of the Servers page, in this order. One member per line:
+<p class="muted">The headings of the Dashboard, in this order. One member per line:
 <span class="mono">srv</span> a server of this instance, <span class="mono">*</span> all of them,
 <span class="mono">customer/srv</span> a server of a link, <span class="mono">customer/*</span> all the servers of a link.
 A server shows under the first group that has it; the others under "Other servers".

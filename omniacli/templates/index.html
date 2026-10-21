@@ -1,10 +1,12 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="server-head" style="padding: 0; border: 0">
-  <h1>Servers</h1>
+{% from "_icons.html" import icon %}
+<section class="fold" data-fold="servers">
+<div class="fold-head">
+  <h1><button type="button" class="fold-toggle" aria-expanded="true"><span class="fold-icon" aria-hidden="true">▾</span>Servers</button></h1>
   {% if is_admin and not prefix %}<a class="button" href="/groups">Edit groups</a>{% endif %}
 </div>
-{% if drafts %}<p class="muted">{{ drafts | length }} draft server{{ "s" if drafts | length > 1 }} not live yet: see {% if is_admin %}<a href="{{ prefix }}/config">Configuration</a>{% else %}Configuration{% endif %}.</p>{% endif %}
+<div class="fold-body"><div class="fold-inner">
 {% if total > 1 or q %}
 <form class="actions job-filter" method="get" action="{{ prefix }}/" style="margin: 0 0 12px">
   <input type="search" name="q" value="{{ q }}" placeholder="Search server, database, repository, branch…" aria-label="Search servers">
@@ -18,7 +20,7 @@
 <div class="panel">
   <div class="scroll">
   <table class="server-rows">
-    <tr><th>Server</th><th>CPU, last 15 minutes</th><th></th></tr>
+    <tr><th>Server</th><th>Odoo, CPU of the last 15 minutes</th><th></th></tr>
     {% for row in rows %}
     <tr>
       <td><a href="{{ row.base }}/servers/{{ row.name }}"><strong>{{ row.label }}</strong></a>
@@ -30,6 +32,37 @@
           <span class="role {{ role }}">{{ "Prod" if role == "production" else "Test" }}</span>
           <svg class="spark" role="img" aria-label="CPU of {{ row.label }} {{ role }}"></svg>
           <span class="spark-value mono">–</span>
+          {% if row.web.get(role) %}
+          {# Odoo itself, on this computer's localhost: a new tab #}
+          {% set port = row.web[role] %}
+          {% set web = "http://localhost:" ~ port %}
+          <a class="odoo-link mono" href="{{ web }}" target="_blank" rel="noopener" title="Open {{ web }} in a new tab">:{{ port }} ↗</a>
+          {% endif %}
+          {% set st = row.state.get(role) %}
+          {% if st %}
+          {# the same buttons as on the server page, as icons #}
+          {% set rt = row.restart.get(role, "") %}
+          {% set url = row.base ~ "/servers/" ~ row.name ~ "/" ~ role %}
+          {% set off = "disabled" if row.busy[role] else "" %}
+          {% set what = row.label ~ " " ~ role %}
+          <span class="run-state {{ st }}" title="Odoo {{ st if st != 'unknown' else 'state unknown' }}">{{ {"running": "running", "stopped": "stopped"}.get(st, "?") }}</span>
+          {% if can_restart %}
+          <span class="run-buttons">
+            {% if st != "running" and rt in ("process", "systemd") %}
+            <form method="post" action="{{ url }}/{{ 'restart' if rt == 'process' else 'start' }}" onsubmit="return confirm('Start Odoo of {{ what }}?')">
+              <button class="icon-btn btn-start" title="Start" aria-label="Start {{ what }}" {{ off }}>{{ icon("start") }}</button></form>
+            {% endif %}
+            {% if st != "stopped" and rt in ("process", "systemd") %}
+            <form method="post" action="{{ url }}/stop" onsubmit="return confirm('Stop Odoo of {{ what }}? It stays stopped, also for the auto update, until Start.')">
+              <button class="icon-btn btn-stop" title="Stop" aria-label="Stop {{ what }}" {{ off }}>{{ icon("stop") }}</button></form>
+            {% endif %}
+            {% if rt != "process" or st == "running" %}
+            <form method="post" action="{{ url }}/restart" onsubmit="return confirm('Restart Odoo of {{ what }}?')">
+              <button class="icon-btn btn-restart" title="Restart" aria-label="Restart {{ what }}" {{ off }}>{{ icon("restart") }}</button></form>
+            {% endif %}
+          </span>
+          {% endif %}
+          {% endif %}
         </div>
         {% endfor %}
       </td>
@@ -56,10 +89,80 @@
 {{ server_table(section.rows) }}
 {% endif %}
 {% else %}
-<div class="panel"><p class="muted" style="margin: 0">{% if q %}No servers match.{% else %}No live servers.{% if is_admin %} Add one in <a href="{{ prefix }}/config">Configuration</a>, then use Test &amp; activate.{% endif %}{% endif %}</p></div>
+<div class="panel"><p class="muted" style="margin: 0">{% if q %}No servers match.{% else %}No live servers.{% if is_admin %} Add one in <a href="{{ prefix }}/config">Servers</a>, then use Test &amp; activate.{% endif %}{% endif %}</p></div>
 {% endfor %}
-<h1 style="margin-top: 24px">Last jobs</h1>
+</div></div>
+</section>
+<section class="fold" data-fold="machine">
+<div class="fold-head">
+  <h1><button type="button" class="fold-toggle" aria-expanded="true"><span class="fold-icon" aria-hidden="true">▾</span>This machine</button></h1>
+  {# shown when the section is folded: the last 15 minutes, and the disks #}
+  <div class="fold-summary" title="Open This machine">
+    <span class="sum-item"><span class="muted">CPU</span>
+      <svg class="spark" data-sum="cpu" width="120" height="28" role="img" aria-label="CPU of this machine, last 15 minutes"></svg>
+      <span class="mono" data-sum-value="cpu">–</span></span>
+    <span class="sum-item"><span class="muted">Network</span>
+      <svg class="spark" data-sum="net" width="120" height="28" role="img" aria-label="Network traffic of this machine, last 15 minutes"></svg>
+      <span class="mono" data-sum-value="net">–</span></span>
+    <span class="sum-item"><span class="muted">Disks</span><span class="sum-disks"></span></span>
+  </div>
+</div>
+<div class="fold-body"><div class="fold-inner">
+<p class="muted" style="margin-top: 0">The whole machine, last hour: every Odoo instance, PostgreSQL and the rest together.</p>
+<div class="machine-grid">
+  {% for link in [""] + machine_links %}
+  <section class="panel machine-panel" data-link="{{ link }}">
+    {% if link %}<h2 style="margin: 0 0 8px">Linked instance {{ link }}</h2>{% endif %}
+    <div class="tiles">
+      <div class="tile"><div class="tile-label">CPU now</div><div class="tile-value" data-tile="cpu">–</div></div>
+      <div class="tile"><div class="tile-label">Received</div><div class="tile-value" data-tile="rx">–</div></div>
+      <div class="tile"><div class="tile-label">Sent</div><div class="tile-value" data-tile="tx">–</div></div>
+    </div>
+    <p class="muted machine-state" style="margin: 6px 0 0"></p>
+    <h3 class="chart-title">CPU, % of all <span class="cores">?</span></h3>
+    <div class="chart-box"><svg class="chart" data-chart="cpu" role="img" aria-label="CPU of {{ link or 'this machine' }} over the last hour"></svg><div class="chart-tip" hidden></div></div>
+    <h3 class="chart-title">Network, per second <span class="muted" style="font-weight: 400"><span class="key s1"></span>received<span class="key s2"></span>sent</span></h3>
+    <div class="chart-box"><svg class="chart" data-chart="net" role="img" aria-label="Network traffic of {{ link or 'this machine' }} over the last hour"></svg><div class="chart-tip" hidden></div></div>
+    <h3 class="chart-title">Disks, free space</h3>
+    <div class="disk-list"><span class="muted">Loading…</span></div>
+  </section>
+  {% endfor %}
+</div>
+</div></div>
+</section>
+<section class="fold" data-fold="jobs">
+<div class="fold-head">
+  <h1><button type="button" class="fold-toggle" aria-expanded="true"><span class="fold-icon" aria-hidden="true">▾</span>Last jobs</button></h1>
+  
+</div>
+<div class="fold-body"><div class="fold-inner">
 <div class="panel">{% include "_jobs_table.html" %}</div>
+</div></div>
+</section>
+<script>
+(function () {
+  // the sections fold and unfold; each viewer's choice is kept in this browser
+  for (const fold of document.querySelectorAll(".fold")) {
+    const button = fold.querySelector(".fold-toggle"), body = fold.querySelector(".fold-body");
+    const key = "omniacli.fold." + fold.dataset.fold;
+    const set = (open) => {
+      fold.classList.toggle("closed", !open);
+      button.setAttribute("aria-expanded", String(open));
+      body.inert = !open;
+    };
+    try { if (localStorage.getItem(key) === "closed") set(false); } catch (e) { /* no storage */ }
+    const summary = fold.querySelector(".fold-summary");
+    if (summary) summary.addEventListener("click", () => button.click());
+    // no animation on load, only on a click
+    requestAnimationFrame(() => fold.classList.add("animated"));
+    button.addEventListener("click", () => {
+      const open = fold.classList.contains("closed");
+      set(open);
+      try { localStorage.setItem(key, open ? "open" : "closed"); } catch (e) { /* no storage */ }
+    });
+  }
+})();
+</script>
 {% include "_charts.html" %}
 <script>
 (function () {
@@ -89,6 +192,121 @@
   }
   refresh();
   setInterval(() => { if (!document.hidden) refresh(); }, 5000);
+})();
+</script>
+<script>
+(function () {
+  // the load of each machine: the last hour, then the new samples every 5 s
+  const rate = (b) => b >= 1048576 ? (b / 1048576).toFixed(1) + " MiB/s"
+    : b >= 1024 ? (b / 1024).toFixed(0) + " KiB/s" : b.toFixed(0) + " B/s";
+  const panels = [...document.querySelectorAll(".machine-panel")];
+  const series = new Map(panels.map((p) => [p, []]));
+  const since = new Map(panels.map((p) => [p, 0]));
+  async function show(panel) {
+    const link = panel.dataset.link;
+    const base = link ? "/links/" + encodeURIComponent(link) : "{{ prefix }}";
+    const from = since.get(panel) || Math.floor(Date.now() / 1000) - 3600;
+    const state = panel.querySelector(".machine-state");
+    let data;
+    try {
+      const resp = await fetch(`${base}/api/metrics?machine_only=1&since=${from}`);
+      if (!resp.ok) { state.textContent = "No answer: HTTP " + resp.status; return; }
+      data = await resp.json();
+    } catch (e) { state.textContent = "No answer."; return; }
+    if (!data.machine) { state.textContent = "Not available: that OmniaCLI is older."; return; }
+    state.textContent = "";
+    const points = series.get(panel).concat(data.machine).slice(-720);
+    series.set(panel, points);
+    if (points.length) since.set(panel, points[points.length - 1].t);
+    panel.querySelector(".cores").textContent = data.cores + (data.cores === 1 ? " core" : " cores");
+    OmniaCharts.draw(panel.querySelector('[data-chart="cpu"]'), points, "cpu",
+      {unit: "%", minMax: 10, format: (v) => v.toFixed(0), tip: (p) => `${p.cpu}% CPU`});
+    OmniaCharts.draw(panel.querySelector('[data-chart="net"]'), points, "rx",
+      {also: "tx", minMax: 1024, format: rate, padLeft: 70, tip: (p) => `received ${rate(p.rx)} · sent ${rate(p.tx)}`});
+    const last = points[points.length - 1];
+    if (last) {
+      panel.querySelector('[data-tile="cpu"]').textContent = last.cpu === null ? "–" : last.cpu.toFixed(1) + "%";
+      panel.querySelector('[data-tile="rx"]').textContent = rate(last.rx);
+      panel.querySelector('[data-tile="tx"]').textContent = rate(last.tx);
+    }
+    if (!link) {
+      // the folded section's row: the last 15 minutes
+      const recent = points.slice(-180);
+      OmniaCharts.draw(document.querySelector('[data-sum="cpu"]'), recent, "cpu", {spark: true, minMax: 10});
+      OmniaCharts.draw(document.querySelector('[data-sum="net"]'), recent, "rx", {spark: true, also: "tx", minMax: 1024});
+      if (last) {
+        document.querySelector('[data-sum-value="cpu"]').textContent = last.cpu === null ? "–" : last.cpu.toFixed(0) + "%";
+        const net = document.querySelector('[data-sum-value="net"]');
+        net.textContent = "↓" + rate(last.rx) + " ↑" + rate(last.tx);
+        net.title = `received ${rate(last.rx)}, sent ${rate(last.tx)}`;
+      }
+    }
+  }
+  const refresh = () => panels.forEach((p) => show(p));
+  refresh();
+  setInterval(() => { if (!document.hidden) refresh(); }, 5000);
+  window.addEventListener("resize", () => panels.forEach((p) => { series.set(p, []); since.set(p, 0); show(p); }));
+})();
+</script>
+<script>
+(function () {
+  // the free space of each machine's disks, in its panel, once a minute
+  const size = (b) => b >= 1099511627776 ? (b / 1099511627776).toFixed(2) + " TiB"
+    : b >= 1073741824 ? (b / 1073741824).toFixed(1) + " GiB" : (b / 1048576).toFixed(0) + " MiB";
+  const node = (tag, cls, text) => {
+    const el = document.createElement(tag);
+    if (cls) el.className = cls;
+    if (text !== undefined) el.textContent = text;
+    return el;
+  };
+  async function show(panel) {
+    const link = panel.dataset.link, list = panel.querySelector(".disk-list");
+    const base = link ? "/links/" + encodeURIComponent(link) : "{{ prefix }}";
+    let disks = null, error = "";
+    try {
+      const resp = await fetch(base + "/api/disks");
+      if (resp.ok) disks = (await resp.json()).disks;
+      else error = resp.status === 404 ? "Not available: that OmniaCLI is older." : "No answer: HTTP " + resp.status;
+    } catch (e) { error = "No answer."; }
+    list.textContent = "";
+    if (!link) {
+      // the folded section's row: one small bar per disk
+      const summary = document.querySelector(".sum-disks");
+      summary.textContent = disks && disks.length ? "" : "–";
+      for (const d of disks || []) {
+        const item = node("span", "sum-disk");
+        item.title = `${d.mount}: ${size(d.free)} free of ${size(d.total)}`;
+        const bar = node("div", "disk-bar");
+        const fill = node("div", "disk-fill " + d.level);
+        fill.style.width = Math.min(100, d.used / d.total * 100).toFixed(1) + "%";
+        bar.appendChild(fill);
+        item.append(bar, node("span", "mono " + (d.level === "ok" ? "" : d.level), d.free_percent.toFixed(0) + "%"));
+        summary.appendChild(item);
+      }
+    }
+    if (!disks || !disks.length) {
+      list.appendChild(node("span", error ? "error" : "muted", error || "No disks found."));
+      return;
+    }
+    for (const d of disks) {
+      const row = node("div", "disk");
+      const head = node("div", "disk-head");
+      const where = node("span", "mono", d.mount);
+      where.title = `${d.device} (${d.type})`;
+      head.append(where, node("span", "mono " + (d.level === "ok" ? "" : d.level),
+                              `${size(d.free)} free · ${d.free_percent.toFixed(0)}%`));
+      const bar = node("div", "disk-bar");
+      const fill = node("div", "disk-fill " + d.level);
+      fill.style.width = Math.min(100, d.used / d.total * 100).toFixed(1) + "%";
+      bar.appendChild(fill);
+      const note = node("div", "muted disk-note", "of " + size(d.total) + (d.holds.length ? " · " + d.holds.join(", ") : ""));
+      row.append(head, bar, note);
+      list.appendChild(row);
+    }
+  }
+  const refresh = () => document.querySelectorAll(".machine-panel").forEach((p) => show(p));
+  refresh();
+  setInterval(() => { if (!document.hidden) refresh(); }, 60000);
 })();
 </script>
 {% endblock %}

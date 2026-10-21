@@ -3,10 +3,12 @@
 {% block crumbs %}{% from "_crumbs.html" import crumbs with context %}
 {% set ns = namespace(servers=[]) %}
 {% for key in job.instances %}{% set name = key.split("/")[0] %}{% if name not in ns.servers %}{% set ns.servers = ns.servers + [name] %}{% endif %}{% endfor %}
-{% if ns.servers | length == 1 %}
+{% if ns.servers | length == 1 and ns.servers[0] not in live %}
+  {{ crumbs([("Jobs", "/jobs"), (ns.servers[0], "/jobs?server=" ~ (ns.servers[0] | urlencode)), (job.title, None)]) }}
+{% elif ns.servers | length == 1 %}
   {% set name = ns.servers[0] %}
   {% set view = job.instances[0].split("/")[1] if job.instances | length == 1 else "both" %}
-  {{ crumbs([("Servers", "/"), (name, "/servers/" ~ name),
+  {{ crumbs([("Dashboard", "/"), (name, "/servers/" ~ name),
              ({"production": "Production", "test": "Test", "both": "Both"}[view], "/servers/" ~ name ~ "?view=" ~ view),
              (job.title, None)]) }}
 {% else %}

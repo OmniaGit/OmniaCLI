@@ -189,7 +189,7 @@ async def test_config_clone_rename_delete(client, env):
     assert list(load_servers(settings.servers_file)) == ["srv", "srv2"]
     # a draft is not live: not on the dashboard, no actions, no auto update
     index = (await client.get("/", headers={"Authorization": AUTH})).text
-    assert "/servers/srv2" not in index and "1 draft server" in index
+    assert "/servers/srv2" not in index
     assert (await client.post("/servers/srv2/test/pull", headers=POST)).status_code == 404
     assert (await client.get("/servers/srv2", headers={"Authorization": AUTH})).status_code == 404
     assert client.app.state.updater._tasks == []
@@ -363,6 +363,119 @@ async def test_metrics_api(client, env):
     assert set(data["instances"]) == {"srv/production", "srv/test"} and data["cores"] >= 1
     point = data["instances"]["srv/test"]["points"][-1]
     assert set(point) == {"t", "cpu", "mem", "procs"}
+    machine = data["machine"][-1]
+    assert set(machine) == {"t", "cpu", "rx", "tx"} and 0 <= machine["cpu"] <= 100
+    only = (await client.get("/api/metrics?machine_only=1", headers={"Authorization": AUTH})).json()
+    assert only["instances"] == {} and only["machine"]
+    page = (await client.get("/", headers={"Authorization": AUTH})).text
+    assert 'class="panel machine-panel" data-link=""' in page
+
+
+def test_machine_counters(tmp_path):
+    from omniacli.metrics import machine_counters
+
+    proc, net = tmp_path / "proc", tmp_path / "net"
+    (proc / "net").mkdir(parents=True)
+    (proc / "stat").write_text("cpu  100 5 50 800 40 3 2 0 7 0\ncpu0 1 2 3 4 5 6 7 8 9 10\n")
+    (proc / "net" / "dev").write_text(
+        "Inter-|   Receive |  Transmit\n face |bytes packets|bytes packets\n"
+        "    lo: 1000 1 0 0 0 0 0 0 1000 1 0 0 0 0 0 0\n"
+        "  eth0: 200 2 0 0 0 0 0 0 300 3 0 0 0 0 0 0\n"
+        "veth1: 50 1 0 0 0 0 0 0 60 1 0 0 0 0 0 0\n"
+    )
+    for name in ("lo", "eth0", "veth1"):
+        (net / name).mkdir(parents=True)
+    (net / "eth0" / "device").mkdir()
+    # busy: all but idle and iowait (guest is already in user); only eth0 has a device
+    assert machine_counters(proc, net) == (160, 1000, 200, 300)
+    (net / "eth0" / "device").rmdir()  # a container: every interface but lo
+    assert machine_counters(proc, net) == (160, 1000, 250, 360)
+
+
+def test_disk_mounts(tmp_path):
+    from omniacli.disks import _holder, mounts
+
+    table = tmp_path / "mounts"
+    table.write_text(
+        "/dev/sda1 / ext4 rw 0 0\n"
+        "proc /proc proc rw 0 0\n"
+        "/dev/loop3 /snap/core/1 squashfs ro 0 0\n"
+        "/dev/sdb1 /media/My\\040Disk ext4 rw 0 0\n"
+        "/dev/sdb1 /srv/bound ext4 rw 0 0\n"
+        "tmpfs /tmp tmpfs rw 0 0\n"
+    )
+    found = mounts(table)
+    assert found == [("/dev/sda1", "/", "ext4"), ("/dev/sdb1", "/srv/bound", "ext4")]
+    points = ["/", "/media/My Disk", "/srv/bound"]
+    assert _holder("/media/My Disk/backups/x.zip", points) == "/media/My Disk"
+    assert _holder("/media/My Diskette/x", points) == "/"
+    assert _holder("/srv/bound", points) == "/srv/bound"
+
+
+async def test_disks_api(client, env, monkeypatch):
+    import os
+
+    from omniacli import disks
+
+    # the host's own mounts vary (a container's root is an overlay, left out)
+    monkeypatch.setattr(disks, "mounts", lambda: [("/dev/root", "/", "ext4"),
+                                                   ("/dev/jobs", str(env["settings"].jobs_dir), "ext4")])
+    found = (await client.get("/api/disks", headers={"Authorization": AUTH})).json()["disks"]
+    assert [d["mount"] for d in found] == ["/", str(env["settings"].jobs_dir)]
+    root = found[0]
+    st = os.statvfs("/")
+    assert root["total"] == st.f_blocks * st.f_frsize and root["level"] in ("ok", "warn", "error")
+    assert "backups" in root["holds"] and "srv/test log" in root["holds"]
+    assert found[1]["holds"] == ["OmniaCLI jobs"]
+    page = await client.get("/", headers={"Authorization": AUTH})
+    assert 'class="disk-list"' in page.text and "/api/disks" in page.text
+
+
+async def test_access_log(client, env):
+    import base64 as b64
+
+    log = client.app.state.access_log
+    assert log.path == env["settings"].logs_dir / "access.jsonl"
+    assert (await client.get("/")).status_code == 401  # no credentials: not a failure
+    assert log.recent() == []
+    bad = "Basic " + b64.b64encode(b"admin:wrong").decode()
+    assert (await client.get("/", headers={"Authorization": bad})).status_code == 401
+    for _ in range(3):  # one session: one login
+        assert (await client.get("/jobs", headers={"Authorization": AUTH})).status_code == 200
+    entries = log.recent()
+    assert [(e["event"], e["kind"], e["name"]) for e in entries] == [
+        ("login", "user", "admin"), ("failed", "user", "admin")]
+    assert entries[0]["time"][:4].isdigit() and entries[1]["detail"] == "GET /"
+    page = await client.get("/access", headers={"Authorization": AUTH})
+    assert page.status_code == 200 and "Failed login" in page.text
+    assert "Failed login" not in (await client.get("/access?q=login+jobs", headers={"Authorization": AUTH})).text
+
+
+def test_http_port(tmp_path):
+    from omniacli.odooconf import http_port
+
+    conf = tmp_path / "o.conf"
+    conf.write_text("[options]\nhttp_port = 8123\n")
+    assert http_port(conf) == 8123
+    conf.write_text("[options]\nxmlrpc_port = 8070\n")  # before Odoo 11
+    assert http_port(conf) == 8070
+    conf.write_text("[options]\nhttp_port = False\n")
+    assert http_port(conf) == 8069
+    assert http_port(tmp_path / "missing.conf") is None
+
+
+async def test_dashboard_state_buttons_and_odoo_link(client, env):
+    test = env["settings"].instance("srv", "test")
+    test.odoo_config.write_text("[options]\nhttp_port = 8123\n")
+    page = (await client.get("/", headers={"Authorization": AUTH})).text
+    # systemd units the test machine does not have: state unknown, every button
+    assert 'class="run-state unknown"' in page
+    for action in ("start", "stop", "restart"):
+        assert f'action="/servers/srv/test/{action}"' in page, action
+    assert 'href="http://localhost:8123" target="_blank"' in page
+    servers = (await client.get("/api/servers", headers={"Authorization": AUTH})).json()
+    assert servers[0]["instances"]["test"]["state"] == "unknown"
+    assert servers[0]["instances"]["test"]["port"] == 8123
 
 
 async def test_favicon_without_login(client):
@@ -402,15 +515,19 @@ async def test_breadcrumbs(client, env):
         return re.findall(r'<(?:a href="([^"]*)"|span aria-current="page")>([^<]*)<', nav)
 
     get = lambda url: client.get(url, headers={"Authorization": AUTH})
-    assert crumbs((await get("/servers/srv?view=test")).text) == [("/", "Servers"), ("/servers/srv", "srv"), ("", "Test")]
+    assert crumbs((await get("/servers/srv?view=test")).text) == [("/", "Dashboard"), ("/servers/srv", "srv"), ("", "Test")]
     assert crumbs((await get("/servers/srv/production/log")).text)[-2:] == [
         ("/servers/srv?view=production", "Production"), ("", "Log")]
-    assert crumbs((await get("/config/srv/edit")).text) == [("/config", "Configuration"), ("", "Edit srv")]
+    assert crumbs((await get("/config/srv/edit")).text) == [("/config", "Servers"), ("", "Edit srv")]
     resp = await client.post("/servers/srv/test/pull", headers=POST)
     job_id = resp.headers["location"].rsplit("/", 1)[1]
     await wait_job(client, job_id)
     assert crumbs((await get(f"/jobs/{job_id}")).text) == [
-        ("/", "Servers"), ("/servers/srv", "srv"), ("/servers/srv?view=test", "Test"), ("", "Git pull srv/test")]
+        ("/", "Dashboard"), ("/servers/srv", "srv"), ("/servers/srv?view=test", "Test"), ("", "Git pull srv/test")]
+    # a server set to draft (or deleted) has no page: the crumb goes to its jobs
+    env["settings"].servers["srv"].status = "draft"
+    assert crumbs((await get(f"/jobs/{job_id}")).text) == [
+        ("/jobs", "Jobs"), ("/jobs?server=srv", "srv"), ("", "Git pull srv/test")]
     assert 'class="crumbs"' not in (await get("/")).text  # top level pages have none
 
 
@@ -561,7 +678,7 @@ async def test_user_role_watches_and_restarts(client, env):
     post = lambda url: client.post(url, headers={"Authorization": basic("viewer"), "Origin": f"http://{HOST}"})
     page = (await get("/servers/srv?view=both")).text
     assert "DB_test" in page and "/pull" not in page and "Merge test to production" not in page
-    assert "Backup" not in page and ">Configuration<" not in page and "/pip-cli" not in page
+    assert "Backup" not in page and "/config\">Servers<" not in page and "/pip-cli" not in page
     for action in ("restart", "start", "stop"):
         for role in ("production", "test"):
             assert f"/servers/srv/{role}/{action}" in page, (role, action)
@@ -584,7 +701,7 @@ async def test_developer_role_acts_but_does_not_configure(client, env):
     headers = {"Authorization": basic("dev"), "Origin": f"http://{HOST}"}
     page = (await client.get("/servers/srv?view=both", headers=headers)).text
     assert "/servers/srv/test/pull" in page and "Merge test to production" not in page
-    assert ">Configuration<" not in page
+    assert "/config\">Servers<" not in page
     resp = await client.post("/servers/srv/test/pull", headers=headers)
     assert resp.status_code == 303
     data = await wait_job(client, resp.headers["location"].rsplit("/", 1)[1])
@@ -599,7 +716,7 @@ async def test_developer_role_acts_but_does_not_configure(client, env):
 
 async def test_admin_sees_everything(client):
     page = (await client.get("/servers/srv?view=both", headers={"Authorization": AUTH})).text
-    assert "Merge test to production" in page and ">Configuration<" in page and "/servers/srv/test/pull" in page
+    assert "Merge test to production" in page and "/config\">Servers<" in page and "/servers/srv/test/pull" in page
 
 
 async def test_link_serves_prefixed_pages_and_acts(client, env):
@@ -644,7 +761,9 @@ async def test_link_with_user_role_and_bad_token(client):
 
 async def test_mcp_token_still_only_reads(client):
     bearer = {"Authorization": f"Bearer {TOKEN}"}
-    assert (await client.get("/config", headers=bearer)).status_code == 200
+    # a token reads what its role allows: without a role, developer
+    assert (await client.get("/config", headers=bearer)).status_code == 403
+    assert (await client.get("/jobs", headers=bearer)).status_code == 200
     resp = await client.post("/servers/srv/test/pull", headers=bearer)
     assert resp.status_code == 403 and resp.json()["detail"] == "A token may only read"
     # a prefix is a link's only
@@ -760,9 +879,14 @@ async def test_link_and_mcp_tokens_from_the_web(client):
     assert (await access(client, "links/delete", {"name": "partner"})).status_code == 200
     assert (await client.get("/", headers=link)).status_code == 401
 
-    data = (await access(client, "tokens/save", {"name": "laptop"})).json()
+    data = (await access(client, "tokens/save", {"name": "laptop", "role": "user", "new": True})).json()
     bearer = {"Authorization": f"Bearer {data['token']}"}
     assert (await client.get("/api/info", headers=bearer)).json()["caller"] == "token laptop"
+    assert (await client.get("/api/info", headers=bearer)).json()["role"] == "user"
+    assert (await access(client, "tokens/save", {"name": "laptop", "role": "admin"})).json()["token"] is None
+    assert (await client.get("/api/info", headers=bearer)).json()["role"] == "admin"
+    saved = client.app.state.settings.users_file.read_text()
+    assert "laptop:" in saved and "role: admin" in saved and data["token"] not in saved
     assert (await client.post("/servers/srv/test/pull", headers=bearer)).status_code == 403
     assert (await access(client, "tokens/delete", {"name": "laptop"})).status_code == 200
     assert (await client.get("/", headers=bearer)).status_code == 401

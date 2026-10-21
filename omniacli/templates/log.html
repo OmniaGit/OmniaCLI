@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Log {{ instance.key }} · OmniaCLI{% endblock %}
 {% block crumbs %}{% from "_crumbs.html" import crumbs with context %}
-{{ crumbs([("Servers", "/"), (instance.server, "/servers/" ~ instance.server),
+{{ crumbs([("Dashboard", "/"), (instance.server, "/servers/" ~ instance.server),
            (instance.role | capitalize, "/servers/" ~ instance.server ~ "?view=" ~ instance.role),
            ("Log", None)]) }}
 {% endblock %}

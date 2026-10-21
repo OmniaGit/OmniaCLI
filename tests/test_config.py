@@ -59,6 +59,22 @@ def test_parse_ok():
     assert test.restart.command() == ["sudo", "-n", "systemctl", "--no-ask-password", "restart", "odoo"]
 
 
+def test_http_port():
+    data = _settings(["odoo"], ["odoo"])
+    data["s"]["test"]["http_port"] = 8123
+    with pytest.raises(ConfigError, match="only with restart type process"):
+        parse_servers(data)
+    data["s"]["test"]["restart"] = {"type": "process"}
+    servers = parse_servers(data, Path("/logs"))
+    assert servers["s"].test.http_port == 8123 and servers["s"].production.http_port is None
+    saved = server_to_dict(servers["s"])
+    assert saved["test"]["http_port"] == 8123 and "http_port" not in saved["production"]
+    for bad in (0.5, "80a", 70000, True):
+        data["s"]["test"]["http_port"] = bad
+        with pytest.raises(ConfigError, match="not a port"):
+            parse_servers(data, Path("/logs"))
+
+
 def test_test_repository_needs_production_pair():
     with pytest.raises(ConfigError, match="plm"):
         parse_servers(_settings(["odoo"], ["odoo", "plm"]))
@@ -174,7 +190,8 @@ def test_users_file_round_trip_and_main_config_wins(tmp_path):
     path = tmp_path / "users.yaml"
     assert load_access(path) == Access()
     web = Access({"anna": "h1", "admin": "web-hash"}, {"anna": "developer", "admin": "user"},
-                 {"laptop": "sha256$" + "1" * 64}, {"partner": LinkAccess("sha256$" + "2" * 64, "user")})
+                 {"laptop": "sha256$" + "1" * 64}, {"partner": LinkAccess("sha256$" + "2" * 64, "user")},
+                 {"laptop": "admin"})
     save_access(path, web)
     assert load_access(path) == web and path.stat().st_mode & 0o777 == 0o600
     main = {"auth": {"users": {"admin": "main-hash"}}, "backup_dir": "/b", "jobs_dir": str(tmp_path / "jobs"),
@@ -185,6 +202,10 @@ def test_users_file_round_trip_and_main_config_wins(tmp_path):
     assert settings.users == {"anna": "h1", "admin": "main-hash"}
     assert settings.user_role("admin") == "admin" and settings.user_role("anna") == "developer"
     assert settings.tokens == {"laptop": "sha256$" + "1" * 64} and settings.links["partner"].role == "user"
+    assert settings.token_role("laptop") == "admin"
+    # a token saved before roles: developer, what it could do then
+    path.write_text("tokens:\n  old: sha256$" + "3" * 64 + "\n")
+    assert load_access(path).token_roles == {"old": "developer"}
 
 
 def test_groups_parse_match_and_round_trip(tmp_path):

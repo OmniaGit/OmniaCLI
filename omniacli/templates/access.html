@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}Access log · OmniaCLI{% endblock %}
+{% block crumbs %}{% from "_crumbs.html" import crumbs with context %}
+{{ crumbs([("Dashboard", "/"), ("Users", "/users"), ("Access log", None)]) }}
+{% endblock %}
+{% block content %}
+<h1>Access log</h1>
+<p class="muted">A <strong>login</strong> is the first request of a user, a link or an MCP token after 30 minutes without requests from the same address;
+a <strong>failed</strong> login is a wrong password or token; every <strong>MCP</strong> call is listed with its method and tool.
+Saved in <span class="mono">{{ log_file }}</span>.</p>
+<form class="actions job-filter" method="get" action="{{ prefix }}/access" style="margin: 0 0 12px">
+  <input type="search" name="q" value="{{ q }}" placeholder="Search user, address, event, tool…" aria-label="Search">
+  <button>Search</button>
+  {% if q %}<a class="button" href="{{ prefix }}/access">Clear</a>{% endif %}
+</form>
+<p class="muted">{{ total }} entr{{ "y" if total == 1 else "ies" }}{% if total > entries | length %}, the last {{ entries | length }} shown{% endif %}.</p>
+<div class="panel">
+  <div class="scroll">
+  <table>
+    <tr><th>Date and time</th><th>Event</th><th>Who</th><th>Through</th><th>Address</th><th>Detail</th></tr>
+    {% for e in entries %}
+    <tr>
+      <td class="mono">{{ e.time | replace("T", " ") }}</td>
+      <td class="{{ 'error' if e.event == 'failed' }}">{{ {"login": "Login", "failed": "Failed login", "mcp": "MCP call"}.get(e.event, e.event) }}</td>
+      <td>{{ e.name or "—" }}</td>
+      <td>{{ {"user": "password", "link": "link", "token": "MCP token (API)", "mcp": "MCP"}.get(e.kind, e.kind) }}</td>
+      <td class="mono">{{ e.ip }}</td>
+      <td class="mono">{% if e.kind == "link" and e.detail and e.event != "failed" %}acting for {{ e.detail }}{% else %}{{ e.detail }}{% endif %}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="6" class="muted">{{ "No entries match." if q else "No accesses logged yet." }}</td></tr>
+    {% endfor %}
+  </table>
+  </div>
+</div>
+{% endblock %}

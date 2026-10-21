@@ -294,6 +294,28 @@ async def test_process_start_restart_stop(tmp_path):
     assert not instance.pid_file.exists()
 
 
+async def test_process_http_port(tmp_path):
+    import dataclasses
+
+    instance = dataclasses.replace(process_instance(tmp_path), http_port=8123)
+    await ops.restart(job(), instance)
+    pid = ops.managed_pid(instance)
+    try:
+        # no release.py next to the fake odoo-bin: an unknown version takes --http-port
+        assert "--http-port=8123" in instance.log_file.read_text()
+    finally:
+        await ops.stop_process(job(), instance, pid)
+    odoo = instance.odoo_bin.parent
+    (odoo / "odoo").mkdir()
+    (odoo / "odoo" / "release.py").write_text("version_info = (10, 0, 0, 'final', 0, '')\n")
+    await ops.restart(job(), instance)
+    pid = ops.managed_pid(instance)
+    try:
+        assert "--xmlrpc-port=8123" in instance.log_file.read_text()  # Odoo 10
+    finally:
+        await ops.stop_process(job(), instance, pid)
+
+
 async def test_process_exits_at_once(tmp_path):
     instance = process_instance(tmp_path)
     instance.odoo_bin.write_text("import sys; print('bad config'); sys.exit(3)\n")

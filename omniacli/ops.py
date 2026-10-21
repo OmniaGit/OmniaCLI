@@ -477,9 +477,14 @@ async def start_process(job: Job, instance: Instance) -> int:
     odoo_bin = find_odoo_bin(instance)
     if odoo_bin is None or not odoo_bin.is_file():
         raise JobFailed("odoo-bin not found: set odoo_bin in the instance configuration")
+    major = odoo_major(odoo_bin)
     cmd = [str(instance.venv_bin / "python"), str(odoo_bin), "-c", str(instance.odoo_config),
            # the log goes to stdout, so to the instance's log, not to the logfile of the config
-           logfile_to_stdout(odoo_major(odoo_bin))]
+           logfile_to_stdout(major)]
+    if instance.http_port is not None:
+        # wins over http_port of the config; before Odoo 11 the option was --xmlrpc-port
+        flag = "--xmlrpc-port" if major is not None and major < 11 else "--http-port"
+        cmd.append(f"{flag}={instance.http_port}")
     job.log(f"$ {shlex.join(cmd)}   (output to {instance.log_file})")
     instance.log_file.parent.mkdir(parents=True, exist_ok=True)
     try:

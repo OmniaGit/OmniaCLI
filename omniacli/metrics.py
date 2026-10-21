@@ -7,6 +7,13 @@ it counts the kernel's file cache too (checked 2026-10-20 on postgresql:
 3544 MiB against 298 MiB resident). An init.d instance, or a systemd one whose
 cgroup cannot be read, is measured on the processes whose command line names
 its Odoo config file (-c / --config).
+
+The machine as a whole is sampled too: its CPU from /proc/stat (percent of all
+cores, iowait counted as idle) and its network traffic from /proc/net/dev,
+summed over the interfaces of a real device (/sys/class/net/<name>/device):
+the loopback, bridges, veth pairs and other virtual interfaces would count the
+same bytes again. Where no interface has a device (a container), every
+interface but the loopback is counted.
 """
 
 from __future__ import annotations
@@ -77,6 +84,24 @@ def _proc_usage(pids: list[int], proc: Path = Path("/proc")) -> tuple[dict[int, 
     return cpu, rss
 
 
+def machine_counters(proc: Path = Path("/proc"), net: Path = Path("/sys/class/net")) -> tuple[int, int, int, int]:
+    """(busy cpu ticks, total cpu ticks, received bytes, sent bytes) so far."""
+    fields = [int(v) for v in (proc / "stat").read_text().split("\n", 1)[0].split()[1:]]
+    # user nice system idle iowait irq softirq steal: guest is already in user
+    total = sum(fields[:8])
+    busy = total - fields[3] - fields[4]
+    interfaces = {}
+    for line in (proc / "net" / "dev").read_text().splitlines()[2:]:
+        name, _, values = line.partition(":")
+        values = values.split()
+        interfaces[name.strip()] = (int(values[0]), int(values[8]))
+    real = [n for n in interfaces if (net / n / "device").exists()]
+    counted = real or [n for n in interfaces if n != "lo"]
+    rx = sum(interfaces[n][0] for n in counted)
+    tx = sum(interfaces[n][1] for n in counted)
+    return busy, total, rx, tx
+
+
 class Sampler:
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -87,6 +112,8 @@ class Sampler:
         self._prev: dict[str, tuple[float, object]] = {}
         self._task: asyncio.Task | None = None
         self.cores = os.cpu_count() or 1
+        self.machine: deque = deque(maxlen=HISTORY)
+        self._machine_prev: tuple[float, tuple[int, int, int, int]] | None = None
 
     def start(self) -> None:
         self._task = asyncio.create_task(self._loop())
@@ -119,7 +146,26 @@ class Sampler:
         self._cgroup[instance.key] = (time.monotonic(), group)
         return group
 
+    def sample_machine(self) -> None:
+        now, counters = time.monotonic(), machine_counters()
+        previous, self._machine_prev = self._machine_prev, (now, counters)
+        if previous is None or now <= previous[0]:
+            return
+        seconds = now - previous[0]
+        busy, total, rx, tx = (c - p for c, p in zip(counters, previous[1]))
+        self.machine.append({
+            "t": int(time.time()),
+            "cpu": round(busy / total * 100, 1) if total > 0 else None,  # percent of all cores
+            # bytes per second; a counter that went back (interface reset) is no traffic
+            "rx": round(max(rx, 0) / seconds),
+            "tx": round(max(tx, 0) / seconds),
+        })
+
     async def sample(self) -> None:
+        try:
+            await asyncio.to_thread(self.sample_machine)
+        except (OSError, ValueError, IndexError):
+            pass  # no /proc: the instances are still sampled
         instances = self.settings.all_instances()
         by_config = None
         now = time.monotonic()
@@ -172,6 +218,9 @@ class Sampler:
             "mem": round(memory / 1048576, 1),  # MiB
             "procs": procs,
         }
+
+    def machine_series(self, since: int = 0) -> list[dict]:
+        return [p for p in self.machine if p["t"] > since]
 
     def series(self, key: str, since: int = 0) -> list[dict]:
         return [p for p in self.history.get(key, ()) if p["t"] > since]

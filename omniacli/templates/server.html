@@ -1,10 +1,11 @@
 {% extends "base.html" %}
 {% block title %}{{ server.name }} · OmniaCLI{% endblock %}
 {% block crumbs %}{% from "_crumbs.html" import crumbs with context %}
-{{ crumbs([("Servers", "/"), (server.name, "/servers/" ~ server.name),
+{{ crumbs([("Dashboard", "/"), (server.name, "/servers/" ~ server.name),
            ({"production": "Production", "test": "Test", "both": "Both"}[view], None)]) }}
 {% endblock %}
 {% block content %}
+{% from "_icons.html" import icon %}
 <div class="server-head" style="padding: 0 0 14px; border: 0">
   <h1 style="margin: 0">{{ server.name }}</h1>
   <div class="actions" style="margin: 0">
@@ -24,6 +25,75 @@
     <div class="server-head" style="padding: 0 0 8px; border: 0">
       <h2><span class="role {{ inst.role }}">{{ inst.role }}</span>
         {% if busy[inst.key] %}<span class="status running" style="font-size: 13px"> · job running</span>{% endif %}</h2>
+    {% if can_restart %}
+    {% set off = "disabled" if busy[inst.key] else "" %}
+    {% set base = prefix ~ "/servers/" ~ server.name ~ "/" ~ inst.role %}
+    <div class="action-clip">
+    <div class="actions action-groups" style="margin-top: 0">
+      {# start, stop and restart: every role #}
+      <div class="action-group">
+      {% if inst.restart.type == "process" %}
+      {% set pid = running.get(inst.key) %}
+      {% if not pid %}
+      <form method="post" action="{{ base }}/restart" onsubmit="return confirm('Start Odoo of {{ inst.key }}?')">
+        <button class="btn-start" {{ off }}>{{ icon("start") }}Start</button></form>
+      {% else %}
+      <form method="post" action="{{ base }}/stop"
+            onsubmit="return confirm('Stop Odoo of {{ inst.key }}? It stays stopped, also for the auto update, until Start.')">
+        <button class="btn-stop" {{ off }}>{{ icon("stop") }}Stop</button></form>
+      <form method="post" action="{{ base }}/restart" onsubmit="return confirm('Restart Odoo of {{ inst.key }}?')">
+        <button class="btn-restart" {{ off }}>{{ icon("restart") }}Restart</button></form>
+      {% endif %}
+      {% else %}
+      {% set state = service_state.get(inst.key) %}
+      {% set up = state in ("active", "activating", "reloading") %}
+      {% if inst.restart.type == "systemd" %}
+      {# state unknown: both #}
+      {% if not up %}
+      <form method="post" action="{{ base }}/start"
+            onsubmit="return confirm('Start the service {{ inst.restart.service }} of {{ inst.key }}?')">
+        <button class="btn-start" {{ off }}>{{ icon("start") }}Start</button></form>
+      {% endif %}
+      {% if up or state is none %}
+      <form method="post" action="{{ base }}/stop"
+            onsubmit="return confirm('Stop the service {{ inst.restart.service }} of {{ inst.key }}? It stays stopped, also for the auto update, until Start.')">
+        <button class="btn-stop" {{ off }}>{{ icon("stop") }}Stop</button></form>
+      {% endif %}
+      {% endif %}
+      <form method="post" action="{{ base }}/restart"
+            onsubmit="return confirm('Restart the service {{ inst.restart.service }} of {{ inst.key }}?')">
+        <button class="btn-restart" {{ off }}>{{ icon("restart") }}Restart</button></form>
+      {% if inst.restart.type == "systemd" %}<span class="muted" style="align-self: center">service {{ state or "state unknown" }}</span>{% endif %}
+      {% endif %}
+      </div>
+      {% if can_act %}
+      <div class="action-group">
+      <form method="post" action="{{ base }}/pull">
+        <button {{ off }}>{{ icon("github") }}Git pull</button></form>
+      <form method="post" action="{{ base }}/pull-restart"
+            onsubmit="return confirm('Pull, update changed modules and restart {{ inst.key }}?')">
+        <button {{ off }}>{{ icon("github") }}Git pull + restart</button></form>
+      <button type="button" class="open-update" data-server="{{ server.name }}" data-role="{{ inst.role }}"
+              data-database="{{ inst.database }}" {{ off }}>{{ icon("github") }}Update modules</button>
+      </div>
+      <div class="action-group">
+      <form method="post" action="{{ base }}/backup">
+        <button {{ off }}>{{ icon("backup") }}Backup</button></form>
+      <form method="post" action="{{ base }}/backup?download=1">
+        <button {{ off }} title="Back up the database and filestore, then download the zip">{{ icon("download") }}Backup + download</button></form>
+      </div>
+      <div class="action-group">
+      <form method="post" action="{{ base }}/pip-requirements"
+            onsubmit="return confirm('pip install, in {{ inst.venv_bin }}{% if inst.run_as %} as {{ inst.run_as }}{% endif %}, the requirements.txt of Odoo and of every repository of {{ inst.key }}?')">
+        <button {{ off }} title="pip install the requirements.txt of Odoo and of the repositories in the venv">{{ icon("python") }}pip requirements</button></form>
+      <form method="post" action="{{ base }}/pip-cli"
+            onsubmit="return confirm('pip install click-odoo-contrib in {{ inst.venv_bin }}{% if inst.run_as %} as {{ inst.run_as }}{% endif %}?')">
+        <button {{ off }} title="pip install click-odoo-contrib, the scripts OmniaCLI runs in the venv">{{ icon("python") }}pip click-odoo</button></form>
+      </div>
+      {% endif %}
+    </div>
+    </div>
+    {% endif %}
     </div>
     <div class="tiles">
       <div class="tile"><div class="tile-label">CPU now</div><div class="tile-value" data-tile="cpu">–</div></div>
@@ -35,64 +105,6 @@
     <div class="chart-box"><svg class="chart" data-chart="cpu" role="img" aria-label="CPU of {{ inst.key }} over the last hour"></svg><div class="chart-tip" hidden></div></div>
     <h3 class="chart-title">Memory, MiB resident</h3>
     <div class="chart-box"><svg class="chart" data-chart="mem" role="img" aria-label="Memory of {{ inst.key }} over the last hour"></svg><div class="chart-tip" hidden></div></div>
-
-    {% if can_restart %}
-    <div class="actions">
-      {% if can_act %}
-      <form method="post" action="{{ prefix }}/servers/{{ server.name }}/{{ inst.role }}/pull">
-        <button {% if busy[inst.key] %}disabled{% endif %}>Git pull</button></form>
-      <form method="post" action="{{ prefix }}/servers/{{ server.name }}/{{ inst.role }}/pull-restart"
-            onsubmit="return confirm('Pull, update changed modules and restart {{ inst.key }}?')">
-        <button {% if busy[inst.key] %}disabled{% endif %}>Git pull + restart</button></form>
-      <button type="button" class="open-update" data-server="{{ server.name }}" data-role="{{ inst.role }}"
-              data-database="{{ inst.database }}" {% if busy[inst.key] %}disabled{% endif %}>Update modules</button>
-      {% endif %}
-      {# restart, start and stop: every role #}
-      {% if inst.restart.type == "process" %}
-      {% set pid = running.get(inst.key) %}
-      <form method="post" action="{{ prefix }}/servers/{{ server.name }}/{{ inst.role }}/restart"
-            onsubmit="return confirm('{{ 'Restart' if pid else 'Start' }} Odoo of {{ inst.key }}?')">
-        <button {% if busy[inst.key] %}disabled{% endif %}>{{ "Restart" if pid else "Start" }}</button></form>
-      {% if pid %}
-      <form method="post" action="{{ prefix }}/servers/{{ server.name }}/{{ inst.role }}/stop"
-            onsubmit="return confirm('Stop Odoo of {{ inst.key }}? It stays stopped, also for the auto update, until Start.')">
-        <button class="danger" {% if busy[inst.key] %}disabled{% endif %}>Stop</button></form>
-      {% endif %}
-      {% else %}
-      {% set state = service_state.get(inst.key) %}
-      {% set up = state in ("active", "activating", "reloading") %}
-      <form method="post" action="{{ prefix }}/servers/{{ server.name }}/{{ inst.role }}/restart"
-            onsubmit="return confirm('Restart the service {{ inst.restart.service }} of {{ inst.key }}?')">
-        <button {% if busy[inst.key] %}disabled{% endif %}>Restart</button></form>
-      {% if inst.restart.type == "systemd" %}
-      {# state unknown: both #}
-      {% if not up %}
-      <form method="post" action="{{ prefix }}/servers/{{ server.name }}/{{ inst.role }}/start"
-            onsubmit="return confirm('Start the service {{ inst.restart.service }} of {{ inst.key }}?')">
-        <button {% if busy[inst.key] %}disabled{% endif %}>Start</button></form>
-      {% endif %}
-      {% if up or state is none %}
-      <form method="post" action="{{ prefix }}/servers/{{ server.name }}/{{ inst.role }}/stop"
-            onsubmit="return confirm('Stop the service {{ inst.restart.service }} of {{ inst.key }}? It stays stopped, also for the auto update, until Start.')">
-        <button class="danger" {% if busy[inst.key] %}disabled{% endif %}>Stop</button></form>
-      {% endif %}
-      <span class="muted" style="align-self: center">service {{ state or "state unknown" }}</span>
-      {% endif %}
-      {% endif %}
-      {% if can_act %}
-      <form method="post" action="{{ prefix }}/servers/{{ server.name }}/{{ inst.role }}/backup">
-        <button {% if busy[inst.key] %}disabled{% endif %}>Backup</button></form>
-      <form method="post" action="{{ prefix }}/servers/{{ server.name }}/{{ inst.role }}/backup?download=1">
-        <button {% if busy[inst.key] %}disabled{% endif %} title="Back up the database and filestore, then download the zip">Backup + download</button></form>
-      <form method="post" action="{{ prefix }}/servers/{{ server.name }}/{{ inst.role }}/pip-requirements"
-            onsubmit="return confirm('pip install, in {{ inst.venv_bin }}{% if inst.run_as %} as {{ inst.run_as }}{% endif %}, the requirements.txt of Odoo and of every repository of {{ inst.key }}?')">
-        <button {% if busy[inst.key] %}disabled{% endif %} title="pip install the requirements.txt of Odoo and of the repositories in the venv">pip requirements</button></form>
-      <form method="post" action="{{ prefix }}/servers/{{ server.name }}/{{ inst.role }}/pip-cli"
-            onsubmit="return confirm('pip install click-odoo-contrib in {{ inst.venv_bin }}{% if inst.run_as %} as {{ inst.run_as }}{% endif %}?')">
-        <button {% if busy[inst.key] %}disabled{% endif %} title="pip install click-odoo-contrib, the scripts OmniaCLI runs in the venv">pip click-odoo</button></form>
-      {% endif %}
-    </div>
-    {% endif %}
 
     {% if can_act %}
     <details class="backups" style="margin-top: 12px" data-url="{{ prefix }}/api/servers/{{ server.name }}/{{ inst.role }}/backups">
@@ -109,6 +121,7 @@
         <dt>Log file</dt><dd class="mono">{{ inst.log_file }}</dd>
         {% if inst.restart.type == "process" %}
         <dt>Odoo</dt><dd>started by OmniaCLI: {% if running.get(inst.key) %}running, pid <span class="mono">{{ running[inst.key] }}</span>{% else %}<span class="muted">stopped</span>{% endif %}</dd>
+        <dt>HTTP port</dt><dd class="mono">{{ inst.http_port or "of the Odoo config" }}</dd>
         {% else %}
         <dt>Service</dt><dd class="mono">{{ inst.restart.type }}: {{ inst.restart.service }}</dd>
         {% endif %}

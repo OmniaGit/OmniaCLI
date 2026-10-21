@@ -19,8 +19,8 @@ async def rpc(client, method, params=None, headers=HEADERS):
     return resp
 
 
-async def call(client, tool, **arguments):
-    resp = await rpc(client, "tools/call", {"name": tool, "arguments": arguments})
+async def call(client, tool, headers=HEADERS, **arguments):
+    resp = await rpc(client, "tools/call", {"name": tool, "arguments": arguments}, headers=headers)
     assert resp.status_code == 200, resp.text
     result = resp.json()["result"]
     if result.get("isError"):
@@ -96,3 +96,90 @@ def test_helpers():
     lines = ["2026-10-21 05:00:00,1 9 INFO db x: ok", "2026-10-21 05:00:01,1 9 ERROR db x: bad",
              "Traceback (most recent call last):", "2026-10-21 05:00:02,1 9 INFO db x: ok again"]
     assert _errors_only(lines) == lines[1:3]
+
+
+async def test_mcp_access_logged(client):
+    log = client.app.state.access_log
+    await rpc(client, "tools/list", headers={**HEADERS, "Authorization": "Bearer nope"})
+    await call(client, "list_servers")
+    entries = log.recent()
+    assert entries[0]["event"] == "mcp" and entries[0]["name"] == "tester"
+    assert entries[0]["detail"] == "tools/call list_servers"
+    assert entries[1]["event"] == "failed" and entries[1]["kind"] == "mcp" and entries[1]["name"] == ""
+    # the tool still got its arguments after the guard read the body
+    page = (await client.get("/access", headers={"Authorization": AUTH})).text
+    assert "tools/call list_servers" in page and "MCP call" in page
+
+
+async def token_headers(client, name, role):
+    from .test_app import access
+
+    data = (await access(client, "tokens/save", {"name": name, "role": role, "new": True})).json()
+    return {**HEADERS, "Authorization": f"Bearer {data['token']}"}
+
+
+async def test_token_roles_choose_the_tools(client, env):
+    admin = await token_headers(client, "boss", "admin")
+    viewer = await token_headers(client, "viewer-bot", "user")
+    tools = lambda h: rpc(client, "tools/list", headers=h)  # noqa: E731
+    names = {t["name"] for t in (await tools(admin)).json()["result"]["tools"]}
+    assert {"read_server", "add_draft_server", "backup", "list_backups", "update_test"} <= names
+    # the default token of the tests has no role: developer, as before roles
+    names = {t["name"] for t in (await tools(HEADERS)).json()["result"]["tools"]}
+    assert "update_test" in names and "add_draft_server" not in names and "backup" not in names
+    names = {t["name"] for t in (await tools(viewer)).json()["result"]["tools"]}
+    assert "update_test" not in names and "list_servers" in names
+    # a tool called anyway is refused
+    assert "needs an MCP token with role admin" in (await call(client, "read_server", server_name="srv"))["error"]
+    assert "role developer" in (await call(client, "update_test", headers=viewer, server_name="srv"))["error"]
+
+    srv = await call(client, "read_server", headers=admin, server_name="srv")
+    assert srv["status"] == "active" and srv["test"]["database"] == "DB_test"
+    # a copy as a draft: never live until Test & activate on the web
+    test = dict(srv["test"], database="DB_copy")
+    added = await call(client, "add_draft_server", headers=admin, server_name="srv2", test=test)
+    assert added["status"] == "draft" and "error" not in added, added
+    settings = env["settings"]
+    assert settings.servers["srv2"].status == "draft" and "srv2" in settings.servers_file.read_text()
+    assert "already exists" in (await call(client, "add_draft_server", headers=admin, server_name="srv2",
+                                           test=test))["error"]
+    assert "Give production, test or both" in (await call(client, "add_draft_server", headers=admin,
+                                                          server_name="srv3"))["error"]
+    # incomplete: saved, and the answer says what is missing
+    half = await call(client, "add_draft_server", headers=admin, server_name="srv3", test={"database": "X"})
+    assert half["status"] == "draft" and half["error"]
+    assert (await call(client, "read_server", headers=admin, server_name="srv3"))["error"] == half["error"]
+
+
+async def test_admin_backs_up_production_and_downloads(client, env):
+    admin = await token_headers(client, "boss", "admin")
+    assert "role admin" in (await call(client, "backup", server_name="srv", role="production"))["error"]
+    job = await call(client, "backup", headers=admin, server_name="srv", role="production", wait_seconds=30)
+    assert job["status"] == "success", job
+    listed = await call(client, "list_backups", headers=admin, server_name="srv", role="production")
+    assert listed[0]["download"] == job["result"]["download"]
+    resp = await client.get(listed[0]["download"], headers={"Authorization": admin["Authorization"]})
+    assert resp.status_code == 200 and resp.content == b"dump\n"
+
+
+async def test_admin_reaches_draft_servers(client, env):
+    admin = await token_headers(client, "boss", "admin")
+    env["settings"].servers["srv"].status = "draft"
+    # a developer token, as before: only active servers
+    assert "srv is a draft" in (await call(client, "dev_setup", server_name="srv"))["error"]
+    setup = await call(client, "dev_setup", headers=admin, server_name="srv")
+    assert setup["database"] == "DB_test" and setup["backups"] == []
+    job = await call(client, "backup", headers=admin, server_name="srv", role="test", wait_seconds=30)
+    assert job["status"] == "success", job
+    listed = await call(client, "list_backups", headers=admin, server_name="srv", role="test")
+    assert listed[0]["download"] == job["result"]["download"]
+    resp = await client.get(listed[0]["download"], headers={"Authorization": admin["Authorization"]})
+    assert resp.status_code == 200 and resp.content == b"dump\n"
+    # the download of a draft's backup: admins only
+    assert (await client.get(listed[0]["download"], headers=BEARER)).status_code == 404
+    # still no actions on a draft
+    assert "srv is a draft" in (await call(client, "update_test", headers=admin, server_name="srv"))["error"]
+    # a draft saved incomplete has no instances: the answer says why
+    await call(client, "add_draft_server", headers=admin, server_name="half", test={"database": "X"})
+    assert "saved incomplete" in (await call(client, "backup", headers=admin, server_name="half",
+                                             role="test"))["error"]

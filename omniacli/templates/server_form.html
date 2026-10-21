@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}{{ title }} · OmniaCLI{% endblock %}
 {% block crumbs %}{% from "_crumbs.html" import crumbs with context %}
-{{ crumbs([("Configuration", "/config"), (title, None)]) }}
+{{ crumbs([("Servers", "/config"), (title, None)]) }}
 {% endblock %}
 {% block content %}
 <h1>{{ title }}</h1>
@@ -47,6 +47,7 @@
             <button type="button" data-pip="cli" title="pip install click-odoo-contrib, the scripts OmniaCLI runs, in this venv">pip click-odoo</button>
           </span></div>
         <label>Run as (system user)</label><input type="text" data-k="run_as" class="mono" placeholder="empty: the user running OmniaCLI" title="The venv's programs (update, backup, pip, checks) run as this user through sudo -n -u: the user of the Odoo service. Not with restart type process.">
+        <label>HTTP port</label><input type="number" min="1" max="65535" data-k="http_port" class="mono" placeholder="empty: the port of the Odoo config" title="Restart type process only: OmniaCLI starts odoo-bin with --http-port, which wins over the Odoo config">
         <label>odoo-bin (update of chosen modules)</label><input type="text" data-k="odoo_bin" class="mono" placeholder="empty: odoo-bin found in a repository">
         <label>Restart with</label>
         <select data-k="restart.type"><option value="systemd">systemd</option><option value="initd">init.d</option><option value="process">OmniaCLI starts odoo-bin itself</option></select>
@@ -139,6 +140,11 @@ function processFields(box) {
   for (const key of ["restart.service", "restart.sudo", "log_file", "run_as"]) {
     box.querySelector(`[data-k="${key}"]`).disabled = process;
   }
+  // only the odoo-bin OmniaCLI starts takes the port: a service's unit starts its own
+  const port = box.querySelector('[data-k="http_port"]');
+  port.disabled = !process;
+  port.placeholder = process ? "empty: the port of the Odoo config" : "only with restart type process";
+  if (!process) port.value = "";
   box.querySelector('[data-k="log_file"]').placeholder = process ? "Odoo's output, in " + MODEL.logs_dir : "";
   if (process) box.querySelector('[data-k="log_file"]').value = "";
   // OmniaCLI stops its own Odoo with a signal, which it may not send to another user
@@ -222,7 +228,7 @@ document.getElementById("form").addEventListener("submit", async (ev) => {
       if (input.disabled) continue;
       let value = input.type === "checkbox" ? input.checked : input.value.trim();
       if (input.type === "number") value = Number(value);
-      if (["auto_update.window", "odoo_bin", "run_as"].includes(input.dataset.k) && !value) continue;
+      if (["auto_update.window", "odoo_bin", "run_as", "http_port"].includes(input.dataset.k) && !value) continue;
       set(data, input.dataset.k, value);
     }
     data.repositories = [];

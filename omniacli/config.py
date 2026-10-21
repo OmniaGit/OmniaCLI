@@ -15,6 +15,9 @@ import yaml
 from .auth import ROLES as ACCESS_ROLES
 
 ROLES = ("production", "test")
+# an MCP token saved without a role, as before tokens had one: what such a
+# token could do then (read, update_test, backup_test, download backups)
+TOKEN_DEFAULT_ROLE = "developer"
 # process: OmniaCLI starts odoo-bin itself, its output going to a log of its own
 RESTART_TYPES = ("systemd", "initd", "process")
 # a server name is part of URLs and of the job keys
@@ -94,6 +97,9 @@ class Instance:
     # user of the Odoo service: its database login, filestore and venv);
     # None: as the user running OmniaCLI. git always runs as that user.
     run_as: str | None = None
+    # the port Odoo listens on, passed to the odoo-bin OmniaCLI starts (restart
+    # type process only); None: the port of the Odoo config
+    http_port: int | None = None
 
     @property
     def keeps_local_changes(self) -> bool:
@@ -140,7 +146,7 @@ class Server:
 
 
 def server_text(server: Server) -> str:
-    """What the Servers page filters on: the name, and of each instance the
+    """What the Dashboard filters on: the name, and of each instance the
     database, service, repository names and branches."""
     parts = [server.name]
     for inst in server.instances.values():
@@ -176,6 +182,7 @@ class Access:
     roles: dict[str, str] = field(default_factory=dict)  # {user name: role}
     tokens: dict[str, str] = field(default_factory=dict)  # MCP clients: {name: token hash}
     links: dict[str, LinkAccess] = field(default_factory=dict)
+    token_roles: dict[str, str] = field(default_factory=dict)  # {MCP token name: role}
 
 
 @dataclass
@@ -198,9 +205,10 @@ class Settings:
     # the other OmniaCLI instances this one operates (Links page)
     links_file: Path | None = None
     link_targets: dict[str, LinkTarget] = field(default_factory=dict)
-    # how the Servers page groups this instance's and the links' servers
+    # how the Dashboard groups this instance's and the links' servers
     groups_file: Path | None = None
     groups: list[ServerGroup] = field(default_factory=list)
+    token_roles: dict[str, str] = field(default_factory=dict)
     fixed: Access = field(default_factory=Access)
     web: Access = field(default_factory=Access)
 
@@ -211,9 +219,13 @@ class Settings:
         self.user_roles = {**web.roles, **self.fixed.roles}
         self.tokens = {**web.tokens, **self.fixed.tokens}
         self.links = {**web.links, **self.fixed.links}
+        self.token_roles = {**web.token_roles, **self.fixed.token_roles}
 
     def user_role(self, name: str) -> str:
         return self.user_roles.get(name, "admin")
+
+    def token_role(self, name: str) -> str:
+        return self.token_roles.get(name, TOKEN_DEFAULT_ROLE)
 
     @property
     def logs_dir(self) -> Path:
@@ -222,10 +234,11 @@ class Settings:
     def active_servers(self) -> list[Server]:
         return [s for s in self.servers.values() if s.active]
 
-    def instance(self, server: str, role: str) -> Instance | None:
-        """An instance of an active server."""
+    def instance(self, server: str, role: str, drafts: bool = False) -> Instance | None:
+        """An instance of an active server, or also of a draft (drafts: for an
+        admin's backup and its download; a draft saved incomplete has none)."""
         srv = self.servers.get(server)
-        return srv.instances.get(role) if srv and srv.active else None
+        return srv.instances.get(role) if srv and (srv.active or drafts) else None
 
     def all_instances(self) -> list[Instance]:
         """The instances of the active servers."""
@@ -303,6 +316,17 @@ def _parse_instance(server: str, role: str, data: dict, logs_dir: Path | None) -
             # OmniaCLI stops its own Odoo with a signal, which it may not send
             # to another user's process
             raise ConfigError(f"{where}.run_as: not available with restart type process")
+    http_port = data.get("http_port")
+    if http_port in (None, "", 0):
+        http_port = None
+    else:
+        if isinstance(http_port, bool) or not str(http_port).isdigit() or not 1 <= int(http_port) <= 65535:
+            raise ConfigError(f"{where}.http_port: {http_port!r} is not a port (1-65535)")
+        http_port = int(http_port)
+        if restart_type != "process":
+            # with a service, its unit or script starts odoo-bin, not OmniaCLI
+            raise ConfigError(f"{where}.http_port: only with restart type process; "
+                              "for a service set it in the Odoo config")
     return Instance(
         server=server,
         role=role,
@@ -320,6 +344,7 @@ def _parse_instance(server: str, role: str, data: dict, logs_dir: Path | None) -
         auto_update=_parse_auto_update(data.get("auto_update"), f"{where}.auto_update"),
         odoo_bin=Path(data["odoo_bin"]) if data.get("odoo_bin") else None,
         run_as=run_as,
+        http_port=http_port,
     )
 
 
@@ -392,6 +417,8 @@ def instance_to_dict(instance: Instance) -> dict:
         data["odoo_bin"] = str(instance.odoo_bin)
     if instance.run_as is not None:
         data["run_as"] = instance.run_as
+    if instance.http_port is not None:
+        data["http_port"] = instance.http_port
     if instance.restart.type == "process":
         # both follow from the type: the log is OmniaCLI's, there is no service
         del data["log_file"], data["restart"]["service"], data["restart"]["sudo"]
@@ -455,10 +482,17 @@ def parse_auth(auth: dict, where: str = "auth", need_user: bool = True) -> Acces
             raise ConfigError(f"{where}.users.{name}: password hash missing (omniacli hash-password)")
     if need_user and not users:
         raise ConfigError(f"{where}.users: at least one user is required")
-    tokens = {str(k): str(v) for k, v in (auth.get("tokens") or {}).items()}
-    bad = [name for name, value in tokens.items() if not _TOKEN_HASH.fullmatch(value)]
-    if bad:
-        raise ConfigError(f"{where}.tokens: {', '.join(bad)} is not a token hash (omniacli new-token)")
+    tokens, token_roles = {}, {}
+    for name, value in (auth.get("tokens") or {}).items():
+        name = str(name)
+        if isinstance(value, dict):
+            tokens[name] = str(value.get("token") or "")
+            token_roles[name] = _access_role(f"{where}.tokens.{name}", value.get("role") or TOKEN_DEFAULT_ROLE)
+        else:
+            # the format before roles: what such a token could do then
+            tokens[name], token_roles[name] = str(value), TOKEN_DEFAULT_ROLE
+        if not _TOKEN_HASH.fullmatch(tokens[name]):
+            raise ConfigError(f"{where}.tokens: {name} is not a token hash (omniacli new-token)")
     links = {}
     for name, value in (auth.get("links") or {}).items():
         name, value = str(name), value if isinstance(value, dict) else {}
@@ -466,7 +500,7 @@ def parse_auth(auth: dict, where: str = "auth", need_user: bool = True) -> Acces
         if not _TOKEN_HASH.fullmatch(token):
             raise ConfigError(f"{where}.links.{name}: token is not a token hash (omniacli new-link-token)")
         links[name] = LinkAccess(token, _access_role(f"{where}.links.{name}", value.get("role")))
-    return Access(users, roles, tokens, links)
+    return Access(users, roles, tokens, links, token_roles)
 
 
 def load_access(path: Path) -> Access:
@@ -485,7 +519,8 @@ def save_access(path: Path, access: Access) -> None:
     data = {
         "users": {n: {"password": h, "role": access.roles.get(n, "admin")} for n, h in access.users.items()},
         "links": {n: {"token": link.token, "role": link.role} for n, link in access.links.items()},
-        "tokens": dict(access.tokens),
+        "tokens": {n: {"token": h, "role": access.token_roles.get(n, TOKEN_DEFAULT_ROLE)}
+                   for n, h in access.tokens.items()},
     }
     text = yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -558,7 +593,7 @@ _GROUP_MEMBER = re.compile(rf"{_MEMBER_PART}(?:/{_MEMBER_PART})?")
 
 @dataclass
 class ServerGroup:
-    """A heading of the Servers page. A member is a server of this instance
+    """A heading of the Dashboard. A member is a server of this instance
     (srv, or * for all of them) or of a link (customer/srv, customer/*)."""
 
     name: str

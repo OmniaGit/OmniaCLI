@@ -25,7 +25,7 @@ form (admins), as soon as it is set: they run on the venv, odoo-bin and
 repository folders typed there, saved or not, so a draft's venv can be
 prepared before Test & activate. The job's log opens in a new tab.
 
-- **Servers page**: one row per live server, with the CPU of production and
+- **Dashboard**: one row per live server, with the CPU of production and
   test over the last 15 minutes and the buttons **Test**, **Production** and
   **Both**, which open the server's page on that instance or on both side by
   side: CPU and memory charts of the last hour, the actions, the settings and
@@ -150,10 +150,10 @@ The configuration has five files:
   page, admins only), with their tokens in clear, so written readable by its
   owner only.
 - the **groups file** (`groups_file`, by default `groups.yaml` next to the
-  servers file): the headings of the Servers page (**Edit groups**, admins).
+  servers file): the headings of the Dashboard (**Edit groups**, admins).
 - the **servers file** (`servers_file`, see `servers.example.yaml`): the
   servers and their instances. It is edited from the web interface
-  (**Configuration** page: new, edit, clone, delete), so the user running
+  (**Servers** page: new, edit, clone, delete), so the user running
   OmniaCLI must be able to write it. Every save is validated like the file at
   startup, the previous version is kept as `<file>.bak`, and the auto update
   loops restart with the new settings. Clone copies a server's configuration
@@ -198,6 +198,14 @@ the last admin cannot be demoted or deleted. Every user who logs in with a
 password changes it from their own page (their name, top right), unless it is
 set in the main config.
 
+The **Access log** (Users page, admins) lists the logins with date, time and
+address: HTTP Basic sends the password with every request, so a login is the
+first request of a user, link or MCP token after 30 minutes without requests
+from the same address. Every wrong password or token is listed, and so is
+every call to `/mcp`, with its JSON-RPC method and tool. It is kept in
+`access.jsonl` in the logs folder next to `jobs_dir` (`/var/lib/omniacli/logs`
+for the package); past 5 MiB it moves to `access.jsonl.1`.
+
 ### Linked instances
 
 Another OmniaCLI instance (yours, at the customer's) can be let in to operate
@@ -231,7 +239,7 @@ customer's), the other instance's URL, the token it created for you on its
 Users page, and a CA file when its certificate is from the customer's own CA.
 **Test link** shows its version and the role you get there. Then:
 
-- the Servers page lists its live servers as `<link> › <server>`, with their
+- the Dashboard lists its live servers as `<link> › <server>`, with their
   load, and the filter finds them by link name too. A link that does not
   answer is shown as an error above the list;
 - its pages open here under `/links/<link>/`, with a bar saying which
@@ -242,7 +250,7 @@ Users page, and a CA file when its certificate is from the customer's own CA.
 
 ### Groups
 
-With many servers, **Edit groups** on the Servers page (admins) puts them
+With many servers, **Edit groups** on the Dashboard (admins) puts them
 under headings, in the order you choose. A member is `srv` (a server of this
 instance), `*` (all of them), `customer/srv` (a server of a link) or
 `customer/*` (all the servers of a link); a server shows under the first
@@ -332,6 +340,14 @@ provides: OmniaCLI installed by hand on Python 3.9 runs without it.
 | `list_jobs`, `get_job` | the jobs, filtered by server and text, and a job's log |
 | `update_test` | **the only action on Odoo**: git pull + update of the changed modules + restart of the **test** instance |
 | `backup_test` | a backup (database and filestore) of the **test** instance |
+| `backup` | (admin token) a backup of any instance, **production** too |
+| `list_backups` | (admin token) an instance's backups, each with its download path |
+| `read_server` | (admin token) a server's whole configuration, active or draft |
+| `add_draft_server` | (admin token) a new server, always a **draft**: it goes live only with Test & activate on the web |
+
+With an admin token `dev_setup`, `backup` and `list_backups` also reach the
+draft servers (saved complete), and their backups download with that token;
+every other tool works on the active servers only.
 | `dev_setup` | what a client needs to rebuild an instance locally: remote URLs (without credentials), branches, commits, `addons_path` as repository folders, Odoo and Python versions, the Odoo config options without secrets nor server paths, and the backups to download |
 
 Access is by bearer token, never by the users' passwords. Create one per
@@ -339,15 +355,20 @@ client on the **Users** page (the token is shown once), or by hand: add its
 hash to `auth.tokens`:
 
 ```bash
-omniacli new-token matteo-laptop
+omniacli new-token matteo-laptop --role admin
 ```
 
 ```yaml
 auth:
   users: ...
   tokens:
-    matteo-laptop: "sha256$..."
+    matteo-laptop: {token: "sha256$...", role: admin}
 ```
+
+A token has a role, as a user does: `user` reads, `developer` also runs
+`update_test` and `backup_test` and downloads backups, `admin` also has the
+tools marked admin above. A client sees only the tools of its role. A token
+saved without a role (a bare hash, as before roles) is a `developer`.
 
 Then, in Claude Code:
 

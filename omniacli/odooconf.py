@@ -102,3 +102,19 @@ async def read_odoo_config(path: str | Path) -> dict:
         notes.append("no repository holds odoo-bin: add the Odoo repository or set odoo-bin")
     return {"database": database, "log_file": log_file,
             "repositories": repositories, "notes": notes}
+
+
+def http_port(path: str | Path) -> int | None:
+    """The port Odoo serves on: http_port, xmlrpc_port before Odoo 11, 8069
+    when the config sets neither; None when the config cannot be read."""
+    parser = configparser.ConfigParser(interpolation=None)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            parser.read_file(fh)
+    except (OSError, configparser.Error, UnicodeDecodeError):
+        return None
+    for key in ("http_port", "xmlrpc_port"):
+        value = _option(parser, key) if parser.has_section("options") else ""
+        if value.isdigit():
+            return int(value)
+    return 8069

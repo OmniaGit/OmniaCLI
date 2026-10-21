@@ -41,7 +41,7 @@ def _new_token(args) -> int:
     print(f"Token for {args.name} (give it to the MCP client, it is not shown again):")
     print(f"  {token}")
     print("Add to auth.tokens in the main configuration:")
-    print(f"  {args.name}: \"{hash_token(token)}\"")
+    print(f"  {args.name}: {{token: \"{hash_token(token)}\", role: {args.role}}}")
     return 0
 
 
@@ -85,6 +85,9 @@ def main(argv: list[str] | None = None) -> int:
 
     token = sub.add_parser("new-token", help="create a bearer token for an MCP client (auth.tokens)")
     token.add_argument("name", help="who uses it, e.g. matteo-laptop")
+    token.add_argument("--role", choices=ROLES, default="developer",
+                       help="user: reads only; developer: also update_test and backup_test; "
+                            "admin: also adds draft servers")
     token.set_defaults(func=_new_token)
 
     link = sub.add_parser("new-link-token",
