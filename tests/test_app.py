@@ -26,7 +26,11 @@ async def client(env):
             started.set()
             await stop.wait()
     task = asyncio.create_task(lifespan())
-    await started.wait()
+    # a lifespan that fails on startup ends the task: raise its error, do not hang
+    await asyncio.wait({task, asyncio.ensure_future(started.wait())},
+                       return_when=asyncio.FIRST_COMPLETED)
+    if task.done():
+        task.result()
     try:
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url=f"http://{HOST}") as c:

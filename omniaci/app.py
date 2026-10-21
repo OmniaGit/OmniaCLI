@@ -94,7 +94,11 @@ def create_app(settings: Settings) -> FastAPI:
     async def lifespan(app: FastAPI):
         updater.start()
         sampler.start()
-        async with (mcp_manager.run() if mcp_manager else contextlib.nullcontext()):
+        # not nullcontext(): it is an async context manager only from Python 3.10
+        if mcp_manager:
+            async with mcp_manager.run():
+                yield
+        else:
             yield
         await sampler.stop()
         await updater.stop()
