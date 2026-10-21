@@ -366,6 +366,34 @@ async def restart(job: Job, instance: Instance) -> None:
     await run(job, instance.restart.command(), timeout=RESTART_TIMEOUT)
 
 
+async def service_state(instance: Instance) -> str | None:
+    """ActiveState of a systemd instance's unit (active, inactive, failed,
+    activating...); None when it is not systemd or the unit is not found."""
+    if instance.restart.type != "systemd":
+        return None
+    code, out = await capture(["systemctl", "show", "-p", "LoadState", "-p", "ActiveState",
+                               instance.restart.service])
+    props = dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
+    if code or props.get("LoadState") != "loaded":
+        return None
+    return props.get("ActiveState") or None
+
+
+async def start(job: Job, instance: Instance) -> None:
+    """Start Odoo: the systemd service, or the Odoo OmniaCLI starts itself."""
+    if instance.restart.type == "process":
+        job.log(f"--- start Odoo started by OmniaCLI ({instance.odoo_config})")
+        if managed_pid(instance) is not None:
+            job.log("already running")
+            return
+        await restart_process(job, instance)
+        return
+    if instance.restart.type != "systemd":
+        raise JobFailed("Start is for a systemd service or an Odoo OmniaCLI starts itself")
+    job.log(f"--- start systemd service {instance.restart.service}")
+    await run(job, instance.restart.command("start"), timeout=RESTART_TIMEOUT)
+
+
 # The Odoo processes OmniaCLI started, to reap them when they end; one started
 # before OmniaCLI was restarted is found again from its pid file.
 _children: dict[str, subprocess.Popen] = {}
@@ -477,9 +505,14 @@ async def start_process(job: Job, instance: Instance) -> int:
 
 
 async def stop(job: Job, instance: Instance) -> None:
-    """Stop the Odoo OmniaCLI started; a service is not stopped from here."""
+    """Stop the systemd service, or the Odoo OmniaCLI started (one it did not
+    start is not touched); an init.d service is not stopped from here."""
+    if instance.restart.type == "systemd":
+        job.log(f"--- stop systemd service {instance.restart.service}")
+        await run(job, instance.restart.command("stop"), timeout=RESTART_TIMEOUT)
+        return
     if instance.restart.type != "process":
-        raise JobFailed("Stop is only for an Odoo that OmniaCLI starts itself (restart type process)")
+        raise JobFailed("Stop is for a systemd service or an Odoo OmniaCLI starts itself")
     job.log(f"--- stop Odoo started by OmniaCLI ({instance.odoo_config})")
     own = managed_pid(instance)
     if own is None:
@@ -572,11 +605,17 @@ async def pull_restart(job: Job, instance: Instance, only_if_changed: bool = Fal
         job.log("Nothing new to deploy")
         return
     await update_modules(job, instance)
-    if only_if_changed and instance.restart.type == "process" and managed_pid(instance) is None:
+    if only_if_changed and await _stopped(instance):
         # the auto update: an Odoo someone stopped stays stopped
         job.log("Odoo is stopped: not started again")
         return
     await restart(job, instance)
+
+
+async def _stopped(instance: Instance) -> bool:
+    if instance.restart.type == "process":
+        return managed_pid(instance) is None
+    return await service_state(instance) in ("inactive", "failed")
 
 
 async def merge_to_production(job: Job, server: Server, backup_dir: Path) -> None:

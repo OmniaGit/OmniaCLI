@@ -349,6 +349,48 @@ async def test_process_stop(tmp_path, monkeypatch):
     await ops.stop(job(), instance)
 
 
-async def test_stop_only_process(env):
-    with pytest.raises(JobFailed, match="restart type process"):
-        await ops.stop(job(), env["settings"].instance("srv", "test"))
+async def test_start_stop_systemd_not_initd(env):
+    test = env["settings"].instance("srv", "test")
+    await ops.stop(job(), test)
+    await ops.start(job(), test)
+    assert "stop odoo-test\nstart odoo-test" in env["calls"].read_text()
+    test.restart.type = "initd"
+    for action in (ops.stop, ops.start):
+        with pytest.raises(JobFailed, match="systemd service or an Odoo OmniaCLI starts itself"):
+            await action(job(), test)
+
+
+async def test_auto_update_keeps_a_stopped_service_stopped(env, monkeypatch):
+    test = env["settings"].instance("srv", "test")
+    push_change(env, "odoo", "test", "b.txt")
+    state = "inactive"
+
+    async def service_state(instance):
+        return state
+
+    monkeypatch.setattr(ops, "service_state", service_state)
+    j = job()
+    await ops.pull_restart(j, test, only_if_changed=True)
+    assert any(line.endswith("Odoo is stopped: not started again") for line in j.lines)
+    assert "restart odoo-test" not in env["calls"].read_text()
+    # a manual Git pull + restart restarts it
+    await ops.pull_restart(job(), test)
+    assert "restart odoo-test" in env["calls"].read_text()
+
+
+async def test_service_state(monkeypatch):
+    import dataclasses
+
+    from omniacli.config import Restart
+
+    answers = {"loaded": (0, "LoadState=loaded\nActiveState=failed"),
+               "missing": (0, "ActiveState=inactive\nLoadState=not-found")}
+
+    async def capture(cmd, **kwargs):
+        return answers[cmd[-1]]
+
+    monkeypatch.setattr(ops, "capture", capture)
+    base = process_instance_like = dataclasses.make_dataclass("I", ["restart"])
+    assert await ops.service_state(base(Restart("systemd", "loaded"))) == "failed"
+    assert await ops.service_state(base(Restart("systemd", "missing"))) is None
+    assert await ops.service_state(base(Restart("initd", "loaded"))) is None

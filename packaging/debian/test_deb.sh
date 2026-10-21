@@ -135,6 +135,37 @@ PID_AFTER="$(systemctl show -p MainPID --value odoo-dummy)"
 [ "$PID_AFTER" != "$PID_BEFORE" ] && [ "$PID_AFTER" != 0 ] || fail "odoo-dummy not restarted"
 echo "pulled, odoo-dummy restarted ($PID_BEFORE -> $PID_AFTER)"
 
+step "a user of role user stops, starts and restarts the systemd service"
+echo "omniacli ALL=(root) NOPASSWD: $SYSTEMCTL --no-ask-password start odoo-dummy" >> /etc/sudoers.d/omniacli
+echo "omniacli ALL=(root) NOPASSWD: $SYSTEMCTL --no-ask-password stop odoo-dummy" >> /etc/sudoers.d/omniacli
+visudo -cf /etc/sudoers.d/omniacli >/dev/null || fail "sudoers invalid with start and stop"
+curl "${API[@]}" localhost:8090/api/access/users/save \
+  -d '{"name": "luca", "role": "user", "password": "luca-pass-1", "new": true}' | grep -q '"ok":true' || fail "user luca not saved"
+LUCA=(-s -u luca:luca-pass-1 -H "Origin: http://localhost:8090")
+curl -s -u luca:luca-pass-1 localhost:8090/servers/demo | grep -q "service active" || fail "service state not shown"
+for action in stop start restart; do
+    PID_BEFORE="$(systemctl show -p MainPID --value odoo-dummy)"
+    LOCATION="$(curl "${LUCA[@]}" -o /dev/null -w '%{redirect_url}' -X POST localhost:8090/servers/demo/production/$action)"
+    [ -n "$LOCATION" ] || fail "$action refused to role user"
+    JOB="${LOCATION##*/}"
+    for i in $(seq 60); do
+        STATUS="$(curl -s -u "admin:$PW" "localhost:8090/api/jobs/$JOB" | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])')"
+        case "$STATUS" in success|failed|interrupted) break ;; esac
+        sleep 1
+    done
+    [ "$STATUS" = success ] || { curl -s -u "admin:$PW" "localhost:8090/api/jobs/$JOB"; fail "$action job $STATUS"; }
+    STATE="$(systemctl is-active odoo-dummy || true)"
+    echo "$action by luca: odoo-dummy $STATE (pid $PID_BEFORE -> $(systemctl show -p MainPID --value odoo-dummy))"
+    case "$action" in
+        stop) [ "$STATE" = inactive ] || fail "not stopped"
+              curl -s -u luca:luca-pass-1 localhost:8090/servers/demo | grep -q "/servers/demo/production/start" || fail "no Start button when stopped" ;;
+        start) [ "$STATE" = active ] || fail "not started" ;;
+        restart) [ "$STATE" = active ] && [ "$(systemctl show -p MainPID --value odoo-dummy)" != "$PID_BEFORE" ] || fail "not restarted" ;;
+    esac
+done
+[ "$(curl "${LUCA[@]}" -o /dev/null -w '%{http_code}' -X POST localhost:8090/servers/demo/production/pull)" = 403 ] \
+  || fail "role user may pull"
+
 step "load metrics of the systemd unit, read as user omniacli"
 sleep 12
 curl -s -u "admin:$PW" "localhost:8090/api/metrics?server=demo" > /tmp/metrics.json
@@ -196,6 +227,7 @@ if sys.argv[1:] == ["first"]:
 else:
     bad = [n for n, c in checks.items() if not c["ok"] and c["level"] == "error"]
     assert not bad, bad
+    assert checks["Start/Stop permission"]["ok"], checks["Start/Stop permission"]["detail"]
     assert data["status"] == "active", data["status"]
 PY
 }

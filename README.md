@@ -13,6 +13,7 @@ config file, a log file and a systemd or init.d service.
 | Git pull + restart | ✓ | ✓ | pull, `click-odoo-update` (only the changed modules), restart |
 | Update modules | ✓ | ✓ | a popup asks: the changed modules (`click-odoo-update`) or chosen ones (`odoo-bin -u … --stop-after-init --workers=0`), and whether to restart after |
 | Restart | ✓ | ✓ | the instance's systemd or init.d restart, or OmniaCLI's own start of `odoo-bin` (see below) |
+| Start, Stop | ✓ | ✓ | `systemctl start`/`stop` of a systemd service (each needs its sudoers line, the **Start/Stop permission** check prints them), or OmniaCLI's own Odoo; a stopped Odoo stays stopped for the auto update |
 | Backup | ✓ | ✓ | `click-odoo-backupdb` → `<backup_dir>/<server>/<role>/<db>_<timestamp>.zip` |
 | pip requirements | ✓ | ✓ | `<venv_bin>/python -m pip install -r` the `requirements.txt` next to `odoo-bin` and that of every repository having one, in one call |
 | pip click-odoo | ✓ | ✓ | `<venv_bin>/python -m pip install click-odoo-contrib`, the scripts OmniaCLI runs in the venv |
@@ -174,8 +175,8 @@ Every user has a role:
 
 | Role | May |
 |---|---|
-| `user` | watch: servers, load, logs, jobs, the backup list |
-| `developer` | also act on the servers: pull, update, restart, stop, backup and the download of a backup |
+| `user` | watch: servers, load, logs, jobs, the backup list; and restart, start and stop Odoo |
+| `developer` | also act on the servers: pull, update, backup and the download of a backup, pip |
 | `admin` | everything: also the configuration pages and the merge of test into production |
 
 ```yaml

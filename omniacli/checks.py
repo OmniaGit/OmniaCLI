@@ -203,6 +203,18 @@ async def _instance_checks(instance: Instance) -> list[Check]:
             "sudo allows it without a password" if code == 0 else
             "sudo refuses it or asks a password; add to /etc/sudoers.d/omniacli: "
             f"{_user()} ALL=(root) NOPASSWD: {' '.join([executable, *command[3:]])}")
+        if restart.type == "systemd":
+            # Start and Stop buttons: not needed to deploy, so a warning
+            missing = []
+            for action in ("start", "stop"):
+                other = restart.command(action)
+                code, _ = await ops.capture(["sudo", "-n", "-l", *other[2:]])
+                if code:
+                    missing.append(f"{_user()} ALL=(root) NOPASSWD: {' '.join([executable, *other[3:]])}")
+            add("Start/Stop permission", not missing,
+                "sudo allows them without a password" if not missing else
+                "Start and Stop will fail; add to /etc/sudoers.d/omniacli: " + " and ".join(missing),
+                WARNING)
     else:
         add("Restart permission", True,
             f"runs '{' '.join(command)}' without sudo: not tried, it would restart the service",

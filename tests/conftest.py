@@ -105,7 +105,8 @@ def fake_sudo(monkeypatch, tmp_path):
 def restart_calls(monkeypatch, tmp_path):
     calls = tmp_path / "calls.log"
     monkeypatch.setattr(
-        Restart, "command", lambda self: ["sh", "-c", f'echo "restart {self.service}" >> {calls}']
+        Restart, "command",
+        lambda self, action="restart": ["sh", "-c", f'echo "{action} {self.service}" >> {calls}']
     )
     return calls
 

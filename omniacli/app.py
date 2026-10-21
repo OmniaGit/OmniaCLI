@@ -60,6 +60,8 @@ def _page_context(request: Request) -> dict:
     return {
         "prefix": getattr(request.state, "prefix", ""),
         "can_act": bool(user and user.can("developer")),
+        # restart, start and stop: every role; an MCP token only reads
+        "can_restart": bool(user and user.kind != "token"),
         "is_admin": bool(user and user.can("admin")),
         # a user who logged in with a password (not a token or a link)
         "account": user.name if user and user.kind == "user" else None,
@@ -169,7 +171,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             return user
         return check
 
-    developer, admin = needs("developer"), needs("admin")
+    anyone, developer, admin = needs("user"), needs("developer"), needs("admin")
 
     if importlib.util.find_spec("mcp") is None:
         # the mcp SDK needs Python 3.10: no /mcp without it
@@ -329,6 +331,9 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
                 "busy": {i.key: jobs.is_busy(i.key) for i in srv.instances.values()},
                 # Odoo started by OmniaCLI: its pid, None when stopped
                 "running": {i.key: ops.managed_pid(i) for i in shown if i.restart.type == "process"},
+                # a systemd service: its ActiveState, None when unknown
+                "service_state": dict(zip([i.key for i in shown],
+                                          await asyncio.gather(*(ops.service_state(i) for i in shown)))),
                 "jobs": [j for j in jobs.recent(200) if any(k.startswith(f"{server}/") for k in j.instances)][:10],
             },
         )
@@ -498,7 +503,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         return {"job": job.id}
 
     @app.post("/servers/{server}/{role}/restart")
-    async def action_restart(request: Request, server: str, role: str, user: Principal = Depends(developer)):
+    async def action_restart(request: Request, server: str, role: str, user: Principal = Depends(anyone)):
         instance = get_instance(server, role)
         return started(
             request,
@@ -510,11 +515,28 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             )
         )
 
-    @app.post("/servers/{server}/{role}/stop")
-    async def action_stop(request: Request, server: str, role: str, user: Principal = Depends(developer)):
+    @app.post("/servers/{server}/{role}/start")
+    async def action_start(request: Request, server: str, role: str, user: Principal = Depends(anyone)):
         instance = get_instance(server, role)
-        if instance.restart.type != "process":
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Only an Odoo started by OmniaCLI can be stopped")
+        if instance.restart.type not in ("systemd", "process"):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                                "Start is for a systemd service or an Odoo OmniaCLI starts itself")
+        return started(
+            request,
+            jobs.submit(
+                f"Start {instance.key}",
+                [instance.key],
+                f"manual: {user}",
+                lambda job: ops.start(job, instance),
+            )
+        )
+
+    @app.post("/servers/{server}/{role}/stop")
+    async def action_stop(request: Request, server: str, role: str, user: Principal = Depends(anyone)):
+        instance = get_instance(server, role)
+        if instance.restart.type not in ("systemd", "process"):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                                "Stop is for a systemd service or an Odoo OmniaCLI starts itself")
         return started(
             request,
             jobs.submit(

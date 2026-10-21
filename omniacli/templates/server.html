@@ -36,8 +36,9 @@
     <h3 class="chart-title">Memory, MiB resident</h3>
     <div class="chart-box"><svg class="chart" data-chart="mem" role="img" aria-label="Memory of {{ inst.key }} over the last hour"></svg><div class="chart-tip" hidden></div></div>
 
-    {% if can_act %}
+    {% if can_restart %}
     <div class="actions">
+      {% if can_act %}
       <form method="post" action="{{ prefix }}/servers/{{ server.name }}/{{ inst.role }}/pull">
         <button {% if busy[inst.key] %}disabled{% endif %}>Git pull</button></form>
       <form method="post" action="{{ prefix }}/servers/{{ server.name }}/{{ inst.role }}/pull-restart"
@@ -45,6 +46,8 @@
         <button {% if busy[inst.key] %}disabled{% endif %}>Git pull + restart</button></form>
       <button type="button" class="open-update" data-server="{{ server.name }}" data-role="{{ inst.role }}"
               data-database="{{ inst.database }}" {% if busy[inst.key] %}disabled{% endif %}>Update modules</button>
+      {% endif %}
+      {# restart, start and stop: every role #}
       {% if inst.restart.type == "process" %}
       {% set pid = running.get(inst.key) %}
       <form method="post" action="{{ prefix }}/servers/{{ server.name }}/{{ inst.role }}/restart"
@@ -56,10 +59,27 @@
         <button class="danger" {% if busy[inst.key] %}disabled{% endif %}>Stop</button></form>
       {% endif %}
       {% else %}
+      {% set state = service_state.get(inst.key) %}
+      {% set up = state in ("active", "activating", "reloading") %}
       <form method="post" action="{{ prefix }}/servers/{{ server.name }}/{{ inst.role }}/restart"
             onsubmit="return confirm('Restart the service {{ inst.restart.service }} of {{ inst.key }}?')">
         <button {% if busy[inst.key] %}disabled{% endif %}>Restart</button></form>
+      {% if inst.restart.type == "systemd" %}
+      {# state unknown: both #}
+      {% if not up %}
+      <form method="post" action="{{ prefix }}/servers/{{ server.name }}/{{ inst.role }}/start"
+            onsubmit="return confirm('Start the service {{ inst.restart.service }} of {{ inst.key }}?')">
+        <button {% if busy[inst.key] %}disabled{% endif %}>Start</button></form>
       {% endif %}
+      {% if up or state is none %}
+      <form method="post" action="{{ prefix }}/servers/{{ server.name }}/{{ inst.role }}/stop"
+            onsubmit="return confirm('Stop the service {{ inst.restart.service }} of {{ inst.key }}? It stays stopped, also for the auto update, until Start.')">
+        <button class="danger" {% if busy[inst.key] %}disabled{% endif %}>Stop</button></form>
+      {% endif %}
+      <span class="muted" style="align-self: center">service {{ state or "state unknown" }}</span>
+      {% endif %}
+      {% endif %}
+      {% if can_act %}
       <form method="post" action="{{ prefix }}/servers/{{ server.name }}/{{ inst.role }}/backup">
         <button {% if busy[inst.key] %}disabled{% endif %}>Backup</button></form>
       <form method="post" action="{{ prefix }}/servers/{{ server.name }}/{{ inst.role }}/backup?download=1">
@@ -70,8 +90,11 @@
       <form method="post" action="{{ prefix }}/servers/{{ server.name }}/{{ inst.role }}/pip-cli"
             onsubmit="return confirm('pip install click-odoo-contrib in {{ inst.venv_bin }}{% if inst.run_as %} as {{ inst.run_as }}{% endif %}?')">
         <button {% if busy[inst.key] %}disabled{% endif %} title="pip install click-odoo-contrib, the scripts OmniaCLI runs in the venv">pip click-odoo</button></form>
+      {% endif %}
     </div>
+    {% endif %}
 
+    {% if can_act %}
     <details class="backups" style="margin-top: 12px" data-url="{{ prefix }}/api/servers/{{ server.name }}/{{ inst.role }}/backups">
       <summary>Backups</summary>
       <div class="backup-list muted">Loading…</div>

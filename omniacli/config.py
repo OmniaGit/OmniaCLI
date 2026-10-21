@@ -42,13 +42,14 @@ class Restart:
     service: str
     sudo: bool = True
 
-    def command(self) -> list[str]:
-        """The restart command of a systemd or init.d service."""
+    def command(self, action: str = "restart") -> list[str]:
+        """The restart command of a systemd or init.d service (a systemd
+        service is also started and stopped: action start or stop)."""
         if self.type == "systemd":
             # without --no-ask-password systemctl waits on a polkit prompt
-            cmd = ["systemctl", "--no-ask-password", "restart", self.service]
+            cmd = ["systemctl", "--no-ask-password", action, self.service]
         else:
-            cmd = [f"/etc/init.d/{self.service}", "restart"]
+            cmd = [f"/etc/init.d/{self.service}", action]
         return (["sudo", "-n"] + cmd) if self.sudo else cmd
 
 

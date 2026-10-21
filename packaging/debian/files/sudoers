@@ -4,6 +4,11 @@
 # omniacli ALL=(root) NOPASSWD: /usr/bin/systemctl --no-ask-password restart odoo-prod
 # omniacli ALL=(root) NOPASSWD: /etc/init.d/odoo-test restart
 #
+# The Start and Stop buttons of a systemd service need its start and stop:
+#
+# omniacli ALL=(root) NOPASSWD: /usr/bin/systemctl --no-ask-password start odoo-prod
+# omniacli ALL=(root) NOPASSWD: /usr/bin/systemctl --no-ask-password stop odoo-prod
+#
 # An instance with run_as runs its venv's programs as that user: allow the
 # venv's bin folder (the "Run as" check prints the line), for example:
 #

@@ -479,8 +479,13 @@ async def test_stop_button(client, env):
     from .test_ops import process_instance
 
     get = lambda url: client.get(url, headers={"Authorization": AUTH})
-    assert (await client.post("/servers/srv/test/stop", headers=POST)).status_code == 400
-    assert "/stop" not in (await get("/servers/srv")).text
+    # a systemd service whose state is unknown (no such unit here): both
+    page = (await get("/servers/srv?view=test")).text
+    assert "/servers/srv/test/start" in page and "/servers/srv/test/stop" in page
+    assert "service state unknown" in page
+    resp = await client.post("/servers/srv/test/stop", headers=POST)
+    assert (await wait_job(client, resp.headers["location"].rsplit("/", 1)[1]))["status"] == "success"
+    assert "stop odoo-test" in env["calls"].read_text()
     srv = env["settings"].servers["srv"]
     instance = process_instance(env["tmp"])
     instance.server, instance.role = "srv", "test"
@@ -551,18 +556,26 @@ def basic(user):
     return "Basic " + base64.b64encode(f"{user}:{PASSWORD}".encode()).decode()
 
 
-async def test_user_role_only_monitors(client, env):
+async def test_user_role_watches_and_restarts(client, env):
     get = lambda url: client.get(url, headers={"Authorization": basic("viewer")})
     post = lambda url: client.post(url, headers={"Authorization": basic("viewer"), "Origin": f"http://{HOST}"})
     page = (await get("/servers/srv?view=both")).text
     assert "DB_test" in page and "/pull" not in page and "Merge test to production" not in page
-    assert "Backup" not in page and ">Configuration<" not in page
+    assert "Backup" not in page and ">Configuration<" not in page and "/pip-cli" not in page
+    for action in ("restart", "start", "stop"):
+        for role in ("production", "test"):
+            assert f"/servers/srv/{role}/{action}" in page, (role, action)
+        resp = await post(f"/servers/srv/production/{action}")
+        assert resp.status_code == 303, action
+        data = await wait_job(client, resp.headers["location"].rsplit("/", 1)[1])
+        assert data["status"] == "success" and data["source"] == "manual: viewer"
+        assert f"{action} odoo-production" in env["calls"].read_text()
     assert (await get("/jobs")).status_code == 200
     assert (await get("/api/servers/srv/test/log")).status_code == 200
     assert (await get("/api/servers/srv/test/backups")).status_code == 200
     for url in ("/config", "/config/new", "/config/srv/edit", "/backups/srv/test/x.zip"):
         assert (await get(url)).status_code == 403, url
-    for url in ("/servers/srv/test/pull", "/servers/srv/test/restart", "/servers/srv/test/backup",
+    for url in ("/servers/srv/test/pull", "/servers/srv/test/backup", "/servers/srv/test/pip-cli",
                 "/servers/srv/merge", "/api/servers/srv/test", "/api/servers/srv/deactivate"):
         assert (await post(url)).status_code == 403, url
 
