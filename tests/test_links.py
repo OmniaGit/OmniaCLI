@@ -170,3 +170,16 @@ async def test_links_page(mine):
         assert error in (await post("/api/links/save", body)).json()["error"]
     assert (await post("/api/links/delete", {"name": "bad"})).json() == {"ok": True}
     assert "bad" not in settings.link_targets and "bad" not in settings.links_file.read_text()
+
+
+async def test_groups_with_linked_servers(mine):
+    headers = as_user("admin", post=True)
+    page = (await mine.get("/groups", headers=headers)).text
+    assert 'data-member="cliente/srv"' in page and 'data-member="cliente/*"' in page
+    body = {"groups": [{"name": "Customers", "members": ["cliente/*"]}]}
+    assert (await mine.post("/api/groups/save", json=body, headers=headers)).json() == {"ok": True}
+    page = (await mine.get("/", headers=headers)).text
+    assert "<h2>Customers <span" in page and "cliente › srv" in page
+    assert page.index("<h2>Customers") < page.index("cliente › srv")
+    # the linked instance's own page has no groups of ours
+    assert "Edit groups" not in (await mine.get("/links/cliente/", headers=headers)).text

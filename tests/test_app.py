@@ -849,3 +849,28 @@ async def test_pip_buttons_in_the_form(client, env, tmp_path):
     resp = await client.post("/api/venv/pip", json=body,
                              headers={"Authorization": basic("dev"), "Origin": f"http://{HOST}"})
     assert resp.status_code == 403
+
+
+async def test_servers_page_groups(client, env):
+    settings = client.app.state.settings
+    headers = {"Authorization": AUTH, "Origin": f"http://{HOST}"}
+    page = (await client.get("/", headers=headers)).text
+    assert 'class="group"' not in page and 'href="/groups">Edit groups' in page
+    assert "Edit groups" not in (await client.get("/", headers={"Authorization": basic("dev")})).text
+    page = (await client.get("/groups", headers=headers)).text
+    assert 'data-member="srv"' in page
+    assert (await client.get("/groups", headers={"Authorization": basic("dev")})).status_code == 403
+
+    body = {"groups": [{"name": "Main servers", "members": ["srv"]}, {"name": "Empty", "members": ["nope"]}]}
+    assert (await client.post("/api/groups/save", json=body, headers=headers)).json() == {"ok": True}
+    assert "Main servers" in settings.groups_file.read_text()
+    page = (await client.get("/", headers=headers)).text
+    assert "<h2>Main servers <span" in page and "Empty" not in page and "Other servers" not in page
+    # the filter finds a server by its group too
+    assert "1 of 1 server." in (await client.get("/?q=main", headers=headers)).text
+    resp = await client.post("/api/groups/save", json={"groups": [{"name": "x", "members": ["a b"]}]},
+                             headers=headers)
+    assert resp.status_code == 400 and "is not a server" in resp.json()["error"]
+    resp = await client.post("/api/groups/save", json=body,
+                             headers={"Authorization": basic("dev"), "Origin": f"http://{HOST}"})
+    assert resp.status_code == 403

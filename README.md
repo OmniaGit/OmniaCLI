@@ -134,7 +134,7 @@ once per database, when you know the modules are up to date:
 
 ## Configure
 
-The configuration has four files:
+The configuration has five files:
 
 - the **main config** (`omniaci.yaml`): the users set by hand, `backup_dir`,
   `jobs_dir`, `servers_file` and `users_file`. It is edited by hand and the
@@ -148,6 +148,8 @@ The configuration has four files:
   servers file): the other OmniaCI instances this one operates (**Links**
   page, admins only), with their tokens in clear, so written readable by its
   owner only.
+- the **groups file** (`groups_file`, by default `groups.yaml` next to the
+  servers file): the headings of the Servers page (**Edit groups**, admins).
 - the **servers file** (`servers_file`, see `servers.example.yaml`): the
   servers and their instances. It is edited from the web interface
   (**Configuration** page: new, edit, clone, delete), so the user running
@@ -236,6 +238,16 @@ Users page, and a CA file when its certificate is from the customer's own CA.
   `manual: link <its name for you> (<your user>)`;
 - you act there with the lower of your role here and the link's role there.
   Only users who log in here use links, not tokens.
+
+### Groups
+
+With many servers, **Edit groups** on the Servers page (admins) puts them
+under headings, in the order you choose. A member is `srv` (a server of this
+instance), `*` (all of them), `customer/srv` (a server of a link) or
+`customer/*` (all the servers of a link); a server shows under the first
+group that has it, the rest under "Other servers". The filter finds a server
+by its group name too. The groups are this instance's own: a linked
+instance's pages do not show them.
 
 The other instance must be reachable from yours: through an HTTPS reverse
 proxy, a VPN, or an SSH tunnel (`http://` is accepted for a tunnel or a VPN,

@@ -191,6 +191,9 @@ class Settings:
     # the other OmniaCI instances this one operates (Links page)
     links_file: Path | None = None
     link_targets: dict[str, LinkTarget] = field(default_factory=dict)
+    # how the Servers page groups this instance's and the links' servers
+    groups_file: Path | None = None
+    groups: list[ServerGroup] = field(default_factory=list)
     fixed: Access = field(default_factory=Access)
     web: Access = field(default_factory=Access)
 
@@ -531,6 +534,70 @@ def save_links(path: Path, links: dict[str, LinkTarget]) -> None:
     os.replace(tmp, path)
 
 
+_MEMBER_PART = r"(?:\*|[A-Za-z0-9][A-Za-z0-9._-]*)"
+_GROUP_MEMBER = re.compile(rf"{_MEMBER_PART}(?:/{_MEMBER_PART})?")
+
+
+@dataclass
+class ServerGroup:
+    """A heading of the Servers page. A member is a server of this instance
+    (srv, or * for all of them) or of a link (customer/srv, customer/*)."""
+
+    name: str
+    members: list[str] = field(default_factory=list)
+
+    def contains(self, link: str, server: str) -> bool:
+        for member in self.members:
+            where, _, name = member.rpartition("/")
+            if where in ("*", link) if link else not where:
+                if name in ("*", server):
+                    return True
+        return False
+
+
+def parse_groups(data) -> list[ServerGroup]:
+    if not isinstance(data, list):
+        raise ConfigError("groups must be a list of {name, members}")
+    groups, seen = [], set()
+    for item in data:
+        item = item if isinstance(item, dict) else {}
+        name = str(item.get("name") or "").strip()
+        if not name or len(name) > 64:
+            raise ConfigError("a group needs a name of at most 64 characters")
+        if name in seen:
+            raise ConfigError(f"two groups are named {name}")
+        seen.add(name)
+        members = [str(m).strip() for m in item.get("members") or [] if str(m).strip()]
+        bad = [m for m in members if not _GROUP_MEMBER.fullmatch(m)]
+        if bad:
+            raise ConfigError(f"group {name}: {', '.join(bad)} is not a server, link/server, link/* or *")
+        groups.append(ServerGroup(name, list(dict.fromkeys(members))))
+    return groups
+
+
+def load_groups(path: Path) -> list[ServerGroup]:
+    """The groups file; none yet is no groups."""
+    if not path.exists():
+        return []
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        raise ConfigError(f"cannot read {path}: {exc}") from exc
+    try:
+        return parse_groups(data.get("groups") or [])
+    except ConfigError as exc:
+        raise ConfigError(f"{path}: {exc}") from exc
+
+
+def save_groups(path: Path, groups: list[ServerGroup]) -> None:
+    text = yaml.safe_dump({"groups": [{"name": g.name, "members": g.members} for g in groups]},
+                          sort_keys=False, allow_unicode=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
+
 def parse_settings(data: dict, base_dir: Path = Path(".")) -> Settings:
     fixed = parse_auth(data.get("auth") or {})
     servers_file = Path(data.get("servers_file") or "servers.yaml")
@@ -543,6 +610,9 @@ def parse_settings(data: dict, base_dir: Path = Path(".")) -> Settings:
     links_file = Path(data.get("links_file") or servers_file.parent / "links.yaml")
     if not links_file.is_absolute():
         links_file = base_dir / links_file
+    groups_file = Path(data.get("groups_file") or servers_file.parent / "groups.yaml")
+    if not groups_file.is_absolute():
+        groups_file = base_dir / groups_file
     jobs_dir = Path(_require(data, "jobs_dir", "root"))
     settings = Settings(
         users={},
@@ -553,6 +623,8 @@ def parse_settings(data: dict, base_dir: Path = Path(".")) -> Settings:
         users_file=users_file,
         links_file=links_file,
         link_targets=load_links(links_file),
+        groups_file=groups_file,
+        groups=load_groups(groups_file),
         fixed=fixed,
     )
     settings.set_web_access(load_access(users_file))

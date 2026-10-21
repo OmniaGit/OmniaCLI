@@ -22,3 +22,4 @@ servers_file: /var/lib/omniaci/servers.yaml
 # the servers file:
 # users_file: /var/lib/omniaci/users.yaml
 # links_file: /var/lib/omniaci/links.yaml
+# groups_file: /var/lib/omniaci/groups.yaml

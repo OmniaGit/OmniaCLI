@@ -1,6 +1,9 @@
 {% extends "base.html" %}
 {% block content %}
-<h1>Servers</h1>
+<div class="server-head" style="padding: 0; border: 0">
+  <h1>Servers</h1>
+  {% if is_admin and not prefix %}<a class="button" href="/groups">Edit groups</a>{% endif %}
+</div>
 {% if drafts %}<p class="muted">{{ drafts | length }} draft server{{ "s" if drafts | length > 1 }} not live yet: see {% if is_admin %}<a href="{{ prefix }}/config">Configuration</a>{% else %}Configuration{% endif %}.</p>{% endif %}
 {% if total > 1 or q %}
 <form class="actions job-filter" method="get" action="{{ prefix }}/" style="margin: 0 0 12px">
@@ -11,6 +14,7 @@
 {% if q %}<p class="muted">{{ rows | length }} of {{ total }} server{{ "" if total == 1 else "s" }}.</p>{% endif %}
 {% endif %}
 {% for e in link_errors %}<div class="banner">Link <strong>{{ e.link }}</strong>: {{ e.error }}</div>{% endfor %}
+{% macro server_table(rows) %}
 <div class="panel">
   <div class="scroll">
   <table class="server-rows">
@@ -37,13 +41,23 @@
         </div>
       </td>
     </tr>
-    {% else %}
-    {% if q %}<tr><td colspan="3" class="muted">No servers match.</td></tr>{% else %}
-    <tr><td colspan="3" class="muted">No live servers.{% if is_admin %} Add one in <a href="{{ prefix }}/config">Configuration</a>, then use Test &amp; activate.{% endif %}</td></tr>{% endif %}
     {% endfor %}
   </table>
   </div>
 </div>
+{% endmacro %}
+{% for section in sections %}
+{% if section.name %}
+<details class="group" open>
+  <summary><h2>{{ section.name }} <span class="muted">({{ section.rows | length }})</span></h2></summary>
+  {{ server_table(section.rows) }}
+</details>
+{% else %}
+{{ server_table(section.rows) }}
+{% endif %}
+{% else %}
+<div class="panel"><p class="muted" style="margin: 0">{% if q %}No servers match.{% else %}No live servers.{% if is_admin %} Add one in <a href="{{ prefix }}/config">Configuration</a>, then use Test &amp; activate.{% endif %}{% endif %}</p></div>
+{% endfor %}
 <h1 style="margin-top: 24px">Last jobs</h1>
 <div class="panel">{% include "_jobs_table.html" %}</div>
 {% include "_charts.html" %}

@@ -35,9 +35,11 @@ from .config import (
     Settings,
     load_settings,
     matches,
+    parse_groups,
     parse_link,
     parse_servers,
     save_access,
+    save_groups,
     save_links,
     save_servers,
     server_text,
@@ -280,11 +282,20 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         remote = await remote_servers(me)
         errors = [r for r in remote if "error" in r]
         rows += [r for r in remote if "error" not in r]
+        # each row under the first group that has it, the rest under "Other"
+        for row in rows:
+            row["group"] = next((g.name for g in settings.groups if g.contains(row["link"], row["name"])), "")
+            row["text"] += " " + row["group"]
+        shown = [r for r in rows if matches(r["text"], q)]
+        sections = [{"name": g.name, "rows": [r for r in shown if r["group"] == g.name]} for g in settings.groups]
+        sections.append({"name": "Other servers" if settings.groups else "",
+                         "rows": [r for r in shown if not r["group"]]})
         return _TEMPLATES.TemplateResponse(
             request,
             "index.html",
             {
-                "rows": [r for r in rows if matches(r["text"], q)],
+                "rows": shown,
+                "sections": [sec for sec in sections if sec["rows"]],
                 "link_errors": [e for e in errors if matches(e["link"], q)],
                 "total": len(rows),
                 "q": q,
@@ -1042,6 +1053,32 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         kept = {k: resp.headers[k] for k in _LINK_RESPONSE_HEADERS if k in resp.headers}
         return StreamingResponse(resp.aiter_raw(), status_code=resp.status_code, headers=kept,
                                  background=BackgroundTask(resp.aclose))
+
+    # --- groups of the Servers page ------------------------------------
+
+    @app.get("/groups")
+    async def groups_page(request: Request, me: Principal = Depends(admin)):
+        known = [srv.name for srv in settings.active_servers()]
+        known += [f"{r['link']}/{r['name']}" for r in await remote_servers(me) if "error" not in r]
+        return _TEMPLATES.TemplateResponse(
+            request, "groups.html",
+            {"groups": [{"name": g.name, "members": g.members} for g in settings.groups],
+             "known": known, "links": list(settings.link_targets), "groups_file": settings.groups_file},
+        )
+
+    @app.post("/api/groups/save", dependencies=[Depends(admin)])
+    async def groups_save(payload: dict = Body(...)):
+        """The whole list of groups, in order."""
+        try:
+            groups = parse_groups(payload.get("groups"))
+        except ConfigError as exc:
+            return refuse(str(exc))
+        try:
+            await asyncio.to_thread(save_groups, settings.groups_file, groups)
+        except OSError as exc:
+            return refuse(f"Cannot write {settings.groups_file}: {exc}", 500)
+        settings.groups = groups
+        return {"ok": True}
 
     # --- the caller's own password --------------------------------------
 

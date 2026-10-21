@@ -167,3 +167,24 @@ def test_users_file_round_trip_and_main_config_wins(tmp_path):
     assert settings.users == {"anna": "h1", "admin": "main-hash"}
     assert settings.user_role("admin") == "admin" and settings.user_role("anna") == "developer"
     assert settings.tokens == {"laptop": "sha256$" + "1" * 64} and settings.links["partner"].role == "user"
+
+
+def test_groups_parse_match_and_round_trip(tmp_path):
+    from omniaci.config import ServerGroup, load_groups, parse_groups, save_groups
+
+    groups = parse_groups([{"name": "Customers", "members": ["cliente/*", "acme/one", "acme/one", " "]},
+                           {"name": "Mine", "members": ["*"]}])
+    assert groups[0].members == ["cliente/*", "acme/one"]  # once each, blanks dropped
+    assert groups[0].contains("cliente", "any") and groups[0].contains("acme", "one")
+    assert not groups[0].contains("acme", "two") and not groups[0].contains("", "cliente")
+    assert groups[1].contains("", "srv") and not groups[1].contains("cliente", "srv")
+    path = tmp_path / "groups.yaml"
+    assert load_groups(path) == []
+    save_groups(path, groups)
+    assert load_groups(path) == groups
+    for data, error in (([{"name": ""}], "needs a name"), ([{"name": "a"}, {"name": "a"}], "two groups"),
+                        ([{"name": "a", "members": ["a b"]}], "is not a server"),
+                        ([{"name": "a", "members": ["x/y/z"]}], "is not a server"), ({"a": 1}, "must be a list")):
+        with pytest.raises(ConfigError, match=error):
+            parse_groups(data)
+    assert ServerGroup("x", ["*/db"]).contains("anylink", "db")

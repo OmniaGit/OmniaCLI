@@ -14,7 +14,8 @@ case "$1" in
         rm -f /var/lib/omniaci/servers.yaml /var/lib/omniaci/servers.yaml.bak \
             /var/lib/omniaci/servers.yaml.tmp \
             /var/lib/omniaci/users.yaml /var/lib/omniaci/users.yaml.tmp \
-            /var/lib/omniaci/links.yaml /var/lib/omniaci/links.yaml.tmp
+            /var/lib/omniaci/links.yaml /var/lib/omniaci/links.yaml.tmp \
+            /var/lib/omniaci/groups.yaml /var/lib/omniaci/groups.yaml.tmp
         if [ -d /var/lib/omniaci/backups ] && [ -n "$(ls -A /var/lib/omniaci/backups)" ]; then
             echo "omniaci: the database backups are kept in /var/lib/omniaci/backups"
         else

@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% block title %}Groups · OmniaCI{% endblock %}
+{% block crumbs %}{% from "_crumbs.html" import crumbs with context %}
+{{ crumbs([("Servers", "/"), ("Groups", None)]) }}
+{% endblock %}
+{% block content %}
+<h1>Groups</h1>
+<p class="muted">The headings of the Servers page, in this order. One member per line:
+<span class="mono">srv</span> a server of this instance, <span class="mono">*</span> all of them,
+<span class="mono">customer/srv</span> a server of a link, <span class="mono">customer/*</span> all the servers of a link.
+A server shows under the first group that has it; the others under "Other servers".
+Saved in <span class="mono">{{ groups_file }}</span>.</p>
+<div id="error" class="banner" hidden></div>
+<div id="groups"></div>
+<div class="actions">
+  <button type="button" id="add">Add group</button>
+  <button type="button" id="save">Save</button>
+  <a class="button" href="{{ prefix }}/">Cancel</a>
+</div>
+<h2 style="margin-top: 24px">Servers known now</h2>
+<p class="muted">Click one to add it to the last group you edited.</p>
+<div class="actions" id="known">
+  {% for key in known %}<button type="button" class="mono" data-member="{{ key }}">{{ key }}</button>{% endfor %}
+  {% for link in links %}<button type="button" class="mono" data-member="{{ link }}/*">{{ link }}/*</button>{% endfor %}
+  {% if not known and not links %}<span class="muted">No live servers and no links yet.</span>{% endif %}
+</div>
+<template id="group-template">
+  <fieldset class="group-box">
+    <legend><input type="text" class="name" placeholder="group name" aria-label="Group name"></legend>
+    <textarea class="members mono" rows="4" placeholder="one member per line" aria-label="Members"></textarea>
+    <div class="actions" style="margin: 8px 0 0">
+      <button type="button" class="up" title="Move up">↑</button>
+      <button type="button" class="down" title="Move down">↓</button>
+      <button type="button" class="danger remove">Remove</button>
+    </div>
+  </fieldset>
+</template>
+<script>
+(function () {
+  const list = document.getElementById("groups"), template = document.getElementById("group-template");
+  let last = null;
+  function addGroup(group) {
+    const box = template.content.firstElementChild.cloneNode(true);
+    box.querySelector(".name").value = group.name || "";
+    box.querySelector(".members").value = (group.members || []).join("\n");
+    box.querySelector(".up").onclick = () => { if (box.previousElementSibling) list.insertBefore(box, box.previousElementSibling); };
+    box.querySelector(".down").onclick = () => { if (box.nextElementSibling) list.insertBefore(box.nextElementSibling, box); };
+    box.querySelector(".remove").onclick = () => { if (last === box) last = null; box.remove(); };
+    box.addEventListener("focusin", () => { last = box; });
+    list.appendChild(box);
+    return box;
+  }
+  for (const group of {{ groups | tojson }}) addGroup(group);
+  document.getElementById("add").onclick = () => { last = addGroup({}); last.querySelector(".name").focus(); };
+  for (const button of document.querySelectorAll("[data-member]")) {
+    button.onclick = () => {
+      const box = last || list.lastElementChild || addGroup({});
+      last = box;
+      const area = box.querySelector(".members");
+      const lines = area.value.split("\n").map((l) => l.trim()).filter(Boolean);
+      if (!lines.includes(button.dataset.member)) lines.push(button.dataset.member);
+      area.value = lines.join("\n");
+    };
+  }
+  document.getElementById("save").onclick = async () => {
+    const groups = [...list.children].map((box) => ({
+      name: box.querySelector(".name").value.trim(),
+      members: box.querySelector(".members").value.split("\n").map((l) => l.trim()).filter(Boolean),
+    }));
+    const resp = await fetch("{{ prefix }}/api/groups/save", {method: "POST",
+      headers: {"Content-Type": "application/json"}, body: JSON.stringify({groups})});
+    const data = await resp.json().catch(() => ({}));
+    if (resp.ok) { location.href = "{{ prefix }}/"; return; }
+    const errorBox = document.getElementById("error");
+    errorBox.textContent = data.error || data.detail || ("Error " + resp.status);
+    errorBox.hidden = false;
+    window.scrollTo(0, 0);
+  };
+})();
+</script>
+{% endblock %}
