@@ -1039,6 +1039,9 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         link = a_link(name)
         client = link_clients.client(link)
         headers = {k: request.headers[k] for k in _LINK_REQUEST_HEADERS if k in request.headers}
+        # the body is passed on raw: ask only the encodings the browser accepts
+        # (httpx would ask gzip by itself, and an nginx there would gzip)
+        headers["accept-encoding"] = request.headers.get("accept-encoding", "identity")
         headers.update(link_headers(link, me.name, me.role))
         url = "/" + path + (f"?{request.url.query}" if request.url.query else "")
         outgoing = client.build_request(request.method, url, headers=headers,

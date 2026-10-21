@@ -25,8 +25,10 @@ class Network(httpx.AsyncBaseTransport):
 
     def __init__(self, app):
         self.asgi = httpx.ASGITransport(app=app)
+        self.requests = []
 
     async def handle_async_request(self, request):
+        self.requests.append(request)
         if request.url.host == "down.test":
             raise httpx.ConnectError("connection refused", request=request)
         return await self.asgi.handle_async_request(request)
@@ -50,9 +52,10 @@ async def mine(env, tmp_path):
         "backup_dir": str(tmp_path / "my-backups"), "jobs_dir": str(tmp_path / "my-jobs"),
         "servers_file": "servers.yaml",
     }, base_dir=conf)
-    app = create_app(settings, link_transport=Network(customer))
+    network = Network(customer)
+    app = create_app(settings, link_transport=network)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=f"http://{HOST}") as c:
-        c.app, c.customer = app, customer
+        c.app, c.customer, c.network = app, customer, network
         yield c
 
 
@@ -71,6 +74,16 @@ async def wait_remote_job(client, job_id, user="admin"):
             return data
         await asyncio.sleep(0.05)
     raise AssertionError("job did not finish")
+
+
+async def test_proxy_asks_the_encoding_the_browser_accepts(mine):
+    # the body is passed on as it comes: the other instance (or the nginx in
+    # front of it) must not compress it for a client that cannot read it
+    await mine.get("/links/cliente/", headers={**as_user("admin"), "Accept-Encoding": "gzip"})
+    assert mine.network.requests[-1].headers["accept-encoding"] == "gzip"
+    del mine.headers["accept-encoding"]
+    await mine.get("/links/cliente/", headers=as_user("admin"))
+    assert mine.network.requests[-1].headers["accept-encoding"] == "identity"
 
 
 async def test_servers_page_lists_the_links_servers(mine):
