@@ -1,5 +1,7 @@
 # OmniaCLI
 
+<p align="center"><img src="omniacli/static/login-background.jpg" width="320" alt="OmniaCLI"></p>
+
 Manage many Odoo instances from a single web interface.
 
 OmniaCLI is a small web service, behind a login page, that deploys and
@@ -32,6 +34,31 @@ sudo cat /etc/omniacli/initial-admin-password     # the password of user admin
 OmniaCLI listens on `127.0.0.1:8090`: put an HTTPS reverse proxy in front of
 it (see [Login and security](#login-and-security)), open it, log in as
 `admin`, and add your servers on the **Servers** page.
+
+## Screenshots
+
+The screenshots show demo data.
+
+**Login**
+
+![The login page](docs/images/login.jpg)
+
+**Dashboard**: the servers with the state of their Odoo and their CPU, the
+whole machine (CPU, network, disks) and the last jobs, updated as they run.
+
+![The Dashboard](docs/images/dashboard.png)
+
+**A server**: production and test side by side, with their actions, load and
+live log.
+
+![The page of a server](docs/images/server.png)
+
+**A job**, and the **Servers** page where servers are added, tested and
+activated.
+
+![A job](docs/images/job.png)
+
+![The Servers page](docs/images/servers.png)
 
 ## What it does
 
