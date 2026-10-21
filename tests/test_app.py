@@ -78,10 +78,10 @@ async def test_post_needs_same_origin(client):
 
 
 async def test_failed_job_shows_error(client, env):
-    path = env["settings"].instance("srv", "test").repository("odoo").path
+    path = env["settings"].instance("srv", "production").repository("odoo").path
     (path / "base.txt").write_text("dirty\n")
     resp = await client.post(
-        "/servers/srv/test/pull-restart", headers={"Authorization": AUTH, "Origin": f"http://{HOST}"}
+        "/servers/srv/production/pull-restart", headers={"Authorization": AUTH, "Origin": f"http://{HOST}"}
     )
     data = await wait_job(client, resp.headers["location"].rsplit("/", 1)[1])
     assert data["status"] == "failed" and "uncommitted" in data["error"]

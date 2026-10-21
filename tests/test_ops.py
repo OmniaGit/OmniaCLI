@@ -50,12 +50,44 @@ async def test_pull_refuses_wrong_branch_and_dirty(env):
     test = env["settings"].instance("srv", "test")
     path = test.repository("odoo").path
     (path / "base.txt").write_text("local edit\n")
+    # a test instance with auto update, like production, refuses local changes
+    test.auto_update.enabled = True
     with pytest.raises(JobFailed, match="uncommitted"):
         await ops.pull(job(), test)
+    production = env["settings"].instance("srv", "production")
+    (production.repository("odoo").path / "base.txt").write_text("local edit\n")
+    with pytest.raises(JobFailed, match="uncommitted"):
+        await ops.pull(job(), production)
     sh("git", "checkout", "-q", "--", "base.txt", cwd=path)
     sh("git", "checkout", "-q", "-b", "other", cwd=path)
     with pytest.raises(JobFailed, match="expected 'test'"):
         await ops.pull(job(), test)
+
+
+async def test_pull_keeps_local_changes_on_a_test_instance(env):
+    test = env["settings"].instance("srv", "test")
+    path = test.repository("odoo").path
+    (path / "base.txt").write_text("local edit\n")
+    sha = push_change(env, "odoo", "test", "other.txt")
+    j = job()
+    assert await ops.pull(j, test)
+    assert head(path) == sha and (path / "base.txt").read_text() == "local edit\n"
+    assert any("uncommitted changes kept" in line for line in j.lines)
+    # a pulled commit that changes the edited file: git refuses, the edit stays
+    push_change(env, "odoo", "test", "base.txt", "from the remote\n")
+    with pytest.raises(JobFailed, match="git exited with code"):
+        await ops.pull(job(), test)
+    assert (path / "base.txt").read_text() == "local edit\n"
+
+
+async def test_merge_refuses_local_changes_on_test(env):
+    settings = env["settings"]
+    server = settings.servers["srv"]
+    (server.test.repository("odoo").path / "base.txt").write_text("not committed\n")
+    before = head(server.production.repository("odoo").path)
+    with pytest.raises(JobFailed, match="the test copy .* has uncommitted changes"):
+        await ops.merge_to_production(job(), server, settings.backup_dir)
+    assert head(server.production.repository("odoo").path) == before
 
 
 async def test_backup(env):

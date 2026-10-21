@@ -88,6 +88,12 @@ class Instance:
     odoo_bin: Path | None = None
 
     @property
+    def keeps_local_changes(self) -> bool:
+        """A test instance without auto update may have uncommitted changes:
+        someone works on it, and nothing pulls behind their back."""
+        return self.role == "test" and not self.auto_update.enabled
+
+    @property
     def key(self) -> str:
         return f"{self.server}/{self.role}"
 

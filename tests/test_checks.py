@@ -39,13 +39,28 @@ async def test_repository_problems_are_reported(env):
     from .conftest import sh
 
     settings = env["settings"]
-    test = settings.servers["srv"].test
-    path = test.repository("odoo").path
+    production = settings.servers["srv"].production
+    path = production.repository("odoo").path
     (path / "base.txt").write_text("dirty\n")
     sh("git", "remote", "set-url", "origin", str(env["tmp"] / "nowhere.git"), cwd=path)
     report = await checks.check_server(settings.servers["srv"], settings.backup_dir)
-    repo = by_name(report, "test", "Repository odoo")
+    repo = by_name(report, "production", "Repository odoo")
     assert not repo.ok and "uncommitted" in repo.detail and "not reachable" in repo.detail
+
+
+async def test_local_changes_on_a_test_instance_without_auto_update(env):
+    settings = env["settings"]
+    test = settings.servers["srv"].test
+    (test.repository("odoo").path / "base.txt").write_text("dirty\n")
+    report = await checks.check_server(settings.servers["srv"], settings.backup_dir)
+    assert by_name(report, "test", "Repository odoo").ok
+    kept = by_name(report, "test", "Repository odoo: local changes")
+    assert not kept.ok and kept.level == checks.WARNING and "1 uncommitted change(s), kept" in kept.detail
+    # with auto update on, nothing may pull over someone's work: an error again
+    test.auto_update.enabled = True
+    report = await checks.check_server(settings.servers["srv"], settings.backup_dir)
+    repo = by_name(report, "test", "Repository odoo")
+    assert not repo.ok and "uncommitted" in repo.detail and repo.level == checks.ERROR
 
 
 def test_passed_ignores_warnings():

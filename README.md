@@ -56,6 +56,11 @@ prepared before Test & activate. The job's log opens in a new tab.
 - A pull is **fast-forward only**. A repository on a branch other than the
   configured one, or with uncommitted changes, stops the job: OmniaCI never
   creates merge commits or throws away local work on a pull.
+- Except on a **test instance without auto update**, where someone may be
+  working: its uncommitted changes are kept (a warning in the checks, not an
+  error), and a pull goes on unless git would have to overwrite them.
+  **Merge test to production** still refuses them: what runs on test must be
+  a commit.
 - **Merge test to production** merges the commit **checked out on the test
   server**, not the tip of the test branch, so production gets exactly what
   was tested. That commit must already be on the remote. Test and production

@@ -147,7 +147,12 @@ async def _instance_checks(instance: Instance) -> list[Check]:
             problems.append(f"on branch '{branch}', expected '{repo.branch}'")
         _, changes = await ops.capture(
             ["git", "status", "--porcelain", "--untracked-files=no"], cwd=repo.path)
-        if changes:
+        if changes and instance.keeps_local_changes:
+            add(f"{name}: local changes", False,
+                f"{len(changes.splitlines())} uncommitted change(s), kept: a test instance without "
+                "auto update; a pull stops only if it would overwrite them, a merge to "
+                "production refuses them", WARNING)
+        elif changes:
             problems.append(f"{len(changes.splitlines())} uncommitted change(s)")
         code, out = await ops.capture(
             ["git", "ls-remote", "--exit-code", "--heads", repo.remote, repo.branch],

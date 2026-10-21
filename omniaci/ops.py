@@ -120,8 +120,10 @@ async def repository_status(repo: Repository) -> dict:
     return {"sha": sha, "date": date, "subject": subject, "branch": branch}
 
 
-async def ensure_ready(job: Job, repo: Repository) -> None:
-    """Fail unless the working copy is on its branch with no local changes."""
+async def ensure_ready(job: Job, repo: Repository, keep_changes: bool = False) -> None:
+    """Fail unless the working copy is on its branch with no local changes
+    (keep_changes: local changes are kept, git pull --ff-only refuses to
+    overwrite them)."""
     branch = await git(repo, "rev-parse", "--abbrev-ref", "HEAD")
     if branch != repo.branch:
         raise JobFailed(
@@ -130,6 +132,9 @@ async def ensure_ready(job: Job, repo: Repository) -> None:
     changes = await git(repo, "status", "--porcelain", "--untracked-files=no")
     if changes:
         job.log(changes)
+        if keep_changes:
+            job.log(f"[{repo.name}] uncommitted changes kept (test instance without auto update)")
+            return
         raise JobFailed(f"[{repo.name}] {repo.path} has uncommitted changes")
 
 
@@ -138,7 +143,7 @@ async def pull(job: Job, instance: Instance) -> bool:
     changed = False
     for repo in instance.repositories:
         job.log(f"--- [{repo.name}] pull {repo.remote}/{repo.branch}")
-        await ensure_ready(job, repo)
+        await ensure_ready(job, repo, keep_changes=instance.keeps_local_changes)
         before = await git(repo, "rev-parse", "HEAD")
         await run(job, ["git", "pull", "--ff-only", repo.remote, repo.branch], cwd=repo.path)
         after = await git(repo, "rev-parse", "HEAD")
@@ -552,6 +557,11 @@ async def merge_to_production(job: Job, server: Server, backup_dir: Path) -> Non
             repo = prod.repository(test_repo.name)
             job.log(f"--- [{repo.name}] merge test into {repo.branch}")
             await ensure_ready(job, repo)
+            # what runs on test must be a commit, or production would get
+            # something else than what was tested
+            if await git(test_repo, "status", "--porcelain", "--untracked-files=no"):
+                raise JobFailed(f"[{test_repo.name}] the test copy {test_repo.path} has uncommitted "
+                                "changes: commit and push them, or discard them, before the merge")
             tested = await git(test_repo, "rev-parse", "HEAD")
             before = await git(repo, "rev-parse", "HEAD")
             merged.append((repo, before))
