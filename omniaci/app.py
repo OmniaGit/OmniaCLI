@@ -23,6 +23,8 @@ from .odooconf import read_odoo_config
 from .auth import ROLES as ACCESS_ROLES
 from .auth import Authenticator, Principal, hash_password, hash_token, new_token, verify_password
 from .config import (
+    ROLES,
+    SERVER_NAME,
     Access,
     ConfigError,
     Instance,
@@ -326,7 +328,8 @@ def create_app(settings: Settings) -> FastAPI:
                 f"pip install requirements {instance.key}",
                 [instance.key],
                 f"manual: {user}",
-                lambda job: ops.install_requirements(job, instance),
+                lambda job: ops.install_requirements(
+                    job, instance.venv_bin, instance.odoo_bin, [r.path for r in instance.repositories]),
             )
         )
 
@@ -340,9 +343,35 @@ def create_app(settings: Settings) -> FastAPI:
                 f"pip install {ops.CLI_PACKAGE} {instance.key}",
                 [instance.key],
                 f"manual: {user}",
-                lambda job: ops.install_cli(job, instance),
+                lambda job: ops.install_cli(job, instance.venv_bin),
             )
         )
+
+    @app.post("/api/venv/pip")
+    async def form_pip(payload: dict = Body(...), user: Principal = Depends(admin)):
+        """The pip buttons of the server form: on the venv, odoo-bin and
+        repository folders typed there, saved or not (a draft too)."""
+        kind = payload.get("kind")
+        if kind not in ("requirements", "cli"):
+            return JSONResponse({"error": "kind must be 'requirements' or 'cli'"}, status_code=400)
+        venv_bin = Path(str(payload.get("venv_bin") or "").strip())
+        if not venv_bin.is_absolute() or not os.access(venv_bin / "python", os.X_OK):
+            return JSONResponse({"error": f"No python in {venv_bin}: set the venv's bin folder"},
+                                status_code=400)
+        odoo_text = str(payload.get("odoo_bin") or "").strip()
+        odoo_bin = Path(odoo_text) if odoo_text else None
+        folders = [Path(str(p).strip()) for p in payload.get("repositories") or [] if str(p).strip()]
+        folders = [p for p in folders if p.is_absolute() and p.is_dir()]
+        name, role = str(payload.get("name") or "").strip(), str(payload.get("role") or "")
+        # the instance's key when the form names one: its jobs wait for each other
+        key = f"{name if SERVER_NAME.fullmatch(name) else 'form'}/{role if role in ROLES else 'venv'}"
+        if kind == "requirements":
+            job = jobs.submit(f"pip install requirements {key}", [key], f"manual: {user}",
+                              lambda job: ops.install_requirements(job, venv_bin, odoo_bin, folders))
+        else:
+            job = jobs.submit(f"pip install {ops.CLI_PACKAGE} {key}", [key], f"manual: {user}",
+                              lambda job: ops.install_cli(job, venv_bin))
+        return {"job": job.id}
 
     @app.get("/api/servers/{server}/{role}/addons")
     async def addons(server: str, role: str):

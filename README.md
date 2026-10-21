@@ -19,6 +19,11 @@ config file, a log file and a systemd or init.d service.
 | Merge test to production | | ✓ | backup production, merge, push, update modules, restart production |
 | Log | ✓ | ✓ | `tail -F` of the Odoo log in the browser, with an "errors only" filter |
 
+The two pip buttons are also next to the **Venv bin** field of the server
+form (admins), as soon as it is set: they run on the venv, odoo-bin and
+repository folders typed there, saved or not, so a draft's venv can be
+prepared before Test & activate. The job's log opens in a new tab.
+
 - **Servers page**: one row per live server, with the CPU of production and
   test over the last 15 minutes and the buttons **Test**, **Production** and
   **Both**, which open the server's page on that instance or on both side by

@@ -40,7 +40,12 @@
         <div class="with-button"><input type="text" data-k="odoo_config" class="mono">
           <button type="button" class="reload-conf" title="Read database, log file and repositories from this file">Reload</button></div>
         <label>Log file</label><input type="text" data-k="log_file" class="mono">
-        <label>Venv bin (click-odoo-contrib)</label><input type="text" data-k="venv_bin" class="mono">
+        <label>Venv bin (click-odoo-contrib)</label>
+        <div class="with-button"><input type="text" data-k="venv_bin" class="mono">
+          <span class="pip-buttons" hidden>
+            <button type="button" data-pip="requirements" title="pip install, in this venv, the requirements.txt of Odoo and of the repositories below">pip requirements</button>
+            <button type="button" data-pip="cli" title="pip install click-odoo-contrib, the scripts OmniaCI runs, in this venv">pip click-odoo</button>
+          </span></div>
         <label>odoo-bin (update of chosen modules)</label><input type="text" data-k="odoo_bin" class="mono" placeholder="empty: odoo-bin found in a repository">
         <label>Restart with</label>
         <select data-k="restart.type"><option value="systemd">systemd</option><option value="initd">init.d</option><option value="process">OmniaCI starts odoo-bin itself</option></select>
@@ -114,6 +119,11 @@ for (const role of ROLES) {
   for (const repo of values.repositories || []) repoRow(tbody, repo);
   box.querySelector(".add-repo").onclick = () => repoRow(tbody, {remote: "origin"});
   box.querySelector(".reload-conf").onclick = () => reloadConf(box);
+  const venv = box.querySelector('[data-k="venv_bin"]'), pipButtons = box.querySelector(".pip-buttons");
+  const showPip = () => { pipButtons.hidden = !venv.value.trim(); };
+  venv.addEventListener("input", showPip);
+  showPip();
+  for (const button of pipButtons.querySelectorAll("[data-pip]")) button.onclick = () => runPip(box, role, button.dataset.pip);
   const type = box.querySelector('[data-k="restart.type"]');
   type.onchange = () => processFields(box);
   processFields(box);
@@ -130,6 +140,31 @@ function processFields(box) {
   }
   box.querySelector('[data-k="log_file"]').placeholder = process ? "Odoo's output, in " + MODEL.logs_dir : "";
   if (process) box.querySelector('[data-k="log_file"]').value = "";
+}
+
+// pip in the venv typed here, saved or not: the job's log opens in a new
+// tab, so the form keeps what is typed
+async function runPip(box, role, kind) {
+  const value = (k) => box.querySelector(`[data-k="${k}"]`).value.trim();
+  const what = kind === "cli" ? "click-odoo-contrib" : "the requirements.txt of Odoo and of the repositories";
+  if (!confirm(`pip install ${what} in ${value("venv_bin")}?`)) return;
+  const tab = window.open("", "_blank");  // opened now: a tab opened after the answer may be blocked
+  const resp = await fetch("{{ prefix }}/api/venv/pip", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({kind, role, name: document.getElementById("name").value.trim(),
+      venv_bin: value("venv_bin"), odoo_bin: value("odoo_bin"),
+      repositories: [...box.querySelectorAll('tbody [data-r="path"]')].map((i) => i.value.trim())}),
+  }).catch(() => null);
+  const data = resp ? await resp.json().catch(() => ({})) : {};
+  if (resp && resp.ok) {
+    if (tab) tab.location.href = "{{ prefix }}/jobs/" + data.job; else location.href = "{{ prefix }}/jobs/" + data.job;
+    return;
+  }
+  if (tab) tab.close();
+  const errorBox = document.getElementById("error");
+  errorBox.textContent = data.error || data.detail || (resp ? "Error " + resp.status : "The server does not answer");
+  errorBox.hidden = false;
+  window.scrollTo(0, 0);
 }
 
 // Fill database, log file and repositories from the Odoo config file; a

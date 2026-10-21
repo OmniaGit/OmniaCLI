@@ -812,3 +812,38 @@ async def test_pip_buttons(client, env):
     for url in ("/servers/srv/test/pip-requirements", "/servers/srv/test/pip-cli"):
         resp = await client.post(url, headers={"Authorization": basic("viewer"), "Origin": f"http://{HOST}"})
         assert resp.status_code == 403
+
+
+async def test_pip_buttons_in_the_form(client, env, tmp_path):
+    # a venv not yet in any server: the form's values, saved or not
+    venv = tmp_path / "newvenv" / "bin"
+    venv.mkdir(parents=True)
+    calls = tmp_path / "formpip.log"
+    (venv / "python").write_text(f'#!/bin/sh\necho "python $*" >> {calls}\n')
+    (venv / "python").chmod(0o755)
+    odoo = env["settings"].instance("srv", "test").repository("odoo").path
+    (odoo / "requirements.txt").write_text("lxml\n")
+    headers = {"Authorization": AUTH, "Origin": f"http://{HOST}"}
+    page = (await client.get("/config/srv/edit", headers=headers)).text
+    assert 'class="pip-buttons"' in page and 'data-pip="requirements"' in page and 'data-pip="cli"' in page
+
+    body = {"kind": "requirements", "name": "newsrv", "role": "test", "venv_bin": str(venv),
+            "odoo_bin": "", "repositories": [str(odoo), "", "relative/path", str(tmp_path / "missing")]}
+    resp = await client.post("/api/venv/pip", json=body, headers=headers)
+    assert resp.status_code == 200, resp.text
+    data = await wait_job(client, resp.json()["job"])
+    assert data["status"] == "success" and data["instances"] == ["newsrv/test"], data
+    assert calls.read_text().splitlines() == [
+        f"python -m pip install --disable-pip-version-check -r {odoo}/requirements.txt"]
+    resp = await client.post("/api/venv/pip", json={**body, "kind": "cli", "name": ""}, headers=headers)
+    data = await wait_job(client, resp.json()["job"])
+    assert data["status"] == "success" and data["title"] == "pip install click-odoo-contrib form/test"
+    assert calls.read_text().splitlines()[-1].endswith("install --disable-pip-version-check click-odoo-contrib")
+
+    resp = await client.post("/api/venv/pip", json={**body, "venv_bin": str(tmp_path)}, headers=headers)
+    assert resp.status_code == 400 and "No python in" in resp.json()["error"]
+    resp = await client.post("/api/venv/pip", json={**body, "kind": "x"}, headers=headers)
+    assert resp.status_code == 400
+    resp = await client.post("/api/venv/pip", json=body,
+                             headers={"Authorization": basic("dev"), "Origin": f"http://{HOST}"})
+    assert resp.status_code == 403

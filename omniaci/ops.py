@@ -223,11 +223,16 @@ def odoo_env(instance: Instance) -> dict:
 
 
 def find_odoo_bin(instance: Instance) -> Path | None:
-    if instance.odoo_bin is not None:
-        return instance.odoo_bin
-    for repo in instance.repositories:
-        if (repo.path / "odoo-bin").is_file():
-            return repo.path / "odoo-bin"
+    return locate_odoo_bin(instance.odoo_bin, [r.path for r in instance.repositories])
+
+
+def locate_odoo_bin(odoo_bin: Path | None, folders: list[Path]) -> Path | None:
+    """odoo_bin when set, otherwise the odoo-bin of the first folder having one."""
+    if odoo_bin is not None:
+        return odoo_bin
+    for folder in folders:
+        if (folder / "odoo-bin").is_file():
+            return folder / "odoo-bin"
     return None
 
 
@@ -458,40 +463,41 @@ async def restart_process(job: Job, instance: Instance) -> None:
     await start_process(job, instance)
 
 
-def requirement_files(instance: Instance) -> list[Path]:
-    """Odoo's requirements.txt (next to odoo-bin), then each repository's."""
+def requirement_files(odoo_bin: Path | None, folders: list[Path]) -> list[Path]:
+    """Odoo's requirements.txt (next to odoo-bin), then each folder's."""
     found = []
-    odoo_bin = find_odoo_bin(instance)
+    odoo_bin = locate_odoo_bin(odoo_bin, folders)
     candidates = [odoo_bin.parent] if odoo_bin is not None else []
-    for folder in candidates + [r.path for r in instance.repositories]:
+    for folder in candidates + folders:
         path = folder / "requirements.txt"
         if path.is_file() and path not in found:
             found.append(path)
     return found
 
 
-async def pip_install(job: Job, instance: Instance, args: list[str]) -> None:
+async def pip_install(job: Job, venv_bin: Path, args: list[str]) -> None:
     await run(
         job,
-        [instance.venv_bin / "python", "-m", "pip", "install", "--disable-pip-version-check", *args],
+        [venv_bin / "python", "-m", "pip", "install", "--disable-pip-version-check", *args],
         timeout=PIP_TIMEOUT,
     )
 
 
-async def install_requirements(job: Job, instance: Instance) -> None:
-    """pip install, in the instance's venv, the requirements of Odoo and of
-    every repository, in one resolution."""
-    files = requirement_files(instance)
+async def install_requirements(job: Job, venv_bin: Path, odoo_bin: Path | None,
+                               folders: list[Path]) -> None:
+    """pip install, in the venv, the requirements of Odoo and of every
+    repository folder, in one resolution."""
+    files = requirement_files(odoo_bin, folders)
     if not files:
         raise JobFailed("no requirements.txt next to odoo-bin nor in the repositories")
     job.log("--- requirements: " + ", ".join(str(f) for f in files))
-    await pip_install(job, instance, [arg for f in files for arg in ("-r", str(f))])
+    await pip_install(job, venv_bin, [arg for f in files for arg in ("-r", str(f))])
 
 
-async def install_cli(job: Job, instance: Instance) -> None:
-    """pip install the scripts OmniaCI runs in the instance's venv."""
-    job.log(f"--- {CLI_PACKAGE} in {instance.venv_bin}")
-    await pip_install(job, instance, [CLI_PACKAGE])
+async def install_cli(job: Job, venv_bin: Path) -> None:
+    """pip install the scripts OmniaCI runs in the venv."""
+    job.log(f"--- {CLI_PACKAGE} in {venv_bin}")
+    await pip_install(job, venv_bin, [CLI_PACKAGE])
 
 
 async def backup(job: Job, instance: Instance, backup_dir: Path) -> Path:
