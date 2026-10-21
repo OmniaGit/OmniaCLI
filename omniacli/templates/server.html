@@ -65,10 +65,10 @@
       <form method="post" action="{{ prefix }}/servers/{{ server.name }}/{{ inst.role }}/backup?download=1">
         <button {% if busy[inst.key] %}disabled{% endif %} title="Back up the database and filestore, then download the zip">Backup + download</button></form>
       <form method="post" action="{{ prefix }}/servers/{{ server.name }}/{{ inst.role }}/pip-requirements"
-            onsubmit="return confirm('pip install, in {{ inst.venv_bin }}, the requirements.txt of Odoo and of every repository of {{ inst.key }}?')">
+            onsubmit="return confirm('pip install, in {{ inst.venv_bin }}{% if inst.run_as %} as {{ inst.run_as }}{% endif %}, the requirements.txt of Odoo and of every repository of {{ inst.key }}?')">
         <button {% if busy[inst.key] %}disabled{% endif %} title="pip install the requirements.txt of Odoo and of the repositories in the venv">pip requirements</button></form>
       <form method="post" action="{{ prefix }}/servers/{{ server.name }}/{{ inst.role }}/pip-cli"
-            onsubmit="return confirm('pip install click-odoo-contrib in {{ inst.venv_bin }}?')">
+            onsubmit="return confirm('pip install click-odoo-contrib in {{ inst.venv_bin }}{% if inst.run_as %} as {{ inst.run_as }}{% endif %}?')">
         <button {% if busy[inst.key] %}disabled{% endif %} title="pip install click-odoo-contrib, the scripts OmniaCLI runs in the venv">pip click-odoo</button></form>
     </div>
 

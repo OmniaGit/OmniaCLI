@@ -27,6 +27,7 @@ from .auth import Authenticator, Principal, hash_password, hash_token, new_token
 from .config import (
     ROLES,
     SERVER_NAME,
+    USER_NAME,
     Access,
     ConfigError,
     Instance,
@@ -405,7 +406,8 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
                 [instance.key],
                 f"manual: {user}",
                 lambda job: ops.install_requirements(
-                    job, instance.venv_bin, instance.odoo_bin, [r.path for r in instance.repositories]),
+                    job, instance.venv_bin, instance.odoo_bin, [r.path for r in instance.repositories],
+                    instance.run_as),
             )
         )
 
@@ -419,7 +421,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
                 f"pip install {ops.CLI_PACKAGE} {instance.key}",
                 [instance.key],
                 f"manual: {user}",
-                lambda job: ops.install_cli(job, instance.venv_bin),
+                lambda job: ops.install_cli(job, instance.venv_bin, instance.run_as),
             )
         )
 
@@ -438,15 +440,18 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         odoo_bin = Path(odoo_text) if odoo_text else None
         folders = [Path(str(p).strip()) for p in payload.get("repositories") or [] if str(p).strip()]
         folders = [p for p in folders if p.is_absolute() and p.is_dir()]
+        run_as = str(payload.get("run_as") or "").strip() or None
+        if run_as is not None and not USER_NAME.fullmatch(run_as):
+            return JSONResponse({"error": f"{run_as!r} is not a user name"}, status_code=400)
         name, role = str(payload.get("name") or "").strip(), str(payload.get("role") or "")
         # the instance's key when the form names one: its jobs wait for each other
         key = f"{name if SERVER_NAME.fullmatch(name) else 'form'}/{role if role in ROLES else 'venv'}"
         if kind == "requirements":
             job = jobs.submit(f"pip install requirements {key}", [key], f"manual: {user}",
-                              lambda job: ops.install_requirements(job, venv_bin, odoo_bin, folders))
+                              lambda job: ops.install_requirements(job, venv_bin, odoo_bin, folders, run_as))
         else:
             job = jobs.submit(f"pip install {ops.CLI_PACKAGE} {key}", [key], f"manual: {user}",
-                              lambda job: ops.install_cli(job, venv_bin))
+                              lambda job: ops.install_cli(job, venv_bin, run_as))
         return {"job": job.id}
 
     @app.get("/api/servers/{server}/{role}/addons")

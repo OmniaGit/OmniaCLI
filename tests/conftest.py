@@ -1,3 +1,4 @@
+import os
 import subprocess
 from pathlib import Path
 
@@ -78,6 +79,26 @@ def fake_venv(tmp_path) -> Path:
     for script in bin_dir.iterdir():
         script.chmod(0o755)
     return bin_dir
+
+
+@pytest.fixture
+def fake_sudo(monkeypatch, tmp_path):
+    """A sudo first in ops' PATH: it records its arguments, answers -l with
+    yes, sets the VAR=value it is given and runs the command as this user."""
+    bin_dir = tmp_path / "sudo-bin"
+    bin_dir.mkdir()
+    calls = tmp_path / "sudo.log"
+    (bin_dir / "sudo").write_text(
+        f'#!/bin/sh\necho "sudo $*" >> {calls}\n'
+        'while [ $# -gt 0 ]; do case "$1" in\n'
+        '  -n) shift ;;\n  -u) shift 2 ;;\n  -l) exit 0 ;;\n'
+        '  *=*) export "$1"; shift ;;\n  *) break ;;\n'
+        'esac; done\nexec "$@"\n')
+    (bin_dir / "sudo").chmod(0o755)
+    from omniacli import ops
+
+    monkeypatch.setitem(ops._ENV, "PATH", f"{bin_dir}{os.pathsep}{ops._ENV.get('PATH', '')}")
+    return calls
 
 
 @pytest.fixture

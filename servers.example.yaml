@@ -13,6 +13,10 @@ servers:
       # odoo-bin, for the update of chosen modules; omitted: the odoo-bin found
       # at the root of one of the repositories below
       odoo_bin: /opt/odoo/customer_a/prod/odoo/odoo-bin
+      # the system user the venv's programs run as (sudo -n -u): the user of
+      # the Odoo service, for its database login, filestore and venv;
+      # omitted: the user running OmniaCLI. See README, Permissions
+      run_as: odoo
       restart:
         type: systemd          # systemd -> systemctl restart <service>
         service: odoo-customer-a

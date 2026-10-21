@@ -1,4 +1,5 @@
 import datetime
+from pathlib import Path
 
 import pytest
 
@@ -12,6 +13,7 @@ from omniacli.config import (
     parse_auth,
     parse_settings,
     save_servers,
+    server_to_dict,
 )
 
 T = datetime.time
@@ -60,6 +62,22 @@ def test_parse_ok():
 def test_test_repository_needs_production_pair():
     with pytest.raises(ConfigError, match="plm"):
         parse_servers(_settings(["odoo"], ["odoo", "plm"]))
+
+
+def test_run_as():
+    data = _settings(["odoo"], ["odoo"])
+    data["s"]["test"]["run_as"] = "odoo"
+    servers = parse_servers(data)
+    assert servers["s"].test.run_as == "odoo" and servers["s"].production.run_as is None
+    saved = server_to_dict(servers["s"])
+    assert saved["test"]["run_as"] == "odoo" and "run_as" not in saved["production"]
+    data["s"]["test"]["run_as"] = "odoo; rm"
+    with pytest.raises(ConfigError, match="not a user name"):
+        parse_servers(data)
+    data["s"]["test"]["run_as"] = "odoo"
+    data["s"]["test"]["restart"] = {"type": "process"}
+    with pytest.raises(ConfigError, match="not available with restart type process"):
+        parse_servers(data, Path("/logs"))
 
 
 def test_bad_restart_type():

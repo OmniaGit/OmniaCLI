@@ -8,8 +8,10 @@ import datetime
 import os
 import re
 import shlex
+import shutil
 import signal
 import subprocess
+import tempfile
 from pathlib import Path
 
 from .config import Instance, Repository, Server
@@ -27,8 +29,33 @@ START_WAIT = 5
 STOP_TIMEOUT = 60
 # pip may build packages from source (psycopg2, lxml...)
 PIP_TIMEOUT = 1800
+# a command past its timeout gets SIGTERM (sudo passes it on to the command,
+# SIGKILL it cannot), then SIGKILL after these seconds
+KILL_WAIT = 10
+# a backup made as an instance's run_as user is written here first: that
+# user cannot write in the backup folder (on disk: /tmp may be in memory)
+BACKUP_STAGING = Path("/var/tmp")
 # what OmniaCLI runs in an instance's venv: click-odoo-update, click-odoo-backupdb
 CLI_PACKAGE = "click-odoo-contrib"
+
+
+def as_user(run_as: str | None, cmd: list, env: dict | None = None) -> list:
+    """cmd as the system user run_as, through sudo -n; sudo resets the
+    environment, so a PYTHONPATH of env goes on the command line (sudoers
+    needs SETENV for it)."""
+    if run_as is None:
+        return cmd
+    extra = [f"PYTHONPATH={env['PYTHONPATH']}"] if env and env.get("PYTHONPATH") else []
+    return ["sudo", "-n", "-u", run_as, *extra, *cmd]
+
+
+async def _terminate(proc: asyncio.subprocess.Process) -> None:
+    proc.terminate()
+    try:
+        await asyncio.wait_for(proc.wait(), KILL_WAIT)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
 
 
 async def run(
@@ -64,8 +91,7 @@ async def run(
     try:
         returncode = await asyncio.wait_for(stream(), timeout)
     except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
+        await _terminate(proc)
         raise JobFailed(f"{Path(str(cmd[0])).name} did not finish within {timeout:.0f} s")
     if check and returncode:
         raise JobFailed(f"{Path(str(cmd[0])).name} exited with code {returncode}")
@@ -92,8 +118,7 @@ async def capture(
     try:
         out, _ = await asyncio.wait_for(proc.communicate(), timeout)
     except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
+        await _terminate(proc)
         return 124, f"no answer within {timeout:.0f} s"
     return proc.returncode, out.decode(errors="replace").strip()
 
@@ -177,16 +202,17 @@ async def update_modules(job: Job, instance: Instance, force: bool = False) -> N
         job.log("Module update disabled for this instance")
         return
     job.log("--- update changed modules")
+    env = odoo_env(instance)
     await run(
         job,
-        [
+        as_user(instance.run_as, [
             instance.venv_bin / "click-odoo-update",
             "-c",
             instance.odoo_config,
             "-d",
             instance.database,
-        ],
-        env=odoo_env(instance),
+        ], env),
+        env=env,
     )
 
 
@@ -299,7 +325,7 @@ async def update_chosen_modules(job: Job, instance: Instance, modules: list[str]
     first_line = len(job.lines)
     await run(
         job,
-        [
+        as_user(instance.run_as, [
             instance.venv_bin / "python",
             odoo_bin,
             "-c",
@@ -312,7 +338,7 @@ async def update_chosen_modules(job: Job, instance: Instance, modules: list[str]
             "--workers=0",
             # log to the job, not to the instance's log file
             logfile_to_stdout(odoo_major(odoo_bin)),
-        ],
+        ]),
     )
     # Odoo only warns about a module it does not know and exits 0 (same
     # message in Odoo 10 to 20)
@@ -480,29 +506,29 @@ def requirement_files(odoo_bin: Path | None, folders: list[Path]) -> list[Path]:
     return found
 
 
-async def pip_install(job: Job, venv_bin: Path, args: list[str]) -> None:
+async def pip_install(job: Job, venv_bin: Path, args: list[str], run_as: str | None = None) -> None:
     await run(
         job,
-        [venv_bin / "python", "-m", "pip", "install", "--disable-pip-version-check", *args],
+        as_user(run_as, [venv_bin / "python", "-m", "pip", "install", "--disable-pip-version-check", *args]),
         timeout=PIP_TIMEOUT,
     )
 
 
 async def install_requirements(job: Job, venv_bin: Path, odoo_bin: Path | None,
-                               folders: list[Path]) -> None:
+                               folders: list[Path], run_as: str | None = None) -> None:
     """pip install, in the venv, the requirements of Odoo and of every
     repository folder, in one resolution."""
     files = requirement_files(odoo_bin, folders)
     if not files:
         raise JobFailed("no requirements.txt next to odoo-bin nor in the repositories")
     job.log("--- requirements: " + ", ".join(str(f) for f in files))
-    await pip_install(job, venv_bin, [arg for f in files for arg in ("-r", str(f))])
+    await pip_install(job, venv_bin, [arg for f in files for arg in ("-r", str(f))], run_as)
 
 
-async def install_cli(job: Job, venv_bin: Path) -> None:
+async def install_cli(job: Job, venv_bin: Path, run_as: str | None = None) -> None:
     """pip install the scripts OmniaCLI runs in the venv."""
-    job.log(f"--- {CLI_PACKAGE} in {venv_bin}")
-    await pip_install(job, venv_bin, [CLI_PACKAGE])
+    job.log(f"--- {CLI_PACKAGE} in {venv_bin}" + (f" as {run_as}" if run_as else ""))
+    await pip_install(job, venv_bin, [CLI_PACKAGE], run_as)
 
 
 async def backup(job: Job, instance: Instance, backup_dir: Path) -> Path:
@@ -511,17 +537,22 @@ async def backup(job: Job, instance: Instance, backup_dir: Path) -> Path:
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / f"{instance.database}_{stamp}.zip"
     job.log(f"--- backup database {instance.database} to {dest}")
-    await run(
-        job,
-        [
-            instance.venv_bin / "click-odoo-backupdb",
-            "-c",
-            instance.odoo_config,
-            instance.database,
-            dest,
-        ],
-        env=odoo_env(instance),
-    )
+    env = odoo_env(instance)
+    if instance.run_as is None:
+        await run(job, [instance.venv_bin / "click-odoo-backupdb", "-c", instance.odoo_config,
+                        instance.database, dest], env=env)
+        return dest
+    # run_as may create the file here (write and search) but not list the folder
+    staging = Path(tempfile.mkdtemp(prefix="omniacli-backup-", dir=BACKUP_STAGING))
+    try:
+        staging.chmod(0o733)
+        staged = staging / dest.name
+        await run(job, as_user(instance.run_as, [
+            instance.venv_bin / "click-odoo-backupdb", "-c", instance.odoo_config,
+            instance.database, staged], env), env=env)
+        shutil.move(staged, dest)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
     return dest
 
 

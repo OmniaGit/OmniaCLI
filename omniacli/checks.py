@@ -103,18 +103,22 @@ async def _instance_checks(instance: Instance) -> list[Check]:
         ok = os.access(path, os.X_OK)
         add(script, ok, str(path) if ok else
             f"{path} not found: pip install click-odoo-contrib in that venv")
+    if instance.run_as is not None:
+        checks.extend(await _run_as_checks(instance))
+    env = ops.odoo_env(instance)
     code, out = await ops.capture(
-        [instance.venv_bin / "python", "-c",
-         "import click_odoo, odoo; print('Odoo', odoo.release.version)"],
+        ops.as_user(instance.run_as, [instance.venv_bin / "python", "-c",
+                                      "import click_odoo, odoo; print('Odoo', odoo.release.version)"], env),
         timeout=PYTHON_TIMEOUT,
-        env=ops.odoo_env(instance),
+        env=env,
     )
     add("Odoo importable by click-odoo", code == 0,
         out.splitlines()[-1] if out else f"exit code {code}")
 
     # database
     code, out = await ops.capture(
-        [instance.venv_bin / "python", "-c", _DB_PROBE, instance.odoo_config, instance.database],
+        ops.as_user(instance.run_as,
+                    [instance.venv_bin / "python", "-c", _DB_PROBE, instance.odoo_config, instance.database]),
         timeout=PYTHON_TIMEOUT,
     )
     add("Database", code == 0,
@@ -204,6 +208,24 @@ async def _instance_checks(instance: Instance) -> list[Check]:
             f"runs '{' '.join(command)}' without sudo: not tried, it would restart the service",
             WARNING)
     return checks
+
+
+async def _run_as_checks(instance: Instance) -> list[Check]:
+    """The user exists, and sudo lets this one run the venv's programs as it,
+    setting PYTHONPATH (SETENV), without a password."""
+    import pwd
+
+    try:
+        pwd.getpwnam(instance.run_as)
+    except KeyError:
+        return [Check(instance.role, "Run as", False, f"no system user {instance.run_as}")]
+    python = instance.venv_bin / "python"
+    code, _ = await ops.capture(["sudo", "-n", "-l", "-u", instance.run_as, python])
+    line = f"{_user()} ALL=({instance.run_as}) NOPASSWD:SETENV: {instance.venv_bin}/"
+    return [Check(instance.role, "Run as", code == 0,
+                  f"sudo runs the venv's programs as {instance.run_as}" if code == 0 else
+                  f"sudo refuses to run {python} as {instance.run_as} or asks a password; "
+                  f"add to /etc/sudoers.d/omniacli: {line}")]
 
 
 def _user() -> str:

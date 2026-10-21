@@ -20,6 +20,8 @@ RESTART_TYPES = ("systemd", "initd", "process")
 # a server name is part of URLs and of the job keys
 SERVER_STATUSES = ("active", "draft")
 SERVER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+# the system user an instance's venv commands run as (sudo -u)
+USER_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]*\$?")
 
 
 class ConfigError(Exception):
@@ -87,6 +89,10 @@ class Instance:
     auto_update: AutoUpdate = field(default_factory=AutoUpdate)
     # odoo-bin for the update of chosen modules; None: look in the repositories
     odoo_bin: Path | None = None
+    # the system user the venv's commands run as, through sudo -n -u (the
+    # user of the Odoo service: its database login, filestore and venv);
+    # None: as the user running OmniaCLI. git always runs as that user.
+    run_as: str | None = None
 
     @property
     def keeps_local_changes(self) -> bool:
@@ -288,6 +294,14 @@ def _parse_instance(server: str, role: str, data: dict, logs_dir: Path | None) -
     else:
         log_file = Path(_require(data, "log_file", where))
         service = str(_require(restart, "service", f"{where}.restart"))
+    run_as = str(data.get("run_as") or "").strip() or None
+    if run_as is not None:
+        if not USER_NAME.fullmatch(run_as):
+            raise ConfigError(f"{where}.run_as: {run_as!r} is not a user name")
+        if restart_type == "process":
+            # OmniaCLI stops its own Odoo with a signal, which it may not send
+            # to another user's process
+            raise ConfigError(f"{where}.run_as: not available with restart type process")
     return Instance(
         server=server,
         role=role,
@@ -304,6 +318,7 @@ def _parse_instance(server: str, role: str, data: dict, logs_dir: Path | None) -
         update_modules=bool(data.get("update_modules", True)),
         auto_update=_parse_auto_update(data.get("auto_update"), f"{where}.auto_update"),
         odoo_bin=Path(data["odoo_bin"]) if data.get("odoo_bin") else None,
+        run_as=run_as,
     )
 
 
@@ -374,6 +389,8 @@ def instance_to_dict(instance: Instance) -> dict:
         data["auto_update"]["window"] = auto.window_label()
     if instance.odoo_bin is not None:
         data["odoo_bin"] = str(instance.odoo_bin)
+    if instance.run_as is not None:
+        data["run_as"] = instance.run_as
     if instance.restart.type == "process":
         # both follow from the type: the log is OmniaCLI's, there is no service
         del data["log_file"], data["restart"]["service"], data["restart"]["sudo"]

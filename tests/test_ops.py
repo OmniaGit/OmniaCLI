@@ -150,6 +150,57 @@ async def test_merge_refuses_unpushed_tested_commit(env):
         await ops.merge_to_production(job(), server, settings.backup_dir)
 
 
+def run_as(instance, user="odoo"):
+    import dataclasses
+
+    return dataclasses.replace(instance, run_as=user)
+
+
+async def test_run_as_update(env, fake_sudo):
+    test = env["settings"].instance("srv", "test")
+    odoo_bin = env["tmp"] / "odoo-src" / "odoo-bin"
+    odoo_bin.parent.mkdir()
+    odoo_bin.write_text("")
+    test = run_as(test)
+    test.odoo_bin = odoo_bin
+    await ops.update_modules(job(), test)
+    sudo = fake_sudo.read_text()
+    # PYTHONPATH reaches the command through sudo's command line
+    assert f"sudo -n -u odoo PYTHONPATH={odoo_bin.parent}" in sudo
+    assert f"{test.venv_bin}/click-odoo-update -c" in sudo
+    assert "update -c" in env["calls"].read_text()
+
+
+async def test_run_as_backup_is_staged(env, fake_sudo, monkeypatch):
+    staging = env["tmp"] / "staging"
+    staging.mkdir()
+    monkeypatch.setattr(ops, "BACKUP_STAGING", staging)
+    prod = run_as(env["settings"].instance("srv", "production"))
+    dest = await ops.backup(job(), prod, env["settings"].backup_dir)
+    assert dest.parent == env["settings"].backup_dir / "srv" / "production" and dest.read_text() == "dump\n"
+    sudo = fake_sudo.read_text()
+    assert "sudo -n -u odoo " in sudo and f"{staging}/omniacli-backup-" in sudo
+    assert list(staging.iterdir()) == []  # the staging folder is removed
+
+
+async def test_run_as_pip(env, fake_sudo):
+    venv_bin = env["settings"].instance("srv", "test").venv_bin
+    (venv_bin / "python").write_text('#!/bin/sh\necho "python $*"\n')
+    (venv_bin / "python").chmod(0o755)
+    j = job()
+    await ops.install_cli(j, venv_bin, "odoo")
+    assert f"sudo -n -u odoo {venv_bin}/python -m pip install --disable-pip-version-check click-odoo-contrib" \
+        in fake_sudo.read_text()
+    assert any(line.endswith(" python -m pip install --disable-pip-version-check click-odoo-contrib")
+               for line in j.lines)
+
+
+async def test_run_timeout_kills_what_ignores_sigterm(monkeypatch):
+    monkeypatch.setattr(ops, "KILL_WAIT", 0.2)
+    with pytest.raises(JobFailed, match="did not finish"):
+        await ops.run(job(), ["sh", "-c", 'trap "" TERM; exec sleep 30'], timeout=0.2)
+
+
 async def test_run_timeout():
     j = job()
     with pytest.raises(JobFailed, match="did not finish"):

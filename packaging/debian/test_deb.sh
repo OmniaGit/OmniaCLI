@@ -146,6 +146,92 @@ assert info["source"] == "systemd unit odoo-dummy", info["source"]
 assert info["points"][-1]["procs"] == 1 and info["points"][-1]["mem"] > 0
 PY
 
+step "run_as: the venv's programs as user odoo, its database through peer"
+apt-get install -y -qq postgresql python3-psycopg2 > /tmp/pg.log 2>&1 || { tail -20 /tmp/pg.log; fail "postgresql install"; }
+for i in $(seq 30); do su postgres -c 'psql -qAtc "select 1"' >/dev/null 2>&1 && break; sleep 1; done
+adduser --quiet --system --group --home /var/lib/odoo odoo
+su postgres -c "createuser odoo && createdb -O odoo DEMO_RUNAS"
+sudo -u odoo psql -q -d DEMO_RUNAS -c "CREATE TABLE ir_module_module (name varchar, latest_version varchar);
+  INSERT INTO ir_module_module VALUES ('base', '18.0.1.0');" || fail "database of user odoo"
+# an Odoo source folder: odoo-bin, an importable odoo, a requirements.txt
+mkdir -p /srv/odoo-src/odoo
+touch /srv/odoo-src/odoo-bin
+echo 'from . import release' > /srv/odoo-src/odoo/__init__.py
+echo 'version = "18.0"' > /srv/odoo-src/odoo/release.py
+echo six > /srv/odoo-src/requirements.txt
+printf '[options]\n' > /srv/runas.conf
+# the venv belongs to odoo; its click-odoo scripts tell who runs them
+install -d -o odoo -g odoo /srv/runas-venv
+sudo -u odoo python3 -m venv --system-site-packages /srv/runas-venv
+SITE="$(sudo -u odoo /srv/runas-venv/bin/python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
+echo 'print("click_odoo stub")' | sudo -u odoo tee "$SITE/click_odoo.py" >/dev/null
+sudo -u odoo tee /srv/runas-venv/bin/click-odoo-update >/dev/null <<'EOF'
+#!/bin/sh
+echo "update as $(id -un), PYTHONPATH=$PYTHONPATH, HOME=$HOME"
+EOF
+sudo -u odoo tee /srv/runas-venv/bin/click-odoo-backupdb >/dev/null <<'EOF'
+#!/bin/sh
+for last; do :; done
+echo "backup as $(id -un) to $last"
+echo dump > "$last"
+EOF
+chmod 755 /srv/runas-venv/bin/click-odoo-update /srv/runas-venv/bin/click-odoo-backupdb
+curl "${API[@]}" localhost:8090/api/servers/save -d '{"original": null, "name": "runas", "server": {"test": {
+  "database": "DEMO_RUNAS", "odoo_config": "/srv/runas.conf", "log_file": "/srv/odoo.log", "venv_bin": "/srv/runas-venv/bin",
+  "odoo_bin": "/srv/odoo-src/odoo-bin", "run_as": "odoo",
+  "restart": {"type": "systemd", "service": "odoo-dummy", "sudo": true},
+  "repositories": [{"name": "odoo", "path": "/srv/odoo", "branch": "main"}]}}}' | grep -q '"ok":true' \
+  || fail "run_as server not saved"
+runas_checks() {
+    curl "${API[@]}" -X POST localhost:8090/api/servers/runas/test > /tmp/runas.json
+    python3 - "$@" <<'PY'
+import json, sys
+data = json.load(open("/tmp/runas.json"))
+checks = {c["name"]: c for c in data["checks"] if c["target"] == "test"}
+for name in ("Run as", "Odoo importable by click-odoo", "Database"):
+    print(("ok  " if checks[name]["ok"] else "erro"), name, "-", checks[name]["detail"])
+if sys.argv[1:] == ["first"]:
+    assert not checks["Run as"]["ok"], "Run as passed without a sudoers line"
+    print(checks["Run as"]["detail"].split("add to /etc/sudoers.d/omniacli: ", 1)[1], file=open("/tmp/line", "w"))
+else:
+    bad = [n for n, c in checks.items() if not c["ok"] and c["level"] == "error"]
+    assert not bad, bad
+    assert data["status"] == "active", data["status"]
+PY
+}
+runas_checks first || fail "run_as checks without sudoers"
+# the line the check asks for, as is
+cat /tmp/line >> /etc/sudoers.d/omniacli
+visudo -cf /etc/sudoers.d/omniacli >/dev/null || fail "sudoers invalid with the run_as line"
+runas_checks || fail "run_as checks with the sudoers line"
+wait_job() {
+    local job="$1" status
+    for i in $(seq 120); do
+        status="$(curl -s -u "admin:$PW" "localhost:8090/api/jobs/$job" | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])')"
+        case "$status" in success|failed|interrupted) break ;; esac
+        sleep 1
+    done
+    curl -s -u "admin:$PW" "localhost:8090/api/jobs/$job" | python3 -c 'import json,sys; print("\n".join(json.load(sys.stdin)["lines"]))' > /tmp/job.log
+    [ "$status" = success ] || { cat /tmp/job.log; return 1; }
+}
+JOB="$(curl "${API[@]}" localhost:8090/api/servers/runas/test/update -d '{"mode": "changed"}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["job"])')"
+wait_job "$JOB" || fail "update as odoo"
+grep -q "update as odoo, PYTHONPATH=/srv/odoo-src" /tmp/job.log || { cat /tmp/job.log; fail "update not run as odoo with PYTHONPATH"; }
+grep -o 'update as .*' /tmp/job.log
+LOCATION="$(curl "${API[@]}" -o /dev/null -w '%{redirect_url}' -X POST localhost:8090/servers/runas/test/backup)"
+wait_job "${LOCATION##*/}" || fail "backup as odoo"
+grep -o 'backup as .*' /tmp/job.log
+BACKUP="$(ls /var/lib/omniacli/backups/runas/test/)"
+[ "$(cat "/var/lib/omniacli/backups/runas/test/$BACKUP")" = dump ] || fail "backup file"
+ls /var/tmp | grep -q omniacli-backup && fail "backup staging folder left in /var/tmp"
+[ "$(curl -s -u "admin:$PW" "localhost:8090/backups/runas/test/$BACKUP")" = dump ] || fail "backup made as odoo not downloadable"
+LOCATION="$(curl "${API[@]}" -o /dev/null -w '%{redirect_url}' -X POST localhost:8090/servers/runas/test/pip-requirements)"
+wait_job "${LOCATION##*/}" || fail "pip requirements as odoo"
+[ "$(stat -c %U "$SITE/six.py")" = odoo ] || fail "six not installed by odoo"
+echo "update, backup ($(stat -c '%U %a' "/var/lib/omniacli/backups/runas/test/$BACKUP")) and pip ran as odoo"
+# purge keeps the backups: this one goes, so the purge below removes everything
+rm -rf /var/lib/omniacli/backups/runas
+
 step "reinstall keeps config, servers and password"
 HASH_BEFORE="$(sha256sum /etc/omniacli/omniacli.yaml)"
 dpkg -i /opt/omniacli-test/omniacli.deb > /tmp/reinstall.log 2>&1 || { tail -20 /tmp/reinstall.log; fail "reinstall"; }

@@ -266,6 +266,23 @@ The user that runs OmniaCLI needs:
 - read access to the Odoo config and log files.
 - a database connection: `click-odoo-*` connect with the settings of the
   instance's Odoo config file.
+- **or**, with `run_as: <user>` on the instance (the user of the Odoo
+  service, usually `odoo`), the right to run the venv's programs as that
+  user: `click-odoo-update`, `click-odoo-backupdb`, `odoo-bin -u`, pip and the
+  checks then run as `sudo -n -u <user>`, so the database is reached as that
+  user (PostgreSQL `peer` login on the socket included), and so are the
+  filestore and the venv. git still runs as OmniaCLI's user. The venv's
+  folder in sudoers allows its programs, `SETENV` passes `PYTHONPATH` (the
+  folder of `odoo-bin`); the **Run as** check prints the line:
+
+  ```
+  omniacli ALL=(odoo) NOPASSWD:SETENV: /opt/odoo/venvs/odoo18/bin/
+  ```
+
+  A backup made as that user is written in `/var/tmp` first, then moved
+  into the backup folder. Not with restart type `process`: OmniaCLI stops
+  its own Odoo with a signal, which it may not send to another user's
+  process.
 - the right to restart the services without a password. With `sudo: true`
   (the default), the command runs as `sudo -n`. sudoers needs the full path
   that `command -v systemctl` prints on that machine. Example
