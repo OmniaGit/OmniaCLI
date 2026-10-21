@@ -1,25 +1,25 @@
-# OmniaCI configuration. Copy to omniaci.yaml and adapt.
+# OmniaCLI configuration. Copy to omniacli.yaml and adapt.
 
 auth:
   users:
-    # value from: omniaci hash-password; a bare hash is an admin
+    # value from: omniacli hash-password; a bare hash is an admin
     admin: "pbkdf2_sha256$600000$<salt>$<hash>"
     # or with a role: user (watches), developer (acts on the servers), admin
     # anna: {password: "pbkdf2_sha256$600000$<salt>$<hash>", role: developer}
-  # other OmniaCI instances let in to operate this one: omniaci new-link-token
+  # other OmniaCLI instances let in to operate this one: omniacli new-link-token
   # links:
   #   omniasolutions: {token: "sha256$<hash>", role: developer}
 
 # backups go to <backup_dir>/<server>/<production|test>/<database>_<timestamp>.zip
-backup_dir: /var/backups/omniaci
+backup_dir: /var/backups/omniacli
 # one JSON file per job (log and result), the last 500 are kept
-jobs_dir: /var/lib/omniaci/jobs
+jobs_dir: /var/lib/omniacli/jobs
 
 # The servers are kept in their own file, edited from the web interface
 # (Configuration page). A relative path is relative to this file.
-servers_file: /var/lib/omniaci/servers.yaml
+servers_file: /var/lib/omniacli/servers.yaml
 # Edited from the web interface (Users and Links pages); by default next to
 # the servers file:
-# users_file: /var/lib/omniaci/users.yaml
-# links_file: /var/lib/omniaci/links.yaml
-# groups_file: /var/lib/omniaci/groups.yaml
+# users_file: /var/lib/omniacli/users.yaml
+# links_file: /var/lib/omniacli/links.yaml
+# groups_file: /var/lib/omniacli/groups.yaml

@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}{{ title }} · OmniaCI{% endblock %}
+{% block title %}{{ title }} · OmniaCLI{% endblock %}
 {% block crumbs %}{% from "_crumbs.html" import crumbs with context %}
 {{ crumbs([("Configuration", "/config"), (title, None)]) }}
 {% endblock %}
@@ -44,11 +44,11 @@
         <div class="with-button"><input type="text" data-k="venv_bin" class="mono">
           <span class="pip-buttons" hidden>
             <button type="button" data-pip="requirements" title="pip install, in this venv, the requirements.txt of Odoo and of the repositories below">pip requirements</button>
-            <button type="button" data-pip="cli" title="pip install click-odoo-contrib, the scripts OmniaCI runs, in this venv">pip click-odoo</button>
+            <button type="button" data-pip="cli" title="pip install click-odoo-contrib, the scripts OmniaCLI runs, in this venv">pip click-odoo</button>
           </span></div>
         <label>odoo-bin (update of chosen modules)</label><input type="text" data-k="odoo_bin" class="mono" placeholder="empty: odoo-bin found in a repository">
         <label>Restart with</label>
-        <select data-k="restart.type"><option value="systemd">systemd</option><option value="initd">init.d</option><option value="process">OmniaCI starts odoo-bin itself</option></select>
+        <select data-k="restart.type"><option value="systemd">systemd</option><option value="initd">init.d</option><option value="process">OmniaCLI starts odoo-bin itself</option></select>
         <label>Service name</label><input type="text" data-k="restart.service">
         <label>Use sudo -n</label><input type="checkbox" data-k="restart.sudo">
         <label>Update changed modules</label><input type="checkbox" data-k="update_modules">
@@ -131,7 +131,7 @@ for (const role of ROLES) {
   boxes[role] = box;
 }
 
-// With restart type process OmniaCI starts odoo-bin itself: no service, and
+// With restart type process OmniaCLI starts odoo-bin itself: no service, and
 // the log is the output it collects.
 function processFields(box) {
   const process = box.querySelector('[data-k="restart.type"]').value === "process";

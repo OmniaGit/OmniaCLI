@@ -1,6 +1,6 @@
 import sys
 
-from omniaci import checks
+from omniacli import checks
 
 
 def by_name(report, target, name):
@@ -69,7 +69,7 @@ def test_passed_ignores_warnings():
 
 
 async def test_process_type_checks(tmp_path):
-    from omniaci import checks
+    from omniacli import checks
 
     from .test_ops import process_instance
 

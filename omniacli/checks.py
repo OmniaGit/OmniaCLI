@@ -1,8 +1,8 @@
 """The checks "Test & activate" runs before a server goes live.
 
 Every check looks at the real thing (the file, the database, the remote, the
-service, sudo) as the user running OmniaCI, so a server that passes can be
-operated by OmniaCI.
+service, sudo) as the user running OmniaCLI, so a server that passes can be
+operated by OmniaCLI.
 """
 
 from __future__ import annotations
@@ -127,7 +127,7 @@ async def _instance_checks(instance: Instance) -> list[Check]:
         major = ops.odoo_major(odoo_bin)
         add("odoo-bin", True, f"{odoo_bin}" + (f" (Odoo {major})" if major else ""), WARNING)
     elif process:
-        add("odoo-bin", False, "not found: OmniaCI cannot start Odoo; set odoo_bin")
+        add("odoo-bin", False, "not found: OmniaCLI cannot start Odoo; set odoo_bin")
     else:
         add("odoo-bin", False,
             "not found: the update of chosen modules will not work; set odoo_bin", WARNING)
@@ -173,10 +173,10 @@ async def _instance_checks(instance: Instance) -> list[Check]:
         others = ops.foreign_pids(instance, own)
         if others:
             add("Odoo process", False,
-                f"running with {instance.odoo_config} but not started by OmniaCI "
+                f"running with {instance.odoo_config} but not started by OmniaCLI "
                 f"(pid {', '.join(map(str, others))}): Restart refuses to start a second one")
         elif own is not None:
-            add("Odoo process", True, f"started by OmniaCI, pid {own}")
+            add("Odoo process", True, f"started by OmniaCLI, pid {own}")
         else:
             add("Odoo process", False, "not running: Restart starts it", WARNING)
         return checks
@@ -197,7 +197,7 @@ async def _instance_checks(instance: Instance) -> list[Check]:
         executable = shutil.which(command[2]) or command[2]
         add("Restart permission", code == 0,
             "sudo allows it without a password" if code == 0 else
-            "sudo refuses it or asks a password; add to /etc/sudoers.d/omniaci: "
+            "sudo refuses it or asks a password; add to /etc/sudoers.d/omniacli: "
             f"{_user()} ALL=(root) NOPASSWD: {' '.join([executable, *command[3:]])}")
     else:
         add("Restart permission", True,
@@ -212,7 +212,7 @@ def _user() -> str:
 
         return pwd.getpwuid(os.getuid()).pw_name
     except (ImportError, KeyError):
-        return os.environ.get("USER", "omniaci")
+        return os.environ.get("USER", "omniacli")
 
 
 async def check_server(server: Server, backup_dir: Path) -> list[Check]:

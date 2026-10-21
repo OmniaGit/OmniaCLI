@@ -1,11 +1,11 @@
 #!/bin/sh
 set -e
 
-VENV=/opt/omniaci/venv
-CONFIG=/etc/omniaci/omniaci.yaml
-PASSWORD_FILE=/etc/omniaci/initial-admin-password
+VENV=/opt/omniacli/venv
+CONFIG=/etc/omniacli/omniacli.yaml
+PASSWORD_FILE=/etc/omniacli/initial-admin-password
 
-BUNDLED=/opt/omniaci/python
+BUNDLED=/opt/omniacli/python
 # The Python for a machine without any python3.10+ (Debian 11 has 3.9): a
 # python-build-standalone build, downloaded once and checked against its sha256
 BUNDLED_URL=https://github.com/astral-sh/python-build-standalone/releases/download/20261020/cpython-3.12.15%2B20261020-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz
@@ -23,11 +23,11 @@ print("py%d%d" % sys.version_info[:2])' 2>/dev/null
 fetch_bundled() {
     [ "$(cat "$BUNDLED/.sha256" 2>/dev/null)" = "$BUNDLED_SHA256" ] && return 0
     if [ "$(uname -m)" != x86_64 ]; then
-        echo "omniaci: no python3.10 or newer here, and the bundled Python is for x86_64 only: install python3.10+" >&2
+        echo "omniacli: no python3.10 or newer here, and the bundled Python is for x86_64 only: install python3.10+" >&2
         exit 1
     fi
-    echo "omniaci: $(python3 -V 2>&1) and no python3.10+ here: downloading Python 3.12 into $BUNDLED"
-    tmp=$(mktemp -d /opt/omniaci/.python.XXXXXX)
+    echo "omniacli: $(python3 -V 2>&1) and no python3.10+ here: downloading Python 3.12 into $BUNDLED"
+    tmp=$(mktemp -d /opt/omniacli/.python.XXXXXX)
     if ! python3 - "$BUNDLED_URL" "$BUNDLED_SHA256" "$tmp/python.tar.gz" <<'EOF'
 import hashlib, sys, urllib.request
 url, sha256, dest = sys.argv[1:]
@@ -41,7 +41,7 @@ if digest.hexdigest() != sha256:
 EOF
     then
         rm -rf "$tmp"
-        echo "omniaci: Python could not be downloaded from $BUNDLED_URL (is github.com reachable?)" >&2
+        echo "omniacli: Python could not be downloaded from $BUNDLED_URL (is github.com reachable?)" >&2
         exit 1
     fi
     tar -xzf "$tmp/python.tar.gz" -C "$tmp"
@@ -61,12 +61,12 @@ pick_python() {
               /usr/local/bin/python3.11 /usr/local/bin/python3.10; do
         py_bin=$(command -v "$py") || continue
         pyver=$(usable "$py_bin") || continue
-        [ -f "/opt/omniaci/requirements/$pyver.txt" ] && return 0
+        [ -f "/opt/omniacli/requirements/$pyver.txt" ] && return 0
     done
     fetch_bundled
     py_bin="$BUNDLED/bin/python3"
-    pyver=$(usable "$py_bin") && [ -f "/opt/omniaci/requirements/$pyver.txt" ] && return 0
-    echo "omniaci: the bundled Python $py_bin cannot build the venv" >&2
+    pyver=$(usable "$py_bin") && [ -f "/opt/omniacli/requirements/$pyver.txt" ] && return 0
+    echo "omniacli: the bundled Python $py_bin cannot build the venv" >&2
     exit 1
 }
 
@@ -74,19 +74,19 @@ pick_python() {
 # The previous venv (and bundled Python) is kept until the new one is complete.
 build_venv() {
     pick_python
-    lock="/opt/omniaci/requirements/$pyver.txt"
+    lock="/opt/omniacli/requirements/$pyver.txt"
     rm -rf "$VENV.old"
     [ -d "$VENV" ] && mv "$VENV" "$VENV.old"
-    echo "omniaci: installing the Python dependencies ($py_bin, $pyver) in $VENV"
+    echo "omniacli: installing the Python dependencies ($py_bin, $pyver) in $VENV"
     if "$py_bin" -m venv "$VENV" \
         && "$VENV/bin/pip" install -q --disable-pip-version-check --no-cache-dir -r "$lock" \
         && "$VENV/bin/pip" install -q --disable-pip-version-check --no-cache-dir --no-deps \
-            /opt/omniaci/dist/omniaci-*.whl; then
+            /opt/omniacli/dist/omniacli-*.whl; then
         rm -rf "$VENV.old" "$BUNDLED.old"
         # a local Python took the place of the bundled one
         case "$py_bin" in "$BUNDLED"/*) ;; *) rm -rf "$BUNDLED" ;; esac
     else
-        echo "omniaci: the venv could not be built (is PyPI reachable?)" >&2
+        echo "omniacli: the venv could not be built (is PyPI reachable?)" >&2
         rm -rf "$VENV"
         [ -d "$VENV.old" ] && mv "$VENV.old" "$VENV"
         if [ -d "$BUNDLED.old" ]; then
@@ -102,28 +102,28 @@ build_venv() {
 create_config() {
     [ -e "$CONFIG" ] && return 0
     password=$("$VENV/bin/python" -c 'import secrets; print(secrets.token_urlsafe(12))')
-    hash=$(OMNIACI_PW="$password" "$VENV/bin/python" -c \
-        'import os; from omniaci.auth import hash_password; print(hash_password(os.environ["OMNIACI_PW"]))')
-    install -d -m 755 /etc/omniaci
+    hash=$(OMNIACLI_PW="$password" "$VENV/bin/python" -c \
+        'import os; from omniacli.auth import hash_password; print(hash_password(os.environ["OMNIACLI_PW"]))')
+    install -d -m 755 /etc/omniacli
     umask 027
-    sed "s|@ADMIN_HASH@|$hash|" /usr/share/omniaci/omniaci.yaml.in > "$CONFIG.tmp"
-    chgrp omniaci "$CONFIG.tmp"
+    sed "s|@ADMIN_HASH@|$hash|" /usr/share/omniacli/omniacli.yaml.in > "$CONFIG.tmp"
+    chgrp omniacli "$CONFIG.tmp"
     chmod 640 "$CONFIG.tmp"
     mv "$CONFIG.tmp" "$CONFIG"
     umask 077
     echo "$password" > "$PASSWORD_FILE"
     umask 022
-    echo "omniaci: user 'admin', password in $PASSWORD_FILE (readable by root only)"
+    echo "omniacli: user 'admin', password in $PASSWORD_FILE (readable by root only)"
 }
 
 case "$1" in
     configure)
-        if ! getent passwd omniaci >/dev/null; then
-            adduser --quiet --system --group --home /var/lib/omniaci \
-                --gecos "OmniaCI" omniaci
+        if ! getent passwd omniacli >/dev/null; then
+            adduser --quiet --system --group --home /var/lib/omniacli \
+                --gecos "OmniaCLI" omniacli
         fi
-        install -d -o omniaci -g omniaci -m 750 \
-            /var/lib/omniaci /var/lib/omniaci/jobs /var/lib/omniaci/backups /var/lib/omniaci/logs
+        install -d -o omniacli -g omniacli -m 750 \
+            /var/lib/omniacli /var/lib/omniacli/jobs /var/lib/omniacli/backups /var/lib/omniacli/logs
         build_venv
         create_config
         ;;
@@ -138,16 +138,16 @@ esac
 # systemd, as dh_installsystemd writes it
 if [ "$1" = "configure" ] || [ "$1" = "abort-upgrade" ] || [ "$1" = "abort-deconfigure" ] || [ "$1" = "abort-remove" ]; then
     # only removes the masks deb-systemd-helper created on package removal
-    deb-systemd-helper unmask 'omniaci.service' >/dev/null || true
+    deb-systemd-helper unmask 'omniacli.service' >/dev/null || true
     # was-enabled is true for a new installation, so it is enabled
-    if deb-systemd-helper --quiet was-enabled 'omniaci.service'; then
-        deb-systemd-helper enable 'omniaci.service' >/dev/null || true
+    if deb-systemd-helper --quiet was-enabled 'omniacli.service'; then
+        deb-systemd-helper enable 'omniacli.service' >/dev/null || true
     else
-        deb-systemd-helper update-state 'omniaci.service' >/dev/null || true
+        deb-systemd-helper update-state 'omniacli.service' >/dev/null || true
     fi
     if [ -d /run/systemd/system ]; then
         systemctl --system daemon-reload >/dev/null || true
-        deb-systemd-invoke restart 'omniaci.service' >/dev/null || true
+        deb-systemd-invoke restart 'omniacli.service' >/dev/null || true
     fi
 fi
 

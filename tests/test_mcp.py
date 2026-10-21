@@ -4,7 +4,7 @@ import pytest
 
 pytest.importorskip("mcp")  # the SDK needs Python 3.10
 
-from omniaci.mcp_server import _errors_only, _public_url  # noqa: E402
+from omniacli.mcp_server import _errors_only, _public_url  # noqa: E402
 
 from .conftest import TOKEN, sh  # noqa: E402
 from .test_app import AUTH, HOST, POST, client, wait_job  # noqa: E402,F401
@@ -36,7 +36,7 @@ async def test_token_required(client):
     assert (await rpc(client, "tools/list", headers={**HEADERS, "Authorization": "Bearer nope"})).status_code == 401
     resp = await rpc(client, "initialize", {"protocolVersion": "2025-06-18", "capabilities": {},
                                              "clientInfo": {"name": "t", "version": "1"}})
-    assert resp.status_code == 200 and resp.json()["result"]["serverInfo"]["name"] == "OmniaCI"
+    assert resp.status_code == 200 and resp.json()["result"]["serverInfo"]["name"] == "OmniaCLI"
     tools = {t["name"] for t in (await rpc(client, "tools/list")).json()["result"]["tools"]}
     assert tools == {"list_servers", "server_status", "pending_updates", "read_log", "list_jobs",
                      "get_job", "update_test", "backup_test", "dev_setup"}

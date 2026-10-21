@@ -1,11 +1,11 @@
 {% extends "base.html" %}
-{% block title %}Links · OmniaCI{% endblock %}
+{% block title %}Links · OmniaCLI{% endblock %}
 {% block crumbs %}{% from "_crumbs.html" import crumbs with context %}
 {{ crumbs([("Configuration", "/config"), ("Links", None)]) }}
 {% endblock %}
 {% block content %}
 <h1>Links</h1>
-<p class="muted">Other OmniaCI instances this one operates: their servers are listed on the Servers page and their pages open here, under <span class="mono">/links/&lt;name&gt;/</span>.
+<p class="muted">Other OmniaCLI instances this one operates: their servers are listed on the Servers page and their pages open here, under <span class="mono">/links/&lt;name&gt;/</span>.
 The other instance creates the token on its <strong>Users</strong> page and decides its role; here each user acts there with at most their own role.
 Saved in <span class="mono">{{ links_file }}</span>, readable by its owner only: it holds the tokens.</p>
 <div id="error" class="banner" hidden></div>
@@ -32,7 +32,7 @@ Saved in <span class="mono">{{ links_file }}</span>, readable by its owner only:
     {% endfor %}
     <tr>
       <td><input type="text" id="new-name" placeholder="customer" aria-label="New link name"></td>
-      <td><input type="text" id="new-url" class="mono" placeholder="https://omniaci.customer.example" aria-label="New link URL"></td>
+      <td><input type="text" id="new-url" class="mono" placeholder="https://omniacli.customer.example" aria-label="New link URL"></td>
       <td><input type="password" id="new-token" autocomplete="off" placeholder="token from its Users page" aria-label="New link token"></td>
       <td><input type="text" id="new-ca" class="mono" placeholder="system CAs" aria-label="New link CA file"></td>
       <td><button type="button" id="add">Add link</button></td>
@@ -67,7 +67,7 @@ Saved in <span class="mono">{{ links_file }}</span>, readable by its owner only:
       const data = await post(encodeURIComponent(name) + "/test");
       if (!data) { result.textContent = ""; return; }
       result.className = "result " + (data.ok ? "ok" : "error");
-      result.textContent = data.ok ? `OmniaCI ${data.version}, as ${data.caller}, role ${data.role}` : data.error;
+      result.textContent = data.ok ? `OmniaCLI ${data.version}, as ${data.caller}, role ${data.role}` : data.error;
     };
   }
   document.getElementById("add").onclick = async () => {

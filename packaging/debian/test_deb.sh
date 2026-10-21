@@ -1,5 +1,5 @@
 #!/bin/bash
-# Install an OmniaCI .deb in a container with a real systemd, for every target
+# Install an OmniaCLI .deb in a container with a real systemd, for every target
 # distribution, and check it end to end: the service starts, the generated
 # admin password logs in, a server saved through the API is pulled and its
 # (dummy) Odoo service restarted through sudo, then reinstall, remove, purge.
@@ -25,27 +25,27 @@ fail() { echo "CHECK FAILED: $*"; exit 1; }
 export DEBIAN_FRONTEND=noninteractive
 
 step "install"
-apt-get install -y -qq /opt/omniaci-test/omniaci.deb > /tmp/install.log 2>&1 || { tail -30 /tmp/install.log; fail "apt-get install"; }
-grep -E '^omniaci:' /tmp/install.log || true
-dpkg -s omniaci | grep -q '^Status: install ok installed' || fail "package not installed"
+apt-get install -y -qq /opt/omniacli-test/omniacli.deb > /tmp/install.log 2>&1 || { tail -30 /tmp/install.log; fail "apt-get install"; }
+grep -E '^omniacli:' /tmp/install.log || true
+dpkg -s omniacli | grep -q '^Status: install ok installed' || fail "package not installed"
 for i in $(seq 30); do curl -s -o /dev/null localhost:8090 && break; sleep 1; done
-systemctl is-active --quiet omniaci || { journalctl -u omniaci --no-pager | tail -20; fail "service not active"; }
-systemctl is-enabled --quiet omniaci || fail "service not enabled"
-[ "$(stat -c '%U:%G %a' /etc/omniaci/omniaci.yaml)" = "root:omniaci 640" ] || fail "config permissions"
-[ "$(stat -c '%U %a' /etc/omniaci/initial-admin-password)" = "root 600" ] || fail "password file permissions"
-visudo -cf /etc/sudoers.d/omniaci >/dev/null || fail "sudoers file invalid"
-PW="$(cat /etc/omniaci/initial-admin-password)"
+systemctl is-active --quiet omniacli || { journalctl -u omniacli --no-pager | tail -20; fail "service not active"; }
+systemctl is-enabled --quiet omniacli || fail "service not enabled"
+[ "$(stat -c '%U:%G %a' /etc/omniacli/omniacli.yaml)" = "root:omniacli 640" ] || fail "config permissions"
+[ "$(stat -c '%U %a' /etc/omniacli/initial-admin-password)" = "root 600" ] || fail "password file permissions"
+visudo -cf /etc/sudoers.d/omniacli >/dev/null || fail "sudoers file invalid"
+PW="$(cat /etc/omniacli/initial-admin-password)"
 [ "$(curl -s -o /dev/null -w '%{http_code}' localhost:8090/)" = 401 ] || fail "no 401 without login"
 [ "$(curl -s -o /dev/null -w '%{http_code}' -u "admin:$PW" localhost:8090/)" = 200 ] || fail "admin login"
-echo "python: $(/opt/omniaci/venv/bin/python -V), $(/opt/omniaci/venv/bin/pip freeze | grep -iE '^(fastapi|starlette)==' | tr '\n' ' ')"
-VENV_HOME="$(sed -n 's/^home = //p' /opt/omniaci/venv/pyvenv.cfg)"
+echo "python: $(/opt/omniacli/venv/bin/python -V), $(/opt/omniacli/venv/bin/pip freeze | grep -iE '^(fastapi|starlette)==' | tr '\n' ' ')"
+VENV_HOME="$(sed -n 's/^home = //p' /opt/omniacli/venv/pyvenv.cfg)"
 echo "venv built on $VENV_HOME"
 [ "$VENV_HOME" = "$EXPECT_HOME" ] || fail "venv built on $VENV_HOME, expected $EXPECT_HOME"
-/opt/omniaci/venv/bin/python -c 'import mcp' || fail "mcp not installed"
-if [ "$EXPECT_HOME" = /opt/omniaci/python/bin ]; then
+/opt/omniacli/venv/bin/python -c 'import mcp' || fail "mcp not installed"
+if [ "$EXPECT_HOME" = /opt/omniacli/python/bin ]; then
     grep -q 'downloading Python' /tmp/install.log || fail "bundled Python not downloaded"
 else
-    [ ! -e /opt/omniaci/python ] || fail "/opt/omniaci/python created with a usable local Python"
+    [ ! -e /opt/omniacli/python ] || fail "/opt/omniacli/python created with a usable local Python"
 fi
 
 step "a server with a git repository and a dummy Odoo service"
@@ -55,16 +55,16 @@ ExecStart=/bin/sleep infinity
 EOF
 systemctl daemon-reload && systemctl start odoo-dummy
 SYSTEMCTL="$(command -v systemctl)"
-echo "omniaci ALL=(root) NOPASSWD: $SYSTEMCTL --no-ask-password restart odoo-dummy" >> /etc/sudoers.d/omniaci
-visudo -cf /etc/sudoers.d/omniaci >/dev/null || fail "sudoers file invalid after the edit"
-# root plays the developer on repositories owned by omniaci (test only)
+echo "omniacli ALL=(root) NOPASSWD: $SYSTEMCTL --no-ask-password restart odoo-dummy" >> /etc/sudoers.d/omniacli
+visudo -cf /etc/sudoers.d/omniacli >/dev/null || fail "sudoers file invalid after the edit"
+# root plays the developer on repositories owned by omniacli (test only)
 git config --global --add safe.directory '*'
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
 git init -q --bare /srv/remote.git && git -C /srv/remote.git symbolic-ref HEAD refs/heads/main
 git clone -q /srv/remote.git /srv/dev 2>/dev/null
 git -C /srv/dev checkout -q -b main && git -C /srv/dev commit -q --allow-empty -m one
 git -C /srv/dev push -q origin main
-git clone -q -b main /srv/remote.git /srv/odoo && chown -R omniaci:omniaci /srv/odoo /srv/remote.git
+git clone -q -b main /srv/remote.git /srv/odoo && chown -R omniacli:omniacli /srv/odoo /srv/remote.git
 mkdir -p /srv/venv/bin && printf '#!/bin/sh\necho "update $*"\n' > /srv/venv/bin/click-odoo-update
 chmod 755 /srv/venv/bin/click-odoo-update
 touch /srv/odoo.conf /srv/odoo.log
@@ -74,14 +74,14 @@ curl "${API[@]}" localhost:8090/api/servers/save -d '{"original": null, "name": 
   "restart": {"type": "systemd", "service": "odoo-dummy", "sudo": true},
   "repositories": [{"name": "odoo", "path": "/srv/odoo", "branch": "main"}]}}}' | grep -q '"ok":true' \
   || fail "server not saved"
-[ "$(stat -c %U /var/lib/omniaci/servers.yaml)" = omniaci ] || fail "servers.yaml owner"
-grep -q "status: draft" /var/lib/omniaci/servers.yaml || fail "a new server is not a draft"
+[ "$(stat -c %U /var/lib/omniacli/servers.yaml)" = omniacli ] || fail "servers.yaml owner"
+grep -q "status: draft" /var/lib/omniacli/servers.yaml || fail "a new server is not a draft"
 
-step "a user created from the Users page, as user omniaci"
+step "a user created from the Users page, as user omniacli"
 curl "${API[@]}" localhost:8090/api/access/users/save \
   -d '{"name": "anna", "role": "developer", "password": "anna-pass-1", "new": true}' | grep -q '"ok":true' \
   || fail "user not saved"
-[ "$(stat -c '%U %a' /var/lib/omniaci/users.yaml)" = "omniaci 600" ] || fail "users.yaml owner or mode"
+[ "$(stat -c '%U %a' /var/lib/omniacli/users.yaml)" = "omniacli 600" ] || fail "users.yaml owner or mode"
 [ "$(curl -s -o /dev/null -w '%{http_code}' -u anna:anna-pass-1 localhost:8090/api/info)" = 200 ] || fail "new user login"
 
 step "a link to itself: token from the Users page, link from the Links page, pages through the proxy"
@@ -90,7 +90,7 @@ LINK_TOKEN="$(curl "${API[@]}" localhost:8090/api/access/links/save -d '{"name":
 curl "${API[@]}" localhost:8090/api/links/save \
   -d "{\"name\": \"me\", \"url\": \"http://127.0.0.1:8090\", \"token\": \"$LINK_TOKEN\", \"new\": true}" | grep -q '"ok":true' \
   || fail "link not saved"
-[ "$(stat -c '%U %a' /var/lib/omniaci/links.yaml)" = "omniaci 600" ] || fail "links.yaml owner or mode"
+[ "$(stat -c '%U %a' /var/lib/omniacli/links.yaml)" = "omniacli 600" ] || fail "links.yaml owner or mode"
 curl "${API[@]}" -X POST localhost:8090/api/links/me/test | grep -q '"role":"developer"' || fail "Test link"
 curl -s -u "admin:$PW" -H "Accept: text/html" localhost:8090/links/me/ | grep -q "Linked instance <strong>me</strong>" \
   || fail "page through the link"
@@ -110,8 +110,8 @@ assert not checks[("production", "Database")]["ok"] and data["status"] == "draft
 assert not bad, bad
 PY
 # no Odoo in the container: activate it by hand to test the actions
-sed -i 's/status: draft/status: active/' /var/lib/omniaci/servers.yaml
-systemctl restart omniaci
+sed -i 's/status: draft/status: active/' /var/lib/omniacli/servers.yaml
+systemctl restart omniacli
 for i in $(seq 30); do curl -s -o /dev/null localhost:8090 && break; sleep 1; done
 # links.yaml read again at startup: the link lists this instance's server
 curl -s -u "admin:$PW" localhost:8090/ | grep -q "me › demo" || fail "linked server row"
@@ -135,7 +135,7 @@ PID_AFTER="$(systemctl show -p MainPID --value odoo-dummy)"
 [ "$PID_AFTER" != "$PID_BEFORE" ] && [ "$PID_AFTER" != 0 ] || fail "odoo-dummy not restarted"
 echo "pulled, odoo-dummy restarted ($PID_BEFORE -> $PID_AFTER)"
 
-step "load metrics of the systemd unit, read as user omniaci"
+step "load metrics of the systemd unit, read as user omniacli"
 sleep 12
 curl -s -u "admin:$PW" "localhost:8090/api/metrics?server=demo" > /tmp/metrics.json
 python3 - <<'PY' || fail "metrics"
@@ -147,23 +147,23 @@ assert info["points"][-1]["procs"] == 1 and info["points"][-1]["mem"] > 0
 PY
 
 step "reinstall keeps config, servers and password"
-HASH_BEFORE="$(sha256sum /etc/omniaci/omniaci.yaml)"
-dpkg -i /opt/omniaci-test/omniaci.deb > /tmp/reinstall.log 2>&1 || { tail -20 /tmp/reinstall.log; fail "reinstall"; }
+HASH_BEFORE="$(sha256sum /etc/omniacli/omniacli.yaml)"
+dpkg -i /opt/omniacli-test/omniacli.deb > /tmp/reinstall.log 2>&1 || { tail -20 /tmp/reinstall.log; fail "reinstall"; }
 grep -q 'downloading Python' /tmp/reinstall.log && fail "bundled Python downloaded again on reinstall"
 for i in $(seq 30); do curl -s -o /dev/null localhost:8090 && break; sleep 1; done
-systemctl is-active --quiet omniaci || fail "service not active after reinstall"
-[ "$(sha256sum /etc/omniaci/omniaci.yaml)" = "$HASH_BEFORE" ] || fail "config changed by reinstall"
+systemctl is-active --quiet omniacli || fail "service not active after reinstall"
+[ "$(sha256sum /etc/omniacli/omniacli.yaml)" = "$HASH_BEFORE" ] || fail "config changed by reinstall"
 curl -s -u "admin:$PW" localhost:8090/ | grep -q demo || fail "server lost after reinstall"
 
 step "remove and purge"
-apt-get remove -y -qq omniaci >/dev/null 2>&1 || fail "remove"
-systemctl is-active --quiet omniaci && fail "service still running after remove"
-[ ! -e /opt/omniaci/venv ] || fail "venv left after remove"
-[ ! -e /opt/omniaci/python ] || fail "bundled Python left after remove"
-[ -e /etc/omniaci/omniaci.yaml ] || fail "config removed by remove"
-apt-get purge -y -qq omniaci >/dev/null 2>&1 || fail "purge"
-[ ! -e /etc/omniaci ] || fail "/etc/omniaci left after purge"
-[ ! -e /var/lib/omniaci ] || fail "/var/lib/omniaci left after purge"
+apt-get remove -y -qq omniacli >/dev/null 2>&1 || fail "remove"
+systemctl is-active --quiet omniacli && fail "service still running after remove"
+[ ! -e /opt/omniacli/venv ] || fail "venv left after remove"
+[ ! -e /opt/omniacli/python ] || fail "bundled Python left after remove"
+[ -e /etc/omniacli/omniacli.yaml ] || fail "config removed by remove"
+apt-get purge -y -qq omniacli >/dev/null 2>&1 || fail "purge"
+[ ! -e /etc/omniacli ] || fail "/etc/omniacli left after purge"
+[ ! -e /var/lib/omniacli ] || fail "/var/lib/omniacli left after purge"
 echo "ALL CHECKS PASSED"
 EOS
 
@@ -171,7 +171,7 @@ EOS
 BUNDLED_URL="$(dpkg-deb --ctrl-tarfile "$DEB" | tar -xO ./postinst | sed -n 's/^BUNDLED_URL=//p')"
 
 test_one() {
-    local image="${1%+localpy}" tag="omniaci-test-${1//[:\/+]/-}" log="$LOGS/${1//[:\/+]/_}.log" cid
+    local image="${1%+localpy}" tag="omniacli-test-${1//[:\/+]/-}" log="$LOGS/${1//[:\/+]/_}.log" cid
     local expect=/usr/bin localpy=true
     if [ "$1" != "$image" ]; then
         expect=/usr/local/bin
@@ -179,7 +179,7 @@ test_one() {
  && ln -s /usr/local/lib/python/bin/python3.12 /usr/local/bin/python3.12 \
  && printf '#!/bin/sh\\nexit 1\\n' > /usr/local/bin/python3.13 && chmod 755 /usr/local/bin/python3.13"
     elif [ "$image" = debian:11 ]; then
-        expect=/opt/omniaci/python/bin
+        expect=/opt/omniacli/python/bin
     fi
     {
         docker build -q -t "$tag" - >/dev/null <<EOF
@@ -194,7 +194,7 @@ RUN if grep -q '^11' /etc/debian_version 2>/dev/null; then \
 CMD ["/sbin/init"]
 EOF
         cid="$(docker run -d --privileged --cgroupns=private --tmpfs /run --tmpfs /run/lock \
-            -v "$DEB:/opt/omniaci-test/omniaci.deb:ro" "$tag")"
+            -v "$DEB:/opt/omniacli-test/omniacli.deb:ro" "$tag")"
         for i in $(seq 30); do
             docker exec "$cid" systemctl is-system-running 2>/dev/null | grep -qE 'running|degraded' && break
             sleep 1

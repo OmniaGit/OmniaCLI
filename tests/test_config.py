@@ -2,8 +2,8 @@ import datetime
 
 import pytest
 
-from omniaci.auth import Authenticator, hash_password, verify_password
-from omniaci.config import (
+from omniacli.auth import Authenticator, hash_password, verify_password
+from omniacli.config import (
     AutoUpdate,
     ConfigError,
     load_servers,
@@ -109,8 +109,8 @@ def test_settings_servers_file_relative(tmp_path):
 
 
 def test_settings_file_missing(tmp_path):
-    with pytest.raises(ConfigError, match="cannot read .*omniaci.yaml: No such file"):
-        load_settings(tmp_path / "omniaci.yaml")
+    with pytest.raises(ConfigError, match="cannot read .*omniacli.yaml: No such file"):
+        load_settings(tmp_path / "omniacli.yaml")
 
 
 def test_incomplete_draft_kept_active_refused(tmp_path):
@@ -151,7 +151,7 @@ def test_auth_errors(auth, message):
 
 
 def test_users_file_round_trip_and_main_config_wins(tmp_path):
-    from omniaci.config import Access, LinkAccess, load_access, save_access
+    from omniacli.config import Access, LinkAccess, load_access, save_access
 
     path = tmp_path / "users.yaml"
     assert load_access(path) == Access()
@@ -170,7 +170,7 @@ def test_users_file_round_trip_and_main_config_wins(tmp_path):
 
 
 def test_groups_parse_match_and_round_trip(tmp_path):
-    from omniaci.config import ServerGroup, load_groups, parse_groups, save_groups
+    from omniacli.config import ServerGroup, load_groups, parse_groups, save_groups
 
     groups = parse_groups([{"name": "Customers", "members": ["cliente/*", "acme/one", "acme/one", " "]},
                            {"name": "Mine", "members": ["*"]}])

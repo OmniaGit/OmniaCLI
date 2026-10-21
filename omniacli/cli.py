@@ -15,10 +15,10 @@ from .config import ConfigError, load_settings
 def _serve(args) -> int:
     import uvicorn
 
-    os.environ["OMNIACI_CONFIG"] = args.config
+    os.environ["OMNIACLI_CONFIG"] = args.config
     load_settings(args.config)  # fail here, not inside uvicorn
     uvicorn.run(
-        "omniaci.app:app_from_env",
+        "omniacli.app:app_from_env",
         factory=True,
         host=args.host,
         port=args.port,
@@ -71,11 +71,11 @@ def _check_config(args) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="omniaci")
+    parser = argparse.ArgumentParser(prog="omniacli")
     sub = parser.add_subparsers(dest="command", required=True)
 
     serve = sub.add_parser("serve", help="run the web application")
-    serve.add_argument("-c", "--config", default="omniaci.yaml")
+    serve.add_argument("-c", "--config", default="omniacli.yaml")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8090)
     serve.set_defaults(func=_serve)
@@ -88,14 +88,14 @@ def main(argv: list[str] | None = None) -> int:
     token.set_defaults(func=_new_token)
 
     link = sub.add_parser("new-link-token",
-                          help="create a token for another OmniaCI instance linked to this one (auth.links)")
+                          help="create a token for another OmniaCLI instance linked to this one (auth.links)")
     link.add_argument("name", help="who links in, e.g. omniasolutions")
     link.add_argument("--role", choices=ROLES, default="user",
                       help="user: monitors only; developer: acts on the servers; admin: everything")
     link.set_defaults(func=_new_link_token)
 
     check = sub.add_parser("check-config", help="run the Test & activate checks on every server")
-    check.add_argument("-c", "--config", default="omniaci.yaml")
+    check.add_argument("-c", "--config", default="omniacli.yaml")
     check.set_defaults(func=_check_config)
 
     args = parser.parse_args(argv)

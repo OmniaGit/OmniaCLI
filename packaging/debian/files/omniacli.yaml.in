@@ -1,0 +1,12 @@
+# OmniaCLI main configuration, created at the first installation.
+# The servers are edited from the web interface (Configuration page).
+
+auth:
+  users:
+    # the other users, links and MCP tokens are managed from the web
+    # interface (Users page), in /var/lib/omniacli/users.yaml
+    admin: "@ADMIN_HASH@"
+
+backup_dir: /var/lib/omniacli/backups
+jobs_dir: /var/lib/omniacli/jobs
+servers_file: /var/lib/omniacli/servers.yaml

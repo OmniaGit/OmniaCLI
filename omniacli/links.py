@@ -1,4 +1,4 @@
-"""Links to other OmniaCI instances: this one serves their pages under
+"""Links to other OmniaCLI instances: this one serves their pages under
 /links/<name>/ and lists their servers, acting with the link token they gave
 (see auth.links on their side)."""
 
@@ -55,9 +55,9 @@ def link_headers(link: LinkTarget, user: str, role: str) -> dict[str, str]:
     served under here, who acts and the most that user may do here."""
     return {
         "Authorization": f"Bearer {link.token}",
-        "X-OmniaCI-Prefix": f"/links/{link.name}",
-        "X-OmniaCI-User": user,
-        "X-OmniaCI-Role-Cap": role,
+        "X-OmniaCLI-Prefix": f"/links/{link.name}",
+        "X-OmniaCLI-User": user,
+        "X-OmniaCLI-Role-Cap": role,
     }
 
 

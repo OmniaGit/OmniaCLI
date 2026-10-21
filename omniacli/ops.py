@@ -21,13 +21,13 @@ _ENV = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C"}
 # Odoo can log very long lines (tracebacks with data, SQL)
 _LINE_LIMIT = 4 * 1024 * 1024
 RESTART_TIMEOUT = 300
-# an Odoo OmniaCI starts itself: seconds it must stay up to count as started,
+# an Odoo OmniaCLI starts itself: seconds it must stay up to count as started,
 # and seconds it has to stop on SIGTERM before SIGKILL
 START_WAIT = 5
 STOP_TIMEOUT = 60
 # pip may build packages from source (psycopg2, lxml...)
 PIP_TIMEOUT = 1800
-# what OmniaCI runs in an instance's venv: click-odoo-update, click-odoo-backupdb
+# what OmniaCLI runs in an instance's venv: click-odoo-update, click-odoo-backupdb
 CLI_PACKAGE = "click-odoo-contrib"
 
 
@@ -330,8 +330,8 @@ async def restart(job: Job, instance: Instance) -> None:
     await run(job, instance.restart.command(), timeout=RESTART_TIMEOUT)
 
 
-# The Odoo processes OmniaCI started, to reap them when they end; one started
-# before OmniaCI was restarted is found again from its pid file.
+# The Odoo processes OmniaCLI started, to reap them when they end; one started
+# before OmniaCLI was restarted is found again from its pid file.
 _children: dict[str, subprocess.Popen] = {}
 
 
@@ -357,7 +357,7 @@ def _config_pids(instance: Instance) -> list[int]:
 
 
 def managed_pid(instance: Instance) -> int | None:
-    """The Odoo OmniaCI started for the instance, if it still runs."""
+    """The Odoo OmniaCLI started for the instance, if it still runs."""
     child = _children.get(instance.key)
     if child is not None and child.poll() is not None:
         _children.pop(instance.key, None)
@@ -376,7 +376,7 @@ def managed_pid(instance: Instance) -> int | None:
 
 
 def foreign_pids(instance: Instance, own: int | None) -> list[int]:
-    """Processes started with the instance's Odoo config that OmniaCI did not
+    """Processes started with the instance's Odoo config that OmniaCLI did not
     start: its own run in the process group it created."""
     return [p for p in _config_pids(instance) if own is None or _pgid(p) != own]
 
@@ -408,7 +408,7 @@ async def stop_process(job: Job, instance: Instance, pid: int) -> None:
 
 
 async def start_process(job: Job, instance: Instance) -> int:
-    """Start odoo-bin in its own session, so that it outlives OmniaCI, with
+    """Start odoo-bin in its own session, so that it outlives OmniaCLI, with
     its output appended to the instance's log."""
     odoo_bin = find_odoo_bin(instance)
     if odoo_bin is None or not odoo_bin.is_file():
@@ -421,7 +421,7 @@ async def start_process(job: Job, instance: Instance) -> int:
     try:
         with open(instance.log_file, "ab") as out:
             stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            out.write(f"--- {stamp} started by OmniaCI: {shlex.join(cmd)}\n".encode())
+            out.write(f"--- {stamp} started by OmniaCLI: {shlex.join(cmd)}\n".encode())
             out.flush()
             child = subprocess.Popen(cmd, cwd=odoo_bin.parent, stdin=subprocess.DEVNULL,
                                      stdout=out, stderr=subprocess.STDOUT, start_new_session=True)
@@ -441,28 +441,28 @@ async def start_process(job: Job, instance: Instance) -> int:
 
 
 async def stop(job: Job, instance: Instance) -> None:
-    """Stop the Odoo OmniaCI started; a service is not stopped from here."""
+    """Stop the Odoo OmniaCLI started; a service is not stopped from here."""
     if instance.restart.type != "process":
-        raise JobFailed("Stop is only for an Odoo that OmniaCI starts itself (restart type process)")
-    job.log(f"--- stop Odoo started by OmniaCI ({instance.odoo_config})")
+        raise JobFailed("Stop is only for an Odoo that OmniaCLI starts itself (restart type process)")
+    job.log(f"--- stop Odoo started by OmniaCLI ({instance.odoo_config})")
     own = managed_pid(instance)
     if own is None:
         others = foreign_pids(instance, None)
         job.log("not running" + (
-            f"; pid {', '.join(map(str, others))} run with this config but OmniaCI did "
+            f"; pid {', '.join(map(str, others))} run with this config but OmniaCLI did "
             "not start them: not touched" if others else ""))
         return
     await stop_process(job, instance, own)
 
 
 async def restart_process(job: Job, instance: Instance) -> None:
-    job.log(f"--- restart Odoo started by OmniaCI ({instance.odoo_config})")
+    job.log(f"--- restart Odoo started by OmniaCLI ({instance.odoo_config})")
     own = managed_pid(instance)
     others = foreign_pids(instance, own)
     if others:
         raise JobFailed(
-            f"Odoo is already running with {instance.odoo_config} but OmniaCI did not start "
-            f"it (pid {', '.join(map(str, others))}): stop it first, OmniaCI stops only its own")
+            f"Odoo is already running with {instance.odoo_config} but OmniaCLI did not start "
+            f"it (pid {', '.join(map(str, others))}): stop it first, OmniaCLI stops only its own")
     if own is not None:
         await stop_process(job, instance, own)
     await start_process(job, instance)
@@ -500,7 +500,7 @@ async def install_requirements(job: Job, venv_bin: Path, odoo_bin: Path | None,
 
 
 async def install_cli(job: Job, venv_bin: Path) -> None:
-    """pip install the scripts OmniaCI runs in the venv."""
+    """pip install the scripts OmniaCLI runs in the venv."""
     job.log(f"--- {CLI_PACKAGE} in {venv_bin}")
     await pip_install(job, venv_bin, [CLI_PACKAGE])
 
@@ -580,7 +580,7 @@ async def merge_to_production(job: Job, server: Server, backup_dir: Path) -> Non
                     "merge",
                     "--no-edit",
                     "-m",
-                    f"Merge tested {test_repo.branch} ({tested[:10]}) into {repo.branch} [OmniaCI]",
+                    f"Merge tested {test_repo.branch} ({tested[:10]}) into {repo.branch} [OmniaCLI]",
                     tested,
                 ],
                 cwd=repo.path,

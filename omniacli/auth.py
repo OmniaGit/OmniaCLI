@@ -1,5 +1,5 @@
 """HTTP Basic authentication with PBKDF2 password hashes, bearer tokens (for
-MCP clients and for linked OmniaCI instances) stored as their SHA-256, and the
+MCP clients and for linked OmniaCLI instances) stored as their SHA-256, and the
 roles that decide what each caller may do."""
 
 from __future__ import annotations

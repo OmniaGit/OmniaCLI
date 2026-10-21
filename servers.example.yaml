@@ -1,4 +1,4 @@
-# OmniaCI servers. Normally edited from the web interface (Configuration);
+# OmniaCLI servers. Normally edited from the web interface (Configuration);
 # the file named by servers_file in the main config.
 
 servers:

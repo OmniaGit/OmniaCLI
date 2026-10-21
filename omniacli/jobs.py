@@ -95,9 +95,9 @@ class JobManager:
                 _logger.warning("Skipping unreadable job file %s: %s", path, exc)
                 continue
             if not job.finished_flag:
-                # OmniaCI stopped while the job was running
+                # OmniaCLI stopped while the job was running
                 job.status = INTERRUPTED
-                job.log("OmniaCI was stopped before this job finished")
+                job.log("OmniaCLI was stopped before this job finished")
                 self._save(job)
             self.jobs[job.id] = job
 

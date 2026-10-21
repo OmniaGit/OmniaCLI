@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{% block title %}OmniaCI{% endblock %}</title>
+<title>{% block title %}OmniaCLI{% endblock %}</title>
 <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48 64x64">
 <link rel="apple-touch-icon" href="/icon-180.png">
 <style>
@@ -141,7 +141,7 @@ summary { cursor: pointer; color: var(--muted); }
 </head>
 <body>
 <header>
-  <strong><a href="{{ prefix }}/">OmniaCI</a></strong>
+  <strong><a href="{{ prefix }}/">OmniaCLI</a></strong>
   <a href="{{ prefix }}/">Servers</a>
   <a href="{{ prefix }}/jobs">Jobs</a>
   {% if is_admin %}<a href="{{ prefix }}/config">Configuration</a>
@@ -150,7 +150,7 @@ summary { cursor: pointer; color: var(--muted); }
   {% if account %}<a href="{{ prefix }}/account" style="margin-left: auto" title="Your account and password">{{ account }}</a>{% endif %}
 </header>
 {% if prefix.startswith("/links/") %}
-<div class="link-bar">Linked instance <strong>{{ prefix.rsplit("/", 1)[1] }}</strong> · its pages, acting with its link · <a href="/">back to your OmniaCI</a></div>
+<div class="link-bar">Linked instance <strong>{{ prefix.rsplit("/", 1)[1] }}</strong> · its pages, acting with its link · <a href="/">back to your OmniaCLI</a></div>
 {% endif %}
 <main>
 {% block crumbs %}{% endblock %}

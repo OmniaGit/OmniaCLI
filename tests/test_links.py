@@ -8,8 +8,8 @@ import httpx
 import pytest
 import yaml
 
-from omniaci.app import create_app
-from omniaci.config import parse_settings
+from omniacli.app import create_app
+from omniacli.config import parse_settings
 
 from .conftest import LINK_TOKEN, PASSWORD, TOKEN, USER_HASH, hash_token
 

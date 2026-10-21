@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}{{ job.title }} · OmniaCI{% endblock %}
+{% block title %}{{ job.title }} · OmniaCLI{% endblock %}
 {% block crumbs %}{% from "_crumbs.html" import crumbs with context %}
 {% set ns = namespace(servers=[]) %}
 {% for key in job.instances %}{% set name = key.split("/")[0] %}{% if name not in ns.servers %}{% set ns.servers = ns.servers + [name] %}{% endif %}{% endfor %}

@@ -1,4 +1,4 @@
-"""The OmniaCI web application."""
+"""The OmniaCLI web application."""
 
 from __future__ import annotations
 
@@ -73,13 +73,13 @@ _STATIC = Path(__file__).parent / "static"
 _BACKUP_NAME = re.compile(r"[A-Za-z0-9._-]+\.zip")
 _ICONS = {"/favicon.ico": ("favicon.ico", "image/x-icon"),
           "/icon-180.png": ("icon-180.png", "image/png")}
-_basic = HTTPBasic(realm="OmniaCI", auto_error=False)
+_basic = HTTPBasic(realm="OmniaCLI", auto_error=False)
 # what a linked instance sends: the path it serves our pages under, and the
 # name of its user acting through the link
-_PREFIX_HEADER = "x-omniaci-prefix"
-_ON_BEHALF_HEADER = "x-omniaci-user"
+_PREFIX_HEADER = "x-omniacli-prefix"
+_ON_BEHALF_HEADER = "x-omniacli-user"
 # the role of that user there: a link acts with the lower of it and its own
-_ROLE_CAP_HEADER = "x-omniaci-role-cap"
+_ROLE_CAP_HEADER = "x-omniacli-role-cap"
 _PREFIX = re.compile(r"(/[A-Za-z0-9._~-]+)+")
 _ON_BEHALF = re.compile(r"[A-Za-z0-9._@-]{1,64}")
 # users, links and MCP tokens created from the web interface
@@ -94,7 +94,7 @@ _LINK_RESPONSE_HEADERS = ("content-type", "content-disposition", "content-length
 
 def _version() -> str:
     try:
-        return importlib.metadata.version("omniaci")
+        return importlib.metadata.version("omniacli")
     except importlib.metadata.PackageNotFoundError:
         return "unknown"
 
@@ -147,7 +147,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             raise HTTPException(
                 status.HTTP_401_UNAUTHORIZED,
                 "Invalid credentials",
-                headers={"WWW-Authenticate": 'Basic realm="OmniaCI"'},
+                headers={"WWW-Authenticate": 'Basic realm="OmniaCLI"'},
             )
         if request.method not in ("GET", "HEAD") and not _same_origin(request):
             raise HTTPException(status.HTTP_403_FORBIDDEN, "Cross-site request refused")
@@ -193,7 +193,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         await link_clients.close()
 
     app = FastAPI(
-        title="OmniaCI",
+        title="OmniaCLI",
         lifespan=lifespan,
         dependencies=[Depends(current_user)],
         docs_url=None,
@@ -326,7 +326,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
                 "repo_status": {i.key: s for i, s in zip(shown, statuses)},
                 "auto_state": updater.state,
                 "busy": {i.key: jobs.is_busy(i.key) for i in srv.instances.values()},
-                # Odoo started by OmniaCI: its pid, None when stopped
+                # Odoo started by OmniaCLI: its pid, None when stopped
                 "running": {i.key: ops.managed_pid(i) for i in shown if i.restart.type == "process"},
                 "jobs": [j for j in jobs.recent(200) if any(k.startswith(f"{server}/") for k in j.instances)][:10],
             },
@@ -335,7 +335,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
     @app.get("/api/info")
     async def info(user: Principal = Depends(current_user)):
         """What a linking instance checks: this version and the caller's role."""
-        return {"app": "OmniaCI", "version": _version(), "caller": str(user), "role": user.role}
+        return {"app": "OmniaCLI", "version": _version(), "caller": str(user), "role": user.role}
 
     @app.get("/api/servers")
     async def server_list():
@@ -509,7 +509,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
     async def action_stop(request: Request, server: str, role: str, user: Principal = Depends(developer)):
         instance = get_instance(server, role)
         if instance.restart.type != "process":
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Only an Odoo started by OmniaCI can be stopped")
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Only an Odoo started by OmniaCLI can be stopped")
         return started(
             request,
             jobs.submit(
@@ -949,7 +949,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             del getattr(web, kind)[name]
             return await store_access(web) or {"ok": True}
 
-    # --- links to other OmniaCI instances -------------------------------
+    # --- links to other OmniaCLI instances -------------------------------
 
     links_lock = asyncio.Lock()
 
@@ -1015,8 +1015,8 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             info = resp.json() if resp.status_code == 200 else None
         except ValueError:
             info = None
-        if not info or info.get("app") != "OmniaCI":
-            return {"ok": False, "error": f"no OmniaCI with links there (HTTP {resp.status_code})"}
+        if not info or info.get("app") != "OmniaCLI":
+            return {"ok": False, "error": f"no OmniaCLI with links there (HTTP {resp.status_code})"}
         return {"ok": True, **info}
 
     def link_failure(request: Request, link: LinkTarget, message: str):
@@ -1114,5 +1114,5 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
 
 
 def app_from_env() -> FastAPI:
-    """uvicorn factory: `uvicorn --factory omniaci.app:app_from_env`."""
-    return create_app(load_settings(os.environ.get("OMNIACI_CONFIG", "omniaci.yaml")))
+    """uvicorn factory: `uvicorn --factory omniacli.app:app_from_env`."""
+    return create_app(load_settings(os.environ.get("OMNIACLI_CONFIG", "omniacli.yaml")))

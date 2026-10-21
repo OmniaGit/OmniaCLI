@@ -4,8 +4,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-from omniaci.auth import hash_password, hash_token
-from omniaci.config import Restart, parse_settings
+from omniacli.auth import hash_password, hash_token
+from omniacli.config import Restart, parse_settings
 
 PASSWORD = "secret"
 TOKEN = "mcp-test-token"
@@ -53,7 +53,7 @@ def git_identity(monkeypatch, tmp_path):
     monkeypatch.setenv("GIT_COMMITTER_EMAIL", "test@example.com")
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(tmp_path / "gitconfig"))
     # ops copies os.environ at import time
-    import omniaci.ops as ops
+    import omniacli.ops as ops
 
     monkeypatch.setattr(ops, "_ENV", {**ops._ENV, **{
         "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "test@example.com",

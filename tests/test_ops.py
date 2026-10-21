@@ -2,8 +2,8 @@ import os
 
 import pytest
 
-from omniaci import ops
-from omniaci.jobs import Job, JobFailed
+from omniacli import ops
+from omniacli.jobs import Job, JobFailed
 
 from .conftest import clone, commit, sh
 
@@ -167,7 +167,7 @@ time.sleep(120)
 def process_instance(tmp_path):
     import sys
 
-    from omniaci.config import parse_servers
+    from omniacli.config import parse_servers
 
     venv = tmp_path / "pvenv" / "bin"
     venv.mkdir(parents=True)
@@ -210,14 +210,14 @@ async def test_process_start_restart_stop(tmp_path):
     second = ops.managed_pid(instance)
     assert second and second != first and not group_alive(instance, first)
     log = instance.log_file.read_text()
-    assert log.count("started by OmniaCI") == 2 and log.count("worker up") == 2
+    assert log.count("started by OmniaCLI") == 2 and log.count("worker up") == 2
     assert f"-c {instance.odoo_config}" in log
 
-    # found again from the pid file, as after a restart of OmniaCI
+    # found again from the pid file, as after a restart of OmniaCLI
     ops._children.clear()
     assert ops.managed_pid(instance) == second
 
-    # an Odoo with the same config that OmniaCI did not start is never touched
+    # an Odoo with the same config that OmniaCLI did not start is never touched
     other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)",
                               "-c", str(instance.odoo_config)])
     try:
@@ -243,7 +243,7 @@ async def test_process_exits_at_once(tmp_path):
 
 
 def test_process_type_config(tmp_path):
-    from omniaci.config import ConfigError, parse_servers, server_to_dict
+    from omniacli.config import ConfigError, parse_servers, server_to_dict
 
     instance = process_instance(tmp_path)
     assert instance.restart.service == ""

@@ -1,10 +1,10 @@
 {% extends "base.html" %}
-{% block title %}Account · OmniaCI{% endblock %}
+{% block title %}Account · OmniaCLI{% endblock %}
 {% block content %}
 <h1>{{ name }}</h1>
 <p class="muted">Role: <strong>{{ role }}</strong>.</p>
 {% if fixed %}
-<p>Your user is set in the main configuration file: its password is changed there (<span class="mono">omniaci hash-password</span>).</p>
+<p>Your user is set in the main configuration file: its password is changed there (<span class="mono">omniacli hash-password</span>).</p>
 {% else %}
 <div id="error" class="banner" hidden></div>
 <div id="done" class="panel" hidden><p>Password changed. The browser asks for the new one at the next page.</p></div>

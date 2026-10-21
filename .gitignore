@@ -4,7 +4,7 @@ __pycache__/
 build/
 dist/
 .pytest_cache/
-omniaci.yaml
+omniacli.yaml
 .project
 .pydevproject
 .settings/

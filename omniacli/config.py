@@ -1,4 +1,4 @@
-"""Load and validate the OmniaCI YAML configuration."""
+"""Load and validate the OmniaCLI YAML configuration."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ import yaml
 from .auth import ROLES as ACCESS_ROLES
 
 ROLES = ("production", "test")
-# process: OmniaCI starts odoo-bin itself, its output going to a log of its own
+# process: OmniaCLI starts odoo-bin itself, its output going to a log of its own
 RESTART_TYPES = ("systemd", "initd", "process")
 # a server name is part of URLs and of the job keys
 SERVER_STATUSES = ("active", "draft")
@@ -100,7 +100,7 @@ class Instance:
 
     @property
     def pid_file(self) -> Path:
-        """Of an instance OmniaCI starts itself, next to its log."""
+        """Of an instance OmniaCLI starts itself, next to its log."""
         return self.log_file.with_suffix(".pid")
 
     def repository(self, name: str) -> Repository | None:
@@ -155,7 +155,7 @@ def filter_servers(servers: list[Server], query: str = "") -> list[Server]:
 
 @dataclass
 class LinkAccess:
-    """A linked OmniaCI instance allowed in: its token's hash and its role."""
+    """A linked OmniaCLI instance allowed in: its token's hash and its role."""
 
     token: str
     role: str
@@ -182,13 +182,13 @@ class Settings:
     # the servers live in their own file, which the web interface rewrites
     servers_file: Path
     servers: dict[str, Server]
-    # MCP clients: {name: "sha256$<hex>"} (omniaci new-token)
+    # MCP clients: {name: "sha256$<hex>"} (omniacli new-token)
     tokens: dict[str, str] = field(default_factory=dict)
     user_roles: dict[str, str] = field(default_factory=dict)
-    # linked instances: {name: LinkAccess} (omniaci new-link-token)
+    # linked instances: {name: LinkAccess} (omniacli new-link-token)
     links: dict[str, LinkAccess] = field(default_factory=dict)
     users_file: Path | None = None
-    # the other OmniaCI instances this one operates (Links page)
+    # the other OmniaCLI instances this one operates (Links page)
     links_file: Path | None = None
     link_targets: dict[str, LinkTarget] = field(default_factory=dict)
     # how the Servers page groups this instance's and the links' servers
@@ -282,7 +282,7 @@ def _parse_instance(server: str, role: str, data: dict, logs_dir: Path | None) -
     if restart_type == "process":
         if logs_dir is None:
             raise ConfigError(f"{where}.restart: type process needs the logs folder")
-        # the output of the process OmniaCI starts
+        # the output of the process OmniaCLI starts
         log_file = logs_dir / f"{server}_{role}.log"
         service = ""
     else:
@@ -375,7 +375,7 @@ def instance_to_dict(instance: Instance) -> dict:
     if instance.odoo_bin is not None:
         data["odoo_bin"] = str(instance.odoo_bin)
     if instance.restart.type == "process":
-        # both follow from the type: the log is OmniaCI's, there is no service
+        # both follow from the type: the log is OmniaCLI's, there is no service
         del data["log_file"], data["restart"]["service"], data["restart"]["sudo"]
     return data
 
@@ -434,19 +434,19 @@ def parse_auth(auth: dict, where: str = "auth", need_user: bool = True) -> Acces
             # the format before roles: such a user is an admin
             users[name], roles[name] = str(value), "admin"
         if not users[name]:
-            raise ConfigError(f"{where}.users.{name}: password hash missing (omniaci hash-password)")
+            raise ConfigError(f"{where}.users.{name}: password hash missing (omniacli hash-password)")
     if need_user and not users:
         raise ConfigError(f"{where}.users: at least one user is required")
     tokens = {str(k): str(v) for k, v in (auth.get("tokens") or {}).items()}
     bad = [name for name, value in tokens.items() if not _TOKEN_HASH.fullmatch(value)]
     if bad:
-        raise ConfigError(f"{where}.tokens: {', '.join(bad)} is not a token hash (omniaci new-token)")
+        raise ConfigError(f"{where}.tokens: {', '.join(bad)} is not a token hash (omniacli new-token)")
     links = {}
     for name, value in (auth.get("links") or {}).items():
         name, value = str(name), value if isinstance(value, dict) else {}
         token = str(value.get("token") or "")
         if not _TOKEN_HASH.fullmatch(token):
-            raise ConfigError(f"{where}.links.{name}: token is not a token hash (omniaci new-link-token)")
+            raise ConfigError(f"{where}.links.{name}: token is not a token hash (omniacli new-link-token)")
         links[name] = LinkAccess(token, _access_role(f"{where}.links.{name}", value.get("role")))
     return Access(users, roles, tokens, links)
 
@@ -632,7 +632,7 @@ def parse_settings(data: dict, base_dir: Path = Path(".")) -> Settings:
 
 
 def logs_dir_of(jobs_dir: Path) -> Path:
-    """The logs of the instances OmniaCI starts itself: next to the jobs."""
+    """The logs of the instances OmniaCLI starts itself: next to the jobs."""
     return jobs_dir.parent / "logs"
 
 

@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}{{ server.name }} · OmniaCI{% endblock %}
+{% block title %}{{ server.name }} · OmniaCLI{% endblock %}
 {% block crumbs %}{% from "_crumbs.html" import crumbs with context %}
 {{ crumbs([("Servers", "/"), (server.name, "/servers/" ~ server.name),
            ({"production": "Production", "test": "Test", "both": "Both"}[view], None)]) }}
@@ -69,7 +69,7 @@
         <button {% if busy[inst.key] %}disabled{% endif %} title="pip install the requirements.txt of Odoo and of the repositories in the venv">pip requirements</button></form>
       <form method="post" action="{{ prefix }}/servers/{{ server.name }}/{{ inst.role }}/pip-cli"
             onsubmit="return confirm('pip install click-odoo-contrib in {{ inst.venv_bin }}?')">
-        <button {% if busy[inst.key] %}disabled{% endif %} title="pip install click-odoo-contrib, the scripts OmniaCI runs in the venv">pip click-odoo</button></form>
+        <button {% if busy[inst.key] %}disabled{% endif %} title="pip install click-odoo-contrib, the scripts OmniaCLI runs in the venv">pip click-odoo</button></form>
     </div>
 
     <details class="backups" style="margin-top: 12px" data-url="{{ prefix }}/api/servers/{{ server.name }}/{{ inst.role }}/backups">
@@ -85,7 +85,7 @@
         <dt>Odoo config</dt><dd class="mono">{{ inst.odoo_config }}</dd>
         <dt>Log file</dt><dd class="mono">{{ inst.log_file }}</dd>
         {% if inst.restart.type == "process" %}
-        <dt>Odoo</dt><dd>started by OmniaCI: {% if running.get(inst.key) %}running, pid <span class="mono">{{ running[inst.key] }}</span>{% else %}<span class="muted">stopped</span>{% endif %}</dd>
+        <dt>Odoo</dt><dd>started by OmniaCLI: {% if running.get(inst.key) %}running, pid <span class="mono">{{ running[inst.key] }}</span>{% else %}<span class="muted">stopped</span>{% endif %}</dd>
         {% else %}
         <dt>Service</dt><dd class="mono">{{ inst.restart.type }}: {{ inst.restart.service }}</dd>
         {% endif %}

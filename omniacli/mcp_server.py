@@ -3,7 +3,7 @@ describe an instance so that a client can rebuild its development setup.
 
 Served at /mcp (streamable HTTP, stateless, JSON responses) for clients with
 a bearer token from auth.tokens. Needs the mcp SDK, which needs Python 3.10:
-without it OmniaCI runs without /mcp.
+without it OmniaCLI runs without /mcp.
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ _RECORD = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d+ \d+ (\w+) ")
 _PRIVATE = re.compile(r"passw|secret|token|key|^(db_host|db_port|db_user|data_dir|logfile|pidfile"
                       r"|addons_path|upgrade_path|pre_upgrade_scripts)$")
 
-INSTRUCTIONS = """OmniaCI deploys Odoo instances from git: each server has a production and a
+INSTRUCTIONS = """OmniaCLI deploys Odoo instances from git: each server has a production and a
 test instance. Read with list_servers, server_status, read_log, list_jobs,
 get_job, pending_updates. The only action is update_test (git pull, update of
 the changed modules, restart of the test instance). dev_setup describes an
@@ -96,7 +96,7 @@ async def _wait(job: Job, seconds: int) -> None:
 def create_mcp(settings: Settings, jobs: JobManager, updater: AutoUpdater, sampler: Sampler,
                authenticator: Authenticator) -> tuple[Route, object]:
     """The /mcp route and the session manager to run in the app's lifespan."""
-    server = MCPServer(name="OmniaCI", instructions=INSTRUCTIONS)
+    server = MCPServer(name="OmniaCLI", instructions=INSTRUCTIONS)
 
     def caller(ctx: Context) -> str:
         # the route checked this very header before the request got here
@@ -141,7 +141,7 @@ def create_mcp(settings: Settings, jobs: JobManager, updater: AutoUpdater, sampl
             odoo = None
             if inst.restart.type == "process":
                 pid = ops.managed_pid(inst)
-                odoo = {"started_by": "OmniaCI", "running": pid is not None, "pid": pid}
+                odoo = {"started_by": "OmniaCLI", "running": pid is not None, "pid": pid}
             result[role] = {
                 "database": inst.database,
                 "repositories": {r.name: s for r, s in zip(inst.repositories, repos)},

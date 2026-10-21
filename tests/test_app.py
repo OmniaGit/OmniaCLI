@@ -7,13 +7,13 @@ import re
 import httpx
 import pytest
 
-from omniaci.app import create_app
-from omniaci.logtail import read_since
+from omniacli.app import create_app
+from omniacli.logtail import read_since
 
 from .conftest import LINK_TOKEN, LINK_VIEW_TOKEN, PASSWORD, TOKEN, clone, commit, sh
 
 AUTH = "Basic " + base64.b64encode(f"admin:{PASSWORD}".encode()).decode()
-HOST = "omniaci.test"
+HOST = "omniacli.test"
 
 
 @pytest.fixture
@@ -135,7 +135,7 @@ def test_read_since_handles_partial_lines_and_rotation(tmp_path):
 
 
 def test_read_since_in_pieces(tmp_path, monkeypatch):
-    import omniaci.logtail as logtail
+    import omniacli.logtail as logtail
 
     monkeypatch.setattr(logtail, "MAX_READ", 10)
     log = tmp_path / "x.log"
@@ -178,7 +178,7 @@ async def test_config_pages(client):
 
 async def test_config_clone_rename_delete(client, env):
     settings = env["settings"]
-    from omniaci.config import load_servers, server_to_dict
+    from omniacli.config import load_servers, server_to_dict
 
     server = server_to_dict(settings.servers["srv"])
     server["test"]["auto_update"] = {"enabled": True, "interval_minutes": 10, "window": "00:00-00:01"}
@@ -194,7 +194,7 @@ async def test_config_clone_rename_delete(client, env):
     assert (await client.get("/servers/srv2", headers={"Authorization": AUTH})).status_code == 404
     assert client.app.state.updater._tasks == []
     # active through the checks (here made to pass)
-    import omniaci.checks as checks
+    import omniacli.checks as checks
 
     async def all_ok(server, backup_dir):
         return [checks.Check("server", "fake", True, "ok")]
@@ -280,7 +280,7 @@ def make_addons(env):
 
 
 async def test_list_addons(env):
-    from omniaci import ops
+    from omniacli import ops
 
     test = make_addons(env)
     addons = ops.list_addons(test)
@@ -337,7 +337,7 @@ async def test_restart_action(client, env):
 
 async def test_failed_checks_keep_live_server_unchanged(client, env):
     """Editing a live server with activate=True and failing checks saves nothing."""
-    from omniaci.config import server_to_dict
+    from omniacli.config import server_to_dict
 
     settings = env["settings"]
     before = settings.servers_file.read_text()
@@ -444,7 +444,7 @@ async def test_read_odoo_config(client, env):
 
 async def test_incomplete_draft(client, env):
     settings = env["settings"]
-    from omniaci.config import load_servers
+    from omniacli.config import load_servers
 
     draft = {"production": {"database": "DB", "odoo_config": "/etc/odoo.conf",
                             "repositories": [{"name": "odoo", "remote": "origin", "branch": "20.0"}]}}
@@ -487,7 +487,7 @@ async def test_stop_button(client, env):
     srv.instances["test"] = instance
     page = (await get("/servers/srv?view=test")).text
     assert ">Start</button>" in page and "/stop" not in page and "stopped" in page
-    from omniaci import ops
+    from omniacli import ops
     await ops.restart_process(ops.Job(id="t", title="t", instances=[], source="t"), instance)
     try:
         page = (await get("/servers/srv?view=test")).text
@@ -590,8 +590,8 @@ async def test_admin_sees_everything(client):
 
 
 async def test_link_serves_prefixed_pages_and_acts(client, env):
-    link = {"Authorization": f"Bearer {LINK_TOKEN}", "X-OmniaCI-Prefix": "/links/cliente",
-            "X-OmniaCI-User": "matteo"}
+    link = {"Authorization": f"Bearer {LINK_TOKEN}", "X-OmniaCLI-Prefix": "/links/cliente",
+            "X-OmniaCLI-User": "matteo"}
     page = (await client.get("/servers/srv?view=both", headers=link)).text
     assert 'action="/links/cliente/servers/srv/test/pull"' in page
     assert 'href="/links/cliente/jobs?server=srv"' in page and 'data-log="/links/cliente/api/' in page
@@ -614,7 +614,7 @@ async def test_link_serves_prefixed_pages_and_acts(client, env):
     # the link's role is developer
     assert (await client.post("/servers/srv/merge", headers=link)).status_code == 403
     # a prefix or user that is not a plain path or name is ignored
-    bad = {**link, "X-OmniaCI-Prefix": "//evil.example/x\"onload=\"", "X-OmniaCI-User": "a b<c>"}
+    bad = {**link, "X-OmniaCLI-Prefix": "//evil.example/x\"onload=\"", "X-OmniaCLI-User": "a b<c>"}
     page = (await client.get("/servers/srv?view=both", headers=bad)).text
     assert 'action="/servers/srv/test/pull"' in page and "evil" not in page
     resp = await client.post("/servers/srv/test/pull", headers=bad)
@@ -635,7 +635,7 @@ async def test_mcp_token_still_only_reads(client):
     resp = await client.post("/servers/srv/test/pull", headers=bearer)
     assert resp.status_code == 403 and resp.json()["detail"] == "A token may only read"
     # a prefix is a link's only
-    page = (await client.get("/", headers={**bearer, "X-OmniaCI-Prefix": "/links/x"})).text
+    page = (await client.get("/", headers={**bearer, "X-OmniaCLI-Prefix": "/links/x"})).text
     assert "/links/x" not in page
 
 
@@ -643,7 +643,7 @@ async def test_info_and_server_list(client):
     for headers, role in (({"Authorization": AUTH}, "admin"),
                           ({"Authorization": f"Bearer {LINK_VIEW_TOKEN}"}, "user")):
         data = (await client.get("/api/info", headers=headers)).json()
-        assert data["app"] == "OmniaCI" and data["role"] == role and data["version"]
+        assert data["app"] == "OmniaCLI" and data["role"] == role and data["version"]
     servers = (await client.get("/api/servers", headers={"Authorization": f"Bearer {LINK_VIEW_TOKEN}"})).json()
     assert [s["name"] for s in servers] == ["srv"]
     test = servers[0]["instances"]["test"]
@@ -737,7 +737,7 @@ async def test_link_and_mcp_tokens_from_the_web(client):
     data = (await access(client, "links/save", {"name": "partner", "role": "user", "new": True})).json()
     link = {"Authorization": f"Bearer {data['token']}"}
     assert (await client.get("/api/info", headers=link)).json() == {
-        "app": "OmniaCI", "version": (await client.get("/api/info", headers=link)).json()["version"],
+        "app": "OmniaCLI", "version": (await client.get("/api/info", headers=link)).json()["version"],
         "caller": "link partner", "role": "user"}
     assert (await access(client, "links/save", {"name": "partner", "role": "developer"})).json()["token"] is None
     assert (await client.get("/api/info", headers=link)).json()["role"] == "developer"
