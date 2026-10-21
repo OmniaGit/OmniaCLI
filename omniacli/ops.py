@@ -19,9 +19,16 @@ from pathlib import Path
 from .config import Instance, Repository, Server
 from .jobs import Job, JobFailed
 
-# No git command may stop on a credential or passphrase prompt: there is no
-# terminal (start_new_session) and git is told not to ask.
-_ENV = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C"}
+# The environment of every program OmniaCLI runs. No git command may stop on
+# a credential or passphrase prompt: there is no terminal (start_new_session)
+# and git is told not to ask. OmniaCLI's own Python settings are left out:
+# the programs of an instance's venv (Odoo, click-odoo, pip) must import that
+# venv's packages, not OmniaCLI's (an IDE puts its venv in PYTHONPATH: Odoo
+# then loaded OmniaCLI's cryptography with its own pyOpenSSL and failed on
+# 'GEN_EMAIL', found 2026-10-21).
+_OWN_PYTHON = ("PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV")
+_ENV = {**{k: v for k, v in os.environ.items() if k not in _OWN_PYTHON},
+        "GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C"}
 # Odoo can log very long lines (tracebacks with data, SQL)
 _LINE_LIMIT = 4 * 1024 * 1024
 RESTART_TIMEOUT = 300
@@ -261,8 +268,7 @@ def odoo_env(instance: Instance) -> dict:
     odoo_bin = find_odoo_bin(instance)
     if odoo_bin is None or not odoo_bin.is_file():
         return _ENV
-    paths = [str(odoo_bin.parent), _ENV.get("PYTHONPATH", "")]
-    return {**_ENV, "PYTHONPATH": os.pathsep.join(p for p in paths if p)}
+    return {**_ENV, "PYTHONPATH": str(odoo_bin.parent)}
 
 
 def find_odoo_bin(instance: Instance) -> Path | None:
@@ -494,7 +500,7 @@ async def start_process(job: Job, instance: Instance) -> int:
             stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             out.write(f"--- {stamp} started by OmniaCLI: {shlex.join(cmd)}\n".encode())
             out.flush()
-            child = subprocess.Popen(cmd, cwd=odoo_bin.parent, stdin=subprocess.DEVNULL,
+            child = subprocess.Popen(cmd, cwd=odoo_bin.parent, stdin=subprocess.DEVNULL, env=_ENV,
                                      stdout=out, stderr=subprocess.STDOUT, start_new_session=True)
     except OSError as exc:
         raise JobFailed(f"cannot start Odoo: {exc}") from exc

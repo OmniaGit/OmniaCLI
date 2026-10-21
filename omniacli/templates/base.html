@@ -20,7 +20,7 @@ try { const t = localStorage.getItem("omniacli.theme"); if (t) document.document
   --border: #E5E5E5; --accent: #DC2626; --ok: #15803D; --err: #991B1B;
   --warn: #B45309; --code-bg: #0A0A0A; --code-text: #E5E5E5;
   --series-1: #161616; --series-2: #DC2626; --test: #161616; --prod: #DC2626;
-  --start: #15803D; --stop: #DC2626; --restart: #1D4ED8;
+  --start: #15803D; --stop: #DC2626; --restart: #1D4ED8; --light-green: #16A34A; --purple: #7E22CE;
   --r: 0; --r-lg: 0;
   --font: "Helvetica Neue", Helvetica, Arial, "Nimbus Sans", "Liberation Sans", sans-serif;
   --mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", "DejaVu Sans Mono", monospace;
@@ -32,7 +32,7 @@ try { const t = localStorage.getItem("omniacli.theme"); if (t) document.document
     --border: #2d3442; --accent: #6d9bff; --ok: #4cc283; --err: #ff6b6b;
     --warn: #f0a443; --code-bg: #0b0e14; --code-text: #d6dbe4;
     --series-1: #3987e5; --series-2: #f08a3c; --test: var(--accent); --prod: var(--err);
-    --start: var(--ok); --stop: var(--err); --restart: #6d9bff;
+    --start: var(--ok); --stop: var(--err); --restart: #6d9bff; --light-green: #86efac; --purple: #c084fc;
     --r: 6px; --r-lg: 8px; --font: system-ui, -apple-system, "Segoe UI", sans-serif;
     --mono: ui-monospace, "DejaVu Sans Mono", monospace; --head-bg: var(--panel);
   color-scheme: dark;
@@ -43,7 +43,7 @@ try { const t = localStorage.getItem("omniacli.theme"); if (t) document.document
     --border: #2d3442; --accent: #6d9bff; --ok: #4cc283; --err: #ff6b6b;
     --warn: #f0a443; --code-bg: #0b0e14; --code-text: #d6dbe4;
     --series-1: #3987e5; --series-2: #f08a3c; --test: var(--accent); --prod: var(--err);
-    --start: var(--ok); --stop: var(--err); --restart: #6d9bff;
+    --start: var(--ok); --stop: var(--err); --restart: #6d9bff; --light-green: #86efac; --purple: #c084fc;
     --r: 6px; --r-lg: 8px; --font: system-ui, -apple-system, "Segoe UI", sans-serif;
     --mono: ui-monospace, "DejaVu Sans Mono", monospace; --head-bg: var(--panel);
     color-scheme: dark;
@@ -176,6 +176,64 @@ svg.spark { width: 160px; height: 28px; display: block; }
 .sum-disk .warn { color: var(--warn); }
 @media (prefers-reduced-motion: reduce) { .fold.closed .fold-summary { animation: none; } }
 .chart-line-2 { stroke: var(--series-2); }
+/* the job's state: a runner, a thumbs up, a danger sign */
+.job-state > div { display: none; align-items: center; gap: 12px; padding: 10px 14px; margin: 0 0 14px;
+  border: 1px solid var(--border); border-radius: var(--r); background: var(--panel); font-weight: 600; }
+.job-state[data-status="queued"] .job-running, .job-state[data-status="running"] .job-running,
+.job-state[data-status="success"] .job-done,
+.job-state[data-status="failed"] .job-failed, .job-state[data-status="interrupted"] .job-failed { display: flex; }
+.job-running { color: var(--warn); }
+.runner { width: 48px; height: 44px; flex: none; overflow: visible; }
+/* in a line of text: no taller than the text, without speed lines and ground */
+.runner.mini { width: 17px; height: 15px; vertical-align: -2px; margin-right: 4px; }
+.runner.mini .speed, .runner.mini .ground { display: none; }
+.runner.mini line { stroke-width: 4.5; }
+.runner line { stroke: currentColor; stroke-width: 3; stroke-linecap: round; }
+.runner circle { fill: currentColor; }
+/* a run: a stride of .4 s, the body leaning forward and bouncing twice per
+   stride, knees and elbows bent, speed lines behind */
+.runner .ground { stroke: var(--border); stroke-width: 1.5; stroke-dasharray: 5 4; animation: run-ground .25s linear infinite; }
+.runner .speed line { stroke-width: 1.8; opacity: .55; animation: run-speed .4s linear infinite; }
+.runner .speed line:nth-child(2) { animation-delay: -.13s; } .runner .speed line:nth-child(3) { animation-delay: -.27s; }
+.runner-body { animation: run-bob .2s ease-in-out infinite alternate; }
+.runner .leg, .runner .shin, .runner .arm { transform-box: view-box; }
+.runner .leg { transform-origin: 22px 23px; animation: run-thigh .4s linear infinite; }
+.runner .shin { transform-origin: 22px 30px; animation: run-shin .4s linear infinite; }
+.runner .arm { transform-origin: 26px 13px; animation: run-arm .4s ease-in-out infinite; }
+.runner .leg-b, .runner .leg-b .shin, .runner .arm-a { animation-delay: -.2s; }
+@keyframes run-thigh { 0% { transform: rotate(-70deg); } 50% { transform: rotate(45deg); } 100% { transform: rotate(-70deg); } }
+@keyframes run-shin { 0% { transform: rotate(60deg); } 30% { transform: rotate(15deg); } 55% { transform: rotate(115deg); } 80% { transform: rotate(120deg); } 100% { transform: rotate(60deg); } }
+@keyframes run-arm { 0% { transform: rotate(55deg); } 50% { transform: rotate(-65deg); } 100% { transform: rotate(55deg); } }
+@keyframes run-bob { from { transform: translateY(0); } to { transform: translateY(-3px); } }
+@keyframes run-ground { to { stroke-dashoffset: 9; } }
+@keyframes run-speed { 0% { transform: translateX(6px); opacity: 0; } 30% { opacity: .6; } 100% { transform: translateX(-6px); opacity: 0; } }
+.job-done { color: var(--ok); border-color: var(--ok) !important;
+  background: color-mix(in srgb, var(--ok) 10%, var(--panel)) !important; animation: job-fade .8s ease-out both; }
+.thumb { width: 30px; height: 30px; flex: none; fill: currentColor; animation: job-thumb .8s .2s ease-out both; }
+@keyframes job-fade { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
+@keyframes job-thumb { 0% { transform: scale(.4) rotate(-20deg); } 60% { transform: scale(1.15) rotate(6deg); } 100% { transform: none; } }
+.job-failed { color: var(--err); border-color: var(--err) !important; }
+/* not .danger: that is the class of the red buttons */
+.danger-sign { width: 32px; height: 32px; flex: none; fill: var(--err); stroke: var(--err); stroke-width: 1;
+  animation: job-danger .9s ease-in-out both; transform-origin: center; }
+.danger-sign .danger-mark { stroke: var(--panel); stroke-width: 2.4; fill: none; }
+@keyframes job-danger { 0% { transform: scale(1); } 45% { transform: scale(1.8); } 70% { transform: scale(.9); } 100% { transform: scale(1); } }
+/* the Dashboard's notices of the jobs that end */
+.toasts { position: fixed; right: 16px; bottom: 16px; z-index: 20; display: flex; flex-direction: column; gap: 10px;
+  width: min(380px, calc(100vw - 32px)); }
+.toast { display: flex; align-items: flex-start; gap: 12px; padding: 12px 12px 12px 14px; background: var(--panel);
+  border: 1px solid var(--border); border-left-width: 4px; border-radius: var(--r);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .15); animation: job-fade .5s ease-out both; transition: opacity .5s, transform .5s; }
+.toast-ok { border-color: var(--ok); } .toast-ok .thumb { color: var(--ok); width: 26px; height: 26px; }
+.toast-failed { border-color: var(--err); } .toast-failed .danger-sign { width: 26px; height: 26px; }
+.toast-body { flex: 1; min-width: 0; } .toast-title { font-weight: 600; color: var(--text); text-decoration: none; }
+.toast-title:hover { text-decoration: underline; }
+.toast-text { font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
+.toast-close { border: 0; background: none; padding: 0 4px; font-size: 18px; line-height: 1; color: var(--muted); }
+.toast-out { opacity: 0; transform: translateY(8px); }
+@media (prefers-reduced-motion: reduce) {
+  .runner *, .job-done, .thumb, .danger-sign, .toast { animation: none !important; }
+}
 .site-foot { max-width: 1400px; margin: 0 auto; padding: 8px 20px 20px; font-size: 12px; }
 .help { max-width: 900px; line-height: 1.6; }
 .help h2 { font-size: 19px; margin: 28px 0 8px; padding-top: 8px; border-top: 1px solid var(--border); }
@@ -197,6 +255,15 @@ button.btn-restart { border-color: var(--restart); color: var(--restart); }
 button.btn-start:hover:not(:disabled) { background: var(--start); color: var(--panel); }
 button.btn-stop:hover:not(:disabled) { background: var(--stop); color: var(--panel); }
 button.btn-restart:hover:not(:disabled) { background: var(--restart); color: var(--panel); }
+/* the Servers page: Test & activate filled green, Test light green, Edit blue, Clone purple */
+button.btn-activate { background: var(--start); border-color: var(--start); color: #fff; }
+button.btn-activate:hover:not(:disabled) { background: var(--panel); color: var(--start); border-color: var(--start); }
+button.btn-test { border-color: var(--light-green); color: var(--light-green); }
+.button.btn-edit { border-color: var(--restart); color: var(--restart); }
+.button.btn-clone { border-color: var(--purple); color: var(--purple); }
+button.btn-test:hover:not(:disabled) { background: var(--light-green); color: var(--panel); }
+.button.btn-edit:hover { background: var(--restart); color: var(--panel); }
+.button.btn-clone:hover { background: var(--purple); color: var(--panel); }
 .icon-btn { padding: 4px 6px; line-height: 0; }
 button.icon-btn .icon { margin: 0; }
 .run-state { font-size: 12px; width: 62px; display: inline-flex; align-items: center; gap: 5px; color: var(--muted); }
@@ -218,6 +285,13 @@ button.icon-btn .icon { margin: 0; }
 .disk-fill { height: 100%; background: var(--series-1); }
 .disk-fill.warn { background: var(--warn); } .disk-fill.error { background: var(--err); }
 .server-rows td { vertical-align: middle; }
+.server-name { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 12px; }
+.view-buttons { display: inline-flex; flex-wrap: wrap; gap: 6px; }
+.view-buttons .button { padding: 3px 9px; font-size: 13px; display: inline-flex; align-items: center; }
+.view-buttons .icon { margin-right: 5px; }
+.view-buttons .view-production .icon { color: var(--prod); } .view-buttons .view-test .icon { color: var(--test); }
+.config-main td { border-bottom: 0; padding-bottom: 2px; }
+.config-actions td { padding-top: 4px; padding-bottom: 12px; }
 .badge { font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 10px; border: 1px solid var(--border); }
 .badge.active { color: var(--ok); border-color: var(--ok); }
 .badge.draft { color: var(--warn); border-color: var(--warn); }
@@ -254,6 +328,11 @@ summary { cursor: pointer; color: var(--muted); }
     <button type="button" class="theme-toggle" id="theme-toggle"></button>
   </span>
 </header>
+<script>
+// a page shown again from the browser's cache (Back) is drawn anew: its
+// buttons and states are those of now, not of when it was left
+window.addEventListener("pageshow", (event) => { if (event.persisted) location.reload(); });
+</script>
 <script>
 (function () {
   // light (OmniaSolutions) or dark; the choice is kept in this browser

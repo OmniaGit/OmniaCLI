@@ -17,7 +17,29 @@
 {% endif %}
 {% endblock %}
 {% block content %}
+{% from "_icons.html" import runner %}
 <h1>{{ job.title }}</h1>
+{# the job's state at a glance: a runner while it runs, a thumbs up when it
+   succeeds, a danger sign when it fails #}
+<div class="job-state" id="job-state" data-status="{{ job.status }}" role="status" aria-live="polite">
+  <div class="job-running">
+    {{ runner() }}
+    <span class="job-state-text">{{ "Queued: waiting for another job on the same instance" if job.status == "queued" else "Running…" }}</span>
+  </div>
+  <div class="job-done">
+    <svg class="thumb" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M2 10h4v11H2zM8 21h9.2c.9 0 1.6-.6 1.9-1.4l2.4-7.2c.4-1.3-.6-2.6-1.9-2.6H14l1-4.6c.2-1-.3-2-1.2-2.4-.5-.2-1.1 0-1.4.4L8 9.6z"/>
+    </svg>
+    <span class="job-state-text">Done: the job succeeded</span>
+  </div>
+  <div class="job-failed">
+    <svg class="danger-sign" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M12 2.5 1.5 21h21z" stroke-linejoin="round"/>
+      <path class="danger-mark" d="M12 9v5.5M12 17.2v.3" stroke-linecap="round"/>
+    </svg>
+    <span class="job-state-text">{{ "Interrupted: OmniaCLI stopped while it ran" if job.status == "interrupted" else "Failed: see the error and the log below" }}</span>
+  </div>
+</div>
 <div class="panel">
   <dl>
     <dt>Status</dt><dd class="status {{ job.status }}" id="status">{{ job.status }}</dd>
@@ -49,10 +71,23 @@
     next = data.next;
     const st = document.getElementById("status");
     st.textContent = data.status; st.className = "status " + data.status;
+    showState(data.status);
     document.getElementById("finished").textContent = data.finished || "";
     document.getElementById("error").textContent = data.error || "";
     if ({{ can_act | tojson }} && data.status === "success" && data.result && data.result.download) offerDownload(data.result);
     if (!["success", "failed", "interrupted"].includes(data.status)) setTimeout(poll, 1500);
+  }
+  // the animated state: changed only when the status changes, so each
+  // animation plays once
+  function showState(status) {
+    const box = document.getElementById("job-state");
+    if (box.dataset.status === status) return;
+    box.dataset.status = status;
+    const text = {queued: "Queued: waiting for another job on the same instance", running: "Running…",
+                  interrupted: "Interrupted: OmniaCLI stopped while it ran",
+                  failed: "Failed: see the error and the log below"}[status];
+    if (text) box.querySelector(status === "queued" || status === "running" ? ".job-running .job-state-text"
+                                : ".job-failed .job-state-text").textContent = text;
   }
   // a backup's zip: always a link; started by itself when the job was
   // launched with "Backup + download" (?download=1), once

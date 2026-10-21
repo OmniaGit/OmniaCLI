@@ -10,26 +10,29 @@ A new or cloned server is a <strong>draft</strong>: it goes live only when <stro
   <div class="actions" style="margin: 0 0 12px"><a class="button" href="{{ prefix }}/config/new">New server</a></div>
   <div class="scroll">
   <table>
-    <tr><th>Server</th><th>Status</th><th>Instances</th><th>Repositories</th><th></th></tr>
+    <tr><th>Server</th><th>Status</th><th>Instances</th><th>Repositories</th></tr>
     {% for server in servers %}
-    <tr>
+    <tr class="config-main">
       <td><strong>{{ server.name }}</strong></td>
       <td><span class="badge {{ server.status }}">{{ "Active" if server.active else "Draft" }}</span></td>
       <td>{% for role, inst in server.instances.items() %}<span class="role {{ role }}">{{ role }}</span> <span class="mono">{{ inst.database }}</span><br>{% endfor %}
         {% if server.error %}<span class="error">Incomplete: {{ server.error }}</span>{% endif %}</td>
       <td>{% for role, inst in server.instances.items() %}{{ inst.repositories | map(attribute="name") | join(", ") }}<br>{% endfor %}</td>
-      <td>
+    </tr>
+    {# the actions: a second row, under the server #}
+    <tr class="config-actions">
+      <td colspan="4">
         <div class="actions" style="margin: 0">
-          <button type="button" class="{{ 'danger' if not server.active }}" data-test="{{ server.name }}">{{ "Test" if server.active else "Test & activate" }}</button>
-          <a class="button" href="{{ prefix }}/config/{{ server.name }}/edit">Edit</a>
-          <a class="button" href="{{ prefix }}/config/{{ server.name }}/clone">Clone</a>
+          <button type="button" class="{{ 'btn-test' if server.active else 'btn-activate' }}" data-test="{{ server.name }}">{{ "Test" if server.active else "Test & activate" }}</button>
+          <a class="button btn-edit" href="{{ prefix }}/config/{{ server.name }}/edit">Edit</a>
+          <a class="button btn-clone" href="{{ prefix }}/config/{{ server.name }}/clone">Clone</a>
           {% if server.active %}<button type="button" data-deactivate="{{ server.name }}" {% if busy[server.name] %}disabled title="A job is running"{% endif %}>Set to draft</button>{% endif %}
           <button class="danger" data-name="{{ server.name }}" {% if busy[server.name] %}disabled title="A job is running"{% endif %}>Delete</button>
         </div>
       </td>
     </tr>
     {% else %}
-    <tr><td colspan="5" class="muted">No servers yet: create one with "New server".</td></tr>
+    <tr><td colspan="4" class="muted">No servers yet: create one with "New server".</td></tr>
     {% endfor %}
   </table>
   </div>

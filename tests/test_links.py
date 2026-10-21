@@ -133,7 +133,9 @@ async def test_proxied_pages_and_actions(mine):
 
 async def test_role_here_caps_the_link(mine):
     page = (await mine.get("/links/cliente/servers/srv?view=both", headers=as_user("viewer"))).text
-    assert "DB_test" in page and "/pull" not in page
+    # the role user there: no actions but restart, no settings
+    assert "Linked instance <strong>cliente</strong>" in page and "/pull" not in page
+    assert "Settings and repositories" not in page
     resp = await mine.post("/links/cliente/servers/srv/test/pull", headers=as_user("viewer", post=True))
     assert resp.status_code == 403
     info = (await mine.get("/links/cliente/api/info", headers=as_user("viewer"))).json()

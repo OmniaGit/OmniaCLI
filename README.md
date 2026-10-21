@@ -482,6 +482,19 @@ pytest
 The tests use real git repositories in a temporary folder, and fake
 `click-odoo-*` scripts and restart commands.
 
+## Acknowledgements
+
+OmniaCLI's work on the Odoo instances rests on
+[click-odoo](https://github.com/acsone/click-odoo) and
+[click-odoo-contrib](https://github.com/acsone/click-odoo-contrib) by
+[ACSONE SA/NV](https://github.com/acsone) and their contributors:
+`click-odoo-update` updates the changed modules and `click-odoo-backupdb`
+backs up the databases. Without their work this interface would not have
+been possible: thank you.
+
+OmniaCLI also builds on [Odoo](https://www.odoo.com), and on FastAPI,
+Starlette, Uvicorn, Jinja, HTTPX, PyYAML and the MCP Python SDK.
+
 ## License
 
 Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C.

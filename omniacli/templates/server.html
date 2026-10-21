@@ -37,10 +37,12 @@
       {% set pid = running.get(inst.key) %}
       {% if not pid %}
       <form method="post" action="{{ base }}/restart" onsubmit="return confirm('Start Odoo of {{ inst.key }}?')">
+        <input type="hidden" name="next" value="{{ prefix }}/servers/{{ server.name }}?view={{ view }}">
         <button class="btn-start" {{ off }}>{{ icon("start") }}Start</button></form>
       {% else %}
       <form method="post" action="{{ base }}/stop"
             onsubmit="return confirm('Stop Odoo of {{ inst.key }}? It stays stopped, also for the auto update, until Start.')">
+        <input type="hidden" name="next" value="{{ prefix }}/servers/{{ server.name }}?view={{ view }}">
         <button class="btn-stop" {{ off }}>{{ icon("stop") }}Stop</button></form>
       <form method="post" action="{{ base }}/restart" onsubmit="return confirm('Restart Odoo of {{ inst.key }}?')">
         <button class="btn-restart" {{ off }}>{{ icon("restart") }}Restart</button></form>
@@ -53,11 +55,13 @@
       {% if not up %}
       <form method="post" action="{{ base }}/start"
             onsubmit="return confirm('Start the service {{ inst.restart.service }} of {{ inst.key }}?')">
+        <input type="hidden" name="next" value="{{ prefix }}/servers/{{ server.name }}?view={{ view }}">
         <button class="btn-start" {{ off }}>{{ icon("start") }}Start</button></form>
       {% endif %}
       {% if up or state is none %}
       <form method="post" action="{{ base }}/stop"
             onsubmit="return confirm('Stop the service {{ inst.restart.service }} of {{ inst.key }}? It stays stopped, also for the auto update, until Start.')">
+        <input type="hidden" name="next" value="{{ prefix }}/servers/{{ server.name }}?view={{ view }}">
         <button class="btn-stop" {{ off }}>{{ icon("stop") }}Stop</button></form>
       {% endif %}
       {% endif %}
@@ -114,6 +118,8 @@
     </details>
     {% endif %}
 
+    {# settings, paths and repositories: not for the role user #}
+    {% if can_act %}
     <details style="margin-top: 12px">
       <summary>Settings and repositories</summary>
       <dl>
@@ -154,6 +160,7 @@
       </table>
       </div>
     </details>
+    {% endif %}
 
     <h3 class="chart-title" style="margin-top: 16px">Log <span class="muted mono" style="font-weight: 400">{{ inst.log_file }}</span></h3>
     <div class="actions" style="margin: 0 0 8px">
@@ -229,6 +236,22 @@
       } catch (e) { list.textContent = "Could not load the backups."; }
     });
   }
+
+  // a job of this server started or ended: the page again, so that its
+  // buttons (disabled while a job runs) and the service state are those of now
+  let busyBefore = null;
+  async function watchJobs() {
+    try {
+      const resp = await fetch("{{ prefix }}/api/jobs?limit=1");
+      if (resp.ok) {
+        const busy = (await resp.json()).busy.filter((key) => key.startsWith({{ (server.name ~ "/") | tojson }})).join(" ");
+        if (busyBefore !== null && busy !== busyBefore) { location.reload(); return; }
+        busyBefore = busy;
+      }
+    } catch (e) { /* next round */ }
+    setTimeout(watchJobs, 5000);
+  }
+  watchJobs();
 
   for (const panel of panels) {
     const out = panel.querySelector(".log-out");

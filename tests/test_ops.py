@@ -418,3 +418,34 @@ async def test_service_state(monkeypatch):
     assert await ops.service_state(base(Restart("systemd", "loaded"))) == "failed"
     assert await ops.service_state(base(Restart("systemd", "missing"))) is None
     assert await ops.service_state(base(Restart("initd", "loaded"))) is None
+
+
+def test_programs_never_get_omniacli_python(tmp_path):
+    """An IDE runs OmniaCLI with its venv in PYTHONPATH: no program of an
+    instance's venv may import from there."""
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    code = (f"import sys; sys.path.insert(0, {str(root)!r}); import omniacli.ops as o; "
+            "print([k for k in o._OWN_PYTHON if k in o._ENV])")
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True,
+                         env={"PATH": "/usr/bin:/bin", "PYTHONPATH": "/omniacli/venv/site-packages",
+                              "VIRTUAL_ENV": "/omniacli/venv", "PYTHONHOME": sys.base_prefix})
+    assert out.stdout.strip() == "[]", out.stderr
+    instance = process_instance(tmp_path)
+    assert ops.odoo_env(instance)["PYTHONPATH"] == str(instance.odoo_bin.parent)
+
+
+async def test_started_odoo_does_not_inherit_pythonpath(tmp_path, monkeypatch):
+    instance = process_instance(tmp_path)
+    instance.odoo_bin.write_text("import os, time\nprint('PYTHONPATH=' + str(os.environ.get('PYTHONPATH')), flush=True)\n"
+                                 "time.sleep(120)\n")
+    monkeypatch.setenv("PYTHONPATH", "/omniacli/venv/site-packages")
+    await ops.restart(job(), instance)
+    pid = ops.managed_pid(instance)
+    try:
+        assert "PYTHONPATH=None" in instance.log_file.read_text()
+    finally:
+        await ops.stop_process(job(), instance, pid)

@@ -325,6 +325,16 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
     def started(request: Request, job, query: str = "") -> RedirectResponse:
         return RedirectResponse(f"{prefix_of(request)}/jobs/{job.id}{query}", status.HTTP_303_SEE_OTHER)
 
+    async def started_or_back(request: Request, job) -> RedirectResponse:
+        """Start, stop and restart from a button: back to the page of the
+        button (its form's next) instead of the job's page; that page shows
+        the job running and its end."""
+        form = parse_qs((await request.body()).decode("utf-8", "replace"))
+        back = (form.get("next") or [""])[0]
+        if back:
+            return RedirectResponse(_next_path(back), status.HTTP_303_SEE_OTHER)
+        return started(request, job)
+
     def prefix_of(request: Request) -> str:
         return getattr(request.state, "prefix", "")
 
@@ -657,7 +667,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
     @app.post("/servers/{server}/{role}/restart")
     async def action_restart(request: Request, server: str, role: str, user: Principal = Depends(anyone)):
         instance = get_instance(server, role)
-        return started(
+        return await started_or_back(
             request,
             jobs.submit(
                 f"Restart {instance.key}",
@@ -673,7 +683,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         if instance.restart.type not in ("systemd", "process"):
             raise HTTPException(status.HTTP_400_BAD_REQUEST,
                                 "Start is for a systemd service or an Odoo OmniaCLI starts itself")
-        return started(
+        return await started_or_back(
             request,
             jobs.submit(
                 f"Start {instance.key}",
@@ -689,7 +699,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         if instance.restart.type not in ("systemd", "process"):
             raise HTTPException(status.HTTP_400_BAD_REQUEST,
                                 "Stop is for a systemd service or an Odoo OmniaCLI starts itself")
-        return started(
+        return await started_or_back(
             request,
             jobs.submit(
                 f"Stop {instance.key}",
@@ -808,6 +818,18 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         # a draft or deleted server has no page: its crumb goes to its jobs
         live = [srv.name for srv in settings.active_servers()]
         return _TEMPLATES.TemplateResponse(request, "job.html", {"job": job, "live": live})
+
+    @app.get("/api/jobs")
+    async def jobs_json(limit: int = 20):
+        """The last jobs, without their logs, and the instances busy now: the
+        Dashboard follows them (runners, end notices)."""
+        found = jobs.recent(min(max(limit, 1), 200))
+        return {
+            "jobs": [{"id": j.id, "title": j.title, "status": j.status, "instances": j.instances,
+                      "servers": j.servers, "source": j.source, "created": j.created,
+                      "finished": j.finished, "error": j.error} for j in found],
+            "busy": sorted({key for j in jobs.jobs.values() if j.status == "running" for key in j.instances}),
+        }
 
     @app.get("/api/jobs/{job_id}")
     async def job_json(job_id: str, since: int = 0):

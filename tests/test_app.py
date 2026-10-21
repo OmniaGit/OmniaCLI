@@ -577,6 +577,39 @@ async def test_help_for_developers_and_admins(client):
     assert 'href="/help"' not in (await client.get("/", headers={"Authorization": basic("viewer")})).text
 
 
+async def test_dashboard_follows_jobs(client, env):
+    page = (await client.get("/", headers={"Authorization": AUTH})).text
+    # the runners are there for every instance, hidden while it has no job
+    assert 'data-busy="srv/test" hidden' in page and 'id="toasts"' in page
+    resp = await client.post("/servers/srv/test/pull", headers=POST)
+    job_id = resp.headers["location"].rsplit("/", 1)[1]
+    await wait_job(client, job_id)
+    data = (await client.get("/api/jobs?limit=5", headers={"Authorization": AUTH})).json()
+    job = data["jobs"][0]
+    assert job["id"] == job_id and job["status"] == "success" and job["servers"] == ["srv"]
+    assert set(job) == {"id", "title", "status", "instances", "servers", "source", "created", "finished", "error"}
+    assert data["busy"] == []
+    page = (await client.get("/", headers={"Authorization": AUTH})).text
+    assert f'<tr data-job="{job_id}">' in page
+
+
+async def test_start_stop_go_back_to_the_page(client, env):
+    headers = {**POST, "Content-Type": "application/x-www-form-urlencoded"}
+    resp = await client.post("/servers/srv/test/stop", headers=headers, content="next=%2Fservers%2Fsrv%3Fview%3Dtest")
+    assert resp.status_code == 303 and resp.headers["location"] == "/servers/srv?view=test"
+    data = (await client.get("/api/jobs?limit=1", headers={"Authorization": AUTH})).json()
+    assert data["jobs"][0]["title"] == "Stop srv/test"
+    await wait_job(client, data["jobs"][0]["id"])
+    # never another site; without next, the job's page as before
+    resp = await client.post("/servers/srv/test/start", headers=headers, content="next=%2F%2Fevil.example")
+    assert resp.headers["location"] == "/"
+    await wait_job(client, (await client.get("/api/jobs?limit=1", headers={"Authorization": AUTH})).json()["jobs"][0]["id"])
+    resp = await client.post("/servers/srv/test/restart", headers=POST)
+    assert resp.headers["location"].startswith("/jobs/")
+    page = (await client.get("/servers/srv?view=test", headers={"Authorization": AUTH})).text
+    assert 'name="next" value="/servers/srv?view=test"' in page
+
+
 async def test_favicon_without_login(client):
     for path, kind in (("/favicon.ico", "image/x-icon"), ("/icon-180.png", "image/png")):
         resp = await client.get(path)
@@ -776,7 +809,10 @@ async def test_user_role_watches_and_restarts(client, env):
     get = lambda url: client.get(url, headers={"Authorization": basic("viewer")})
     post = lambda url: client.post(url, headers={"Authorization": basic("viewer"), "Origin": f"http://{HOST}"})
     page = (await get("/servers/srv?view=both")).text
-    assert "DB_test" in page and "/pull" not in page and "Merge test to production" not in page
+    assert "/servers/srv/test/log" in page and "/pull" not in page and "Merge test to production" not in page
+    # settings, paths and repositories: developers and admins only
+    assert "Settings and repositories" not in page and "odoo.conf" not in page
+    assert "Settings and repositories" in (await client.get("/servers/srv", headers={"Authorization": basic("dev")})).text
     assert "Backup" not in page and "/config\">Servers<" not in page and "/pip-cli" not in page
     for action in ("restart", "start", "stop"):
         for role in ("production", "test"):

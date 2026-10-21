@@ -1,16 +1,17 @@
 {# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C · SPDX-License-Identifier: AGPL-3.0-or-later -#}
+{% from "_icons.html" import runner %}
 <div class="scroll">
 <table>
   <tr><th>Job</th><th>Server</th><th>Status</th><th>Started by</th><th>Created</th><th>Finished</th><th>Error</th></tr>
   {% for job in jobs %}
-  <tr>
+  <tr data-job="{{ job.id }}">
     <td><a href="{{ prefix }}/jobs/{{ job.id }}">{{ job.title }}</a></td>
     <td>{% for name in job.servers %}<a href="{{ prefix }}/jobs?server={{ name | urlencode }}" title="Jobs of {{ name }}">{{ name }}</a>{% if not loop.last %}, {% endif %}{% endfor %}</td>
-    <td class="status {{ job.status }}">{{ job.status }}</td>
+    <td class="status {{ job.status }} job-status">{% if job.status == "running" %}{{ runner("mini") }}{% endif %}{{ job.status }}</td>
     <td>{{ job.source }}</td>
     <td class="mono">{{ job.created }}</td>
-    <td class="mono">{{ job.finished or "" }}</td>
-    <td class="error">{{ job.error or "" }}</td>
+    <td class="mono job-finished">{{ job.finished or "" }}</td>
+    <td class="error job-error">{{ job.error or "" }}</td>
   </tr>
   {% else %}
   <tr><td colspan="7" class="muted">{{ "No jobs match." if server or q else "No jobs yet." }}</td></tr>

@@ -1,7 +1,7 @@
 {# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C · SPDX-License-Identifier: AGPL-3.0-or-later -#}
 {% extends "base.html" %}
 {% block content %}
-{% from "_icons.html" import icon %}
+{% from "_icons.html" import icon, runner %}
 <section class="fold" data-fold="servers">
 <div class="fold-head">
   <h1><button type="button" class="fold-toggle" aria-expanded="true"><span class="fold-icon" aria-hidden="true">▾</span>Servers</button></h1>
@@ -63,7 +63,9 @@
   
 </div>
 <div class="fold-body"><div class="fold-inner">
-<div class="panel">{% include "_jobs_table.html" %}</div>
+<div class="panel" id="last-jobs">{% include "_jobs_table.html" %}</div>
+<template id="mini-runner">{{ runner("mini") }}</template>
+<div class="toasts" id="toasts" aria-live="polite"></div>
 </div></div>
 </section>
 <script>
@@ -121,6 +123,134 @@
   refresh();
   setInterval(() => { if (!document.hidden) refresh(); }, 5000);
   window.addEventListener("omniacli:servers", refresh);
+})();
+</script>
+<script>
+(function () {
+  // The jobs, of this instance and of every link, every 5 s: the runners
+  // show while an instance has a running job, the Last jobs table follows
+  // this instance's jobs, and a notice says when a job ends.
+  const FINISHED = ["success", "failed", "interrupted"];
+  const runnerHtml = document.getElementById("mini-runner").innerHTML;
+  const seen = {};  // "<link>|<job id>": the status seen last
+  const busyBefore = {};  // link: its busy instances at the last answer
+  let redraw = null;
+  // a job started or ended: the server tables again, with the buttons and
+  // states of now (they are drawn disabled while a job runs)
+  function redrawServers() {
+    clearTimeout(redraw);
+    redraw = setTimeout(async () => {
+      const box = document.getElementById("server-sections");
+      if (!box || box.dataset.lazy && box.querySelector(".links-loading")) return;  // the first load is still on its way
+      try {
+        const resp = await fetch("{{ prefix }}/dashboard/servers?q=" + encodeURIComponent({{ q | tojson }}));
+        if (!resp.ok) return;
+        box.innerHTML = await resp.text();
+        window.dispatchEvent(new Event("omniacli:servers"));
+      } catch (e) { /* the next change tries again */ }
+    }, 300);
+  }
+  const polled = new Set();  // the sources polled once: their first answer only sets seen
+  for (const tr of document.querySelectorAll("#last-jobs tr[data-job]")) {
+    seen["|" + tr.dataset.job] = tr.querySelector(".job-status").textContent.trim();
+  }
+  polled.add("");
+  const text = (tag, cls, value) => { const el = document.createElement(tag); if (cls) el.className = cls; el.textContent = value || ""; return el; };
+
+  function statusCell(td, status) {
+    td.className = "status " + status + " job-status";
+    td.innerHTML = (status === "running" ? runnerHtml : "");
+    td.appendChild(document.createTextNode(status));
+  }
+
+  function tableRow(job) {
+    const tr = document.createElement("tr");
+    tr.dataset.job = job.id;
+    const a = text("a", "", job.title); a.href = "{{ prefix }}/jobs/" + job.id;
+    tr.insertCell().appendChild(a);
+    const servers = tr.insertCell();
+    job.servers.forEach((name, i) => {
+      const link = text("a", "", name); link.href = "{{ prefix }}/jobs?server=" + encodeURIComponent(name);
+      if (i) servers.appendChild(document.createTextNode(", "));
+      servers.appendChild(link);
+    });
+    statusCell(tr.insertCell(), job.status);
+    tr.insertCell().textContent = job.source;
+    const created = tr.insertCell(); created.className = "mono"; created.textContent = job.created;
+    tr.insertCell().className = "mono job-finished";
+    tr.insertCell().className = "error job-error";
+    return tr;
+  }
+
+  function updateTable(jobs) {
+    const table = document.querySelector("#last-jobs table");
+    if (!table) return;
+    for (const job of jobs.slice().reverse()) {
+      let tr = table.querySelector(`tr[data-job="${job.id}"]`);
+      if (!tr) {
+        // a job started since the page was drawn: on top, the table keeps its length
+        const empty = table.querySelector("td[colspan]");
+        if (empty) empty.parentElement.remove();
+        tr = tableRow(job);
+        table.rows[0].after(tr);
+        if (table.querySelectorAll("tr[data-job]").length > 10) table.querySelector("tr[data-job]:last-of-type").remove();
+      }
+      const st = tr.querySelector(".job-status");
+      if (st.textContent.trim() !== job.status) statusCell(st, job.status);
+      tr.querySelector(".job-finished").textContent = job.finished || "";
+      tr.querySelector(".job-error").textContent = job.error || "";
+    }
+  }
+
+  function notify(job, link, base) {
+    const box = document.createElement("div");
+    const ok = job.status === "success";
+    box.className = "toast " + (ok ? "toast-ok" : "toast-failed");
+    box.setAttribute("role", "status");
+    box.innerHTML = ok
+      ? '<svg class="thumb" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 10h4v11H2zM8 21h9.2c.9 0 1.6-.6 1.9-1.4l2.4-7.2c.4-1.3-.6-2.6-1.9-2.6H14l1-4.6c.2-1-.3-2-1.2-2.4-.5-.2-1.1 0-1.4.4L8 9.6z"/></svg>'
+      : '<svg class="danger-sign" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.5 1.5 21h21z" stroke-linejoin="round"/><path class="danger-mark" d="M12 9v5.5M12 17.2v.3" stroke-linecap="round"/></svg>';
+    const body = text("div", "toast-body");
+    const title = text("a", "toast-title", (link ? link + " › " : "") + job.title);
+    title.href = base + "/jobs/" + job.id;
+    body.append(title, text("div", "toast-text", ok ? "finished: success" : job.status + (job.error ? ": " + job.error : "")));
+    const close = text("button", "toast-close", "×");
+    close.type = "button"; close.setAttribute("aria-label", "Close");
+    close.onclick = () => box.remove();
+    box.append(body, close);
+    document.getElementById("toasts").appendChild(box);
+    setTimeout(() => { box.classList.add("toast-out"); setTimeout(() => box.remove(), 600); }, ok ? 10000 : 30000);
+  }
+
+  async function check(link) {
+    const base = link ? "/links/" + encodeURIComponent(link) : "{{ prefix }}";
+    let data;
+    try {
+      const resp = await fetch(base + "/api/jobs?limit=20");
+      if (!resp.ok) return;  // a linked OmniaCLI older than this: no live jobs from it
+      data = await resp.json();
+    } catch (e) { return; }
+    const busy = new Set(data.busy);
+    for (const el of document.querySelectorAll(".job-busy")) {
+      if (el.dataset.link === link) el.hidden = !busy.has(el.dataset.busy);
+    }
+    const key = [...busy].sort().join(" ");
+    if (link in busyBefore && busyBefore[link] !== key) redrawServers();
+    busyBefore[link] = key;
+    if (!link) updateTable(data.jobs);
+    const first = !polled.has(link);
+    polled.add(link);
+    for (const job of data.jobs) {
+      const key = link + "|" + job.id, before = seen[key];
+      seen[key] = job.status;
+      if (!first && before && !FINISHED.includes(before) && FINISHED.includes(job.status)) notify(job, link, base);
+    }
+  }
+
+  const sources = () => [...new Set([""].concat([...document.querySelectorAll(".machine-panel")].map((p) => p.dataset.link)))];
+  const round = () => sources().forEach((link) => check(link));
+  setInterval(() => { if (!document.hidden) round(); }, 5000);
+  window.addEventListener("omniacli:servers", round);
 })();
 </script>
 <script>

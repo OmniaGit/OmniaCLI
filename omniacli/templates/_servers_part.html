@@ -3,19 +3,25 @@
    are links, first with this instance's servers only and then again, with
    the links' servers, by /dashboard/servers (lazy: a slow link never holds
    the page back). #}
-{% from "_icons.html" import icon %}
+{% from "_icons.html" import icon, runner %}
 {% if q %}<p class="muted">{{ rows | length }} of {{ total }} server{{ "" if total == 1 else "s" }}{{ " here; the linked instances' are loading" if lazy }}.</p>{% endif %}
 {% for e in link_errors %}<div class="banner">Link <strong>{{ e.link }}</strong>: {{ e.error }}</div>{% endfor %}
 {% macro server_table(rows) %}
 <div class="panel">
   <div class="scroll">
   <table class="server-rows">
-    <tr><th>Server</th><th>Odoo, CPU of the last 15 minutes</th><th></th></tr>
+    <tr><th>Server</th><th>Odoo, CPU of the last 15 minutes</th></tr>
     {% for row in rows %}
     <tr>
-      <td><a href="{{ row.base }}/servers/{{ row.name }}"><strong>{{ row.label }}</strong></a>
+      <td><div class="server-name"><a href="{{ row.base }}/servers/{{ row.name }}"><strong>{{ row.label }}</strong></a>
+        <span class="view-buttons">
+          {% if "production" in row.roles %}<a class="button view-production" href="{{ row.base }}/servers/{{ row.name }}?view=production" title="Production of {{ row.label }}">{{ icon("production") }}Production</a>{% endif %}
+          {% if "test" in row.roles %}<a class="button view-test" href="{{ row.base }}/servers/{{ row.name }}?view=test" title="Test of {{ row.label }}">{{ icon("test") }}Test</a>{% endif %}
+          {% if row.roles | length == 2 %}<a class="button" href="{{ row.base }}/servers/{{ row.name }}?view=both" title="Production and test of {{ row.label }}">Both</a>{% endif %}
+        </span></div>
         {% if row.link %}<br><span class="muted">linked instance {{ row.link }}</span>{% endif %}
-        {% for role in row.roles %}{% if row.busy[role] %}<br><span class="status running">job running on {{ role }}</span>{% endif %}{% endfor %}</td>
+        {# shown and hidden by the Dashboard as jobs start and end #}
+        {% for role in row.roles %}<span class="job-busy" data-link="{{ row.link }}" data-busy="{{ row.name }}/{{ role }}" {% if not row.busy[role] %}hidden{% endif %}><br><span class="status running">{{ runner("mini") }}job running on {{ role }}</span></span>{% endfor %}</td>
       <td class="sparks">
         {% for role in row.roles %}
         <div class="spark-row" data-link="{{ row.link }}" data-key="{{ row.name }}/{{ role }}">
@@ -40,10 +46,12 @@
           <span class="run-buttons">
             {% if st != "running" and rt in ("process", "systemd") %}
             <form method="post" action="{{ url }}/{{ 'restart' if rt == 'process' else 'start' }}" onsubmit="return confirm('Start Odoo of {{ what }}?')">
+              <input type="hidden" name="next" value="{{ prefix }}/">
               <button class="icon-btn btn-start" title="Start" aria-label="Start {{ what }}" {{ off }}>{{ icon("start") }}</button></form>
             {% endif %}
             {% if st != "stopped" and rt in ("process", "systemd") %}
             <form method="post" action="{{ url }}/stop" onsubmit="return confirm('Stop Odoo of {{ what }}? It stays stopped, also for the auto update, until Start.')">
+              <input type="hidden" name="next" value="{{ prefix }}/">
               <button class="icon-btn btn-stop" title="Stop" aria-label="Stop {{ what }}" {{ off }}>{{ icon("stop") }}</button></form>
             {% endif %}
             {% if rt != "process" or st == "running" %}
@@ -55,13 +63,6 @@
           {% endif %}
         </div>
         {% endfor %}
-      </td>
-      <td>
-        <div class="actions" style="margin: 0">
-          {% if "test" in row.roles %}<a class="button" href="{{ row.base }}/servers/{{ row.name }}?view=test">Test</a>{% endif %}
-          {% if "production" in row.roles %}<a class="button" href="{{ row.base }}/servers/{{ row.name }}?view=production">Production</a>{% endif %}
-          {% if row.roles | length == 2 %}<a class="button" href="{{ row.base }}/servers/{{ row.name }}?view=both">Both</a>{% endif %}
-        </div>
       </td>
     </tr>
     {% endfor %}
