@@ -149,9 +149,11 @@ packaging/debian/make_locks.sh                 # regenerate the dependency locks
 The package is built from a commit (`git archive`), never from uncommitted
 files, except with `--check`. Its version is `<year>.1.<n>`. The test and
 release builds number `n` one above every `omniacli-v<year>.1.*` tag and every
-package already in `ARTEFACTS` (a folder of the build machine, set by the
-environment variable), and tag the built commit. `PYTHON` is the Python that
-builds the wheel.
+package already in `ARTEFACTS`, and tag the built commit. `ARTEFACTS` (where
+the package goes, `dist/` by default) and `PYTHON` (the Python that builds the
+wheel, `python3` by default) come from the environment or from
+`packaging/debian/build.local.sh`, a file of the build machine that is not
+versioned.
 
 ### Releases on GitHub
 

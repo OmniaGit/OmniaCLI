@@ -32,8 +32,13 @@ SERIES="$YEAR.1"
 TAG_PREFIX="omniacli-v"
 RELEASE_BRANCH="${RELEASE_BRANCH:-$YEAR}"
 DEV_BRANCHES="${DEV_BRANCHES:-matteo_dev_$YEAR}"
-ARTEFACTS="${ARTEFACTS:-$HOME/workspace_virtual_machine/share/Software/OmniaSolutions/OmniaCLI}"
-PYTHON="${PYTHON:-/media/OneTDisk/virtual_envs/OmniaCI/bin/python}"
+# the build machine's own folders (the share, the builder's Python) are set
+# in build.local.sh next to this script, not versioned; without it: dist/
+# in the checkout and the python3 of the PATH
+# shellcheck source=/dev/null
+[ -f "$HERE/build.local.sh" ] && . "$HERE/build.local.sh"
+ARTEFACTS="${ARTEFACTS:-$ROOT/dist}"
+PYTHON="${PYTHON:-python3}"
 # the package was named omniaci up to 2026.1.2: its build numbers are not reused
 OLD_TAG_PREFIX="omniaci-v"
 OLD_ARTEFACTS="$(dirname "$ARTEFACTS")/OmniaCI"

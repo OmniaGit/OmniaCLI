@@ -5,6 +5,7 @@ build/
 dist/
 .pytest_cache/
 omniacli.yaml
+packaging/debian/build.local.sh
 .project
 .pydevproject
 .settings/
