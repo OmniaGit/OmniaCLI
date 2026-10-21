@@ -8,7 +8,7 @@ import getpass
 import os
 import sys
 
-from .auth import hash_password
+from .auth import hash_password, hash_token, new_token
 from .config import ConfigError, load_settings
 
 
@@ -33,6 +33,15 @@ def _hash_password(args) -> int:
         print("Passwords are empty or do not match", file=sys.stderr)
         return 1
     print(hash_password(first))
+    return 0
+
+
+def _new_token(args) -> int:
+    token = new_token()
+    print(f"Token for {args.name} (give it to the MCP client, it is not shown again):")
+    print(f"  {token}")
+    print("Add to auth.tokens in the main configuration:")
+    print(f"  {args.name}: \"{hash_token(token)}\"")
     return 0
 
 
@@ -64,6 +73,10 @@ def main(argv: list[str] | None = None) -> int:
 
     hashpw = sub.add_parser("hash-password", help="hash a password for auth.users")
     hashpw.set_defaults(func=_hash_password)
+
+    token = sub.add_parser("new-token", help="create a bearer token for an MCP client (auth.tokens)")
+    token.add_argument("name", help="who uses it, e.g. matteo-laptop")
+    token.set_defaults(func=_new_token)
 
     check = sub.add_parser("check-config", help="run the Test & activate checks on every server")
     check.add_argument("-c", "--config", default="omniaci.yaml")

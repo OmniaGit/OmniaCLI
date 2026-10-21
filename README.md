@@ -184,6 +184,48 @@ kept next to it (`.pid`).
   `data_dir` (filestore, sessions).
 - Odoo is not started at boot: a Restart starts it.
 
+## MCP interface
+
+OmniaCI serves an MCP endpoint at `/mcp` (streamable HTTP) for AI clients.
+It needs the `mcp` SDK, so Python 3.10 or newer: on Python 3.9 (Debian 11)
+OmniaCI runs without it.
+
+| Tool | What it does |
+|---|---|
+| `list_servers` | every server, active or draft, with its instances |
+| `server_status` | repositories (branch, last commit), Odoo running, CPU and memory, auto update, last jobs |
+| `pending_updates` | commits not yet pulled, per repository (`git fetch`) |
+| `read_log` | the last lines of an instance's log, optionally only ERROR/CRITICAL with their tracebacks |
+| `list_jobs`, `get_job` | the jobs, filtered by server and text, and a job's log |
+| `update_test` | **the only action on Odoo**: git pull + update of the changed modules + restart of the **test** instance |
+| `backup_test` | a backup (database and filestore) of the **test** instance |
+| `dev_setup` | what a client needs to rebuild an instance locally: remote URLs (without credentials), branches, commits, `addons_path` as repository folders, Odoo and Python versions, the Odoo config options without secrets nor server paths, and the backups to download |
+
+Access is by bearer token, never by the users' passwords. Create one per
+client and add its hash to `auth.tokens`:
+
+```bash
+omniaci new-token matteo-laptop
+```
+
+```yaml
+auth:
+  users: ...
+  tokens:
+    matteo-laptop: "sha256$..."
+```
+
+Then, in Claude Code:
+
+```bash
+claude mcp add --transport http omniaci https://omniaci.example.com/mcp \
+    --header "Authorization: Bearer <token>"
+```
+
+A token also opens the pages for reading, which is how a client downloads a
+backup (`GET <base URL>/backups/...` with the same header); it can never
+POST to them.
+
 ## Run
 
 ```bash

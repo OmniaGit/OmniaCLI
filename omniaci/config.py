@@ -131,6 +131,8 @@ class Settings:
     # the servers live in their own file, which the web interface rewrites
     servers_file: Path
     servers: dict[str, Server]
+    # MCP clients: {name: "sha256$<hex>"} (omniaci new-token)
+    tokens: dict[str, str] = field(default_factory=dict)
 
     @property
     def logs_dir(self) -> Path:
@@ -343,12 +345,17 @@ def parse_settings(data: dict, base_dir: Path = Path(".")) -> Settings:
     if not servers_file.is_absolute():
         servers_file = base_dir / servers_file
     jobs_dir = Path(_require(data, "jobs_dir", "root"))
+    tokens = {str(k): str(v) for k, v in ((data.get("auth") or {}).get("tokens") or {}).items()}
+    bad = [name for name, value in tokens.items() if not re.fullmatch(r"sha256\$[0-9a-f]{64}", value)]
+    if bad:
+        raise ConfigError(f"auth.tokens: {', '.join(bad)} is not a token hash (omniaci new-token)")
     return Settings(
         users={str(k): str(v) for k, v in users.items()},
         backup_dir=Path(_require(data, "backup_dir", "root")),
         jobs_dir=jobs_dir,
         servers_file=servers_file,
         servers=load_servers(servers_file, logs_dir_of(jobs_dir)),
+        tokens=tokens,
     )
 
 

@@ -4,10 +4,11 @@ from pathlib import Path
 import pytest
 import yaml
 
-from omniaci.auth import hash_password
+from omniaci.auth import hash_password, hash_token
 from omniaci.config import Restart, parse_settings
 
 PASSWORD = "secret"
+TOKEN = "mcp-test-token"
 USER_HASH = hash_password(PASSWORD, iterations=1000)
 
 
@@ -119,7 +120,7 @@ def env(tmp_path, fake_venv, restart_calls):
     )
     settings = parse_settings(
         {
-            "auth": {"users": {"admin": USER_HASH}},
+            "auth": {"users": {"admin": USER_HASH}, "tokens": {"tester": hash_token(TOKEN)}},
             "backup_dir": str(tmp_path / "backups"),
             "jobs_dir": str(tmp_path / "jobs"),
             "servers_file": "servers.yaml",

@@ -63,6 +63,19 @@ class Job:
         return self.status in FINISHED
 
 
+def filter_jobs(jobs: list[Job], server: str = "", query: str = "") -> list[Job]:
+    """The jobs of a server and containing every word of query (title,
+    started by, error, server/role), case insensitive."""
+    if server:
+        jobs = [j for j in jobs if server in j.servers]
+    words = query.lower().split()
+    if words:
+        def text(job):
+            return " ".join([job.title, job.source, job.error or "", *job.instances]).lower()
+        jobs = [j for j in jobs if all(w in text(j) for w in words)]
+    return jobs
+
+
 class JobManager:
     def __init__(self, jobs_dir: Path, keep: int = 500):
         self.jobs_dir = Path(jobs_dir)

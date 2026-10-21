@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import importlib.util
 import os
 import re
 from dataclasses import asdict
@@ -28,7 +29,7 @@ from .config import (
     save_servers,
     server_to_dict,
 )
-from .jobs import JobManager
+from .jobs import JobManager, filter_jobs
 from .logtail import read_since
 from .metrics import Sampler
 from .scheduler import AutoUpdater
@@ -40,7 +41,7 @@ _STATIC = Path(__file__).parent / "static"
 _BACKUP_NAME = re.compile(r"[A-Za-z0-9._-]+\.zip")
 _ICONS = {"/favicon.ico": ("favicon.ico", "image/x-icon"),
           "/icon-180.png": ("icon-180.png", "image/png")}
-_basic = HTTPBasic(realm="OmniaCI")
+_basic = HTTPBasic(realm="OmniaCI", auto_error=False)
 
 
 def _same_origin(request: Request) -> bool:
@@ -52,15 +53,26 @@ def _same_origin(request: Request) -> bool:
 
 
 def create_app(settings: Settings) -> FastAPI:
-    authenticator = Authenticator(settings.users)
+    authenticator = Authenticator(settings.users, settings.tokens)
     jobs = JobManager(settings.jobs_dir)
     updater = AutoUpdater(settings, jobs)
     sampler = Sampler(settings)
 
     def current_user(
-        request: Request, credentials: HTTPBasicCredentials = Depends(_basic)
+        request: Request, credentials: Optional[HTTPBasicCredentials] = Depends(_basic)
     ) -> str:
-        if not authenticator.check(credentials.username, credentials.password):
+        scheme, _, token = request.headers.get("authorization", "").partition(" ")
+        if scheme.lower() == "bearer":
+            # an MCP client's token: it may read (and download backups);
+            # its actions go through the MCP tools only
+            name = authenticator.token_name(token.strip())
+            if name is None:
+                raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid token",
+                                    headers={"WWW-Authenticate": "Bearer"})
+            if request.method not in ("GET", "HEAD"):
+                raise HTTPException(status.HTTP_403_FORBIDDEN, "A token may only read")
+            return f"token {name}"
+        if credentials is None or not authenticator.check(credentials.username, credentials.password):
             raise HTTPException(
                 status.HTTP_401_UNAUTHORIZED,
                 "Invalid credentials",
@@ -70,11 +82,20 @@ def create_app(settings: Settings) -> FastAPI:
             raise HTTPException(status.HTTP_403_FORBIDDEN, "Cross-site request refused")
         return credentials.username
 
+    if importlib.util.find_spec("mcp") is None:
+        # the mcp SDK needs Python 3.10: no /mcp without it
+        mcp_route, mcp_manager = None, None
+    else:
+        from .mcp_server import create_mcp
+
+        mcp_route, mcp_manager = create_mcp(settings, jobs, updater, sampler, authenticator)
+
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
         updater.start()
         sampler.start()
-        yield
+        async with (mcp_manager.run() if mcp_manager else contextlib.nullcontext()):
+            yield
         await sampler.stop()
         await updater.stop()
 
@@ -97,6 +118,8 @@ def create_app(settings: Settings) -> FastAPI:
     # Starlette routes: the app's login dependency does not apply to them
     for path in _ICONS:
         app.add_route(path, icon, methods=["GET"])
+    if mcp_route is not None:
+        app.router.routes.append(mcp_route)  # its own bearer token check
 
     def get_instance(server: str, role: str) -> Instance:
         instance = settings.instance(server, role)
@@ -354,13 +377,7 @@ def create_app(settings: Settings) -> FastAPI:
         by, error, server)."""
         found = jobs.recent(len(jobs.jobs))
         names = sorted(set(settings.servers) | {n for j in found for n in j.servers})
-        if server:
-            found = [j for j in found if server in j.servers]
-        words = q.lower().split()
-        if words:
-            def text(job):
-                return " ".join([job.title, job.source, job.error or "", *job.instances]).lower()
-            found = [j for j in found if all(w in text(j) for w in words)]
+        found = filter_jobs(found, server, q)
         return _TEMPLATES.TemplateResponse(
             request, "jobs.html",
             {"jobs": found[:200], "total": len(found), "servers": names, "server": server, "q": q},

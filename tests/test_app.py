@@ -17,11 +17,24 @@ HOST = "omniaci.test"
 @pytest.fixture
 async def client(env):
     app = create_app(env["settings"])
-    async with app.router.lifespan_context(app):
+    # the lifespan in one task, as uvicorn runs it: the MCP session manager's
+    # anyio cancel scope must be left in the task that entered it
+    started, stop = asyncio.Event(), asyncio.Event()
+
+    async def lifespan():
+        async with app.router.lifespan_context(app):
+            started.set()
+            await stop.wait()
+    task = asyncio.create_task(lifespan())
+    await started.wait()
+    try:
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url=f"http://{HOST}") as c:
             c.app = app
             yield c
+    finally:
+        stop.set()
+        await task
 
 
 async def wait_job(client, job_id):
