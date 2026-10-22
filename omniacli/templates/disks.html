@@ -1,0 +1,198 @@
+{# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C · SPDX-License-Identifier: AGPL-3.0-or-later -#}
+{% extends "base.html" %}
+{% block title %}Disks · OmniaCLI{% endblock %}
+{% block crumbs %}{% from "_crumbs.html" import crumbs with context %}
+{{ crumbs([("Dashboard", "/"), ("Disks", None)]) }}
+{% endblock %}
+{% block content %}
+<style>
+.chart-forecast { fill: none; stroke: var(--series-1); stroke-width: 2; stroke-dasharray: 6 5; stroke-linecap: round; }
+.chart-capacity { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 3 4; }
+.chart-capacity-label { fill: var(--muted); font-size: 11px; }
+.disk-chart { width: 100%; height: 220px; display: block; }
+.disk-summary { margin: 2px 0 8px; }
+.disk-summary .warn { color: var(--warn); }
+</style>
+<h1>Disks</h1>
+<p class="muted">The used space of each disk, recorded once a day and kept three years. The dashed line is the
+forecast: the trend of the last 90 days (at least 7 days of data), up to the day the disk is full, that is
+when no space is left to a service (ext4 keeps 5% for root).</p>
+<div id="disks"><p class="muted">Loading…</p></div>
+
+<script>
+(function () {
+  const NS = "http://www.w3.org/2000/svg";
+  const DAY = 86400000;
+  const el = (name, attrs) => {
+    const node = document.createElementNS(NS, name);
+    for (const [k, v] of Object.entries(attrs || {})) node.setAttribute(k, v);
+    return node;
+  };
+  const node = (tag, cls, text) => {
+    const e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text !== undefined) e.textContent = text;
+    return e;
+  };
+  const size = (b) => b >= 1099511627776 ? (b / 1099511627776).toFixed(2) + " TiB"
+    : b >= 1073741824 ? (b / 1073741824).toFixed(1) + " GiB" : (b / 1048576).toFixed(0) + " MiB";
+  // days as UTC midnights: no daylight saving step between two of them
+  const time = (day) => Date.parse(day + "T00:00:00Z");
+  const dayText = (t) => new Date(t).toLocaleDateString(undefined, {timeZone: "UTC"});
+
+  // The used space, the capacity and the forecast up to the full day, or
+  // to the chart's end when that day is further than the history is long.
+  function draw(svg, tip, disk) {
+    const W = svg.clientWidth || 600, H = svg.clientHeight || 220;
+    const pad = {l: 64, r: 12, t: 14, b: 24};
+    svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+    svg.textContent = "";
+    const pts = disk.points.map((p) => ({t: time(p.day), used: p.used, free: p.free, total: p.total}));
+    const last = pts[pts.length - 1];
+    const capacity = last.used + last.free;
+    const t0 = pts[0].t;
+    // the forecast shows at most as far ahead as the history goes back (30 days at least)
+    const ahead = Math.max(last.t - t0, 30 * DAY);
+    const full = disk.forecast.full ? time(disk.forecast.full) : null;
+    const t1 = full ? Math.min(full, last.t + ahead) : last.t;
+    // the capacity near the top: the axis is the disk, not a round number
+    const max = capacity * 1.1;
+    const x = (t) => pad.l + (t - t0) / (t1 - t0) * (W - pad.l - pad.r);
+    const y = (v) => H - pad.b - v / max * (H - pad.t - pad.b);
+
+    // the top is the capacity line, which names its size
+    for (const f of [0, 0.5]) {
+      const gy = y(capacity * f);
+      svg.appendChild(el("line", {x1: pad.l, x2: W - pad.r, y1: gy, y2: gy, class: "chart-grid"}));
+      const label = el("text", {x: pad.l - 6, y: gy + 4, "text-anchor": "end", class: "chart-axis"});
+      label.textContent = f ? size(capacity * f) : "0";
+      svg.appendChild(label);
+    }
+    for (const [t, anchor] of [[t0, "start"], [t1, "end"]]) {
+      const label = el("text", {x: x(t), y: H - 6, "text-anchor": anchor, class: "chart-axis"});
+      label.textContent = dayText(t);
+      svg.appendChild(label);
+    }
+    // the capacity: what a service may fill
+    svg.appendChild(el("line", {x1: pad.l, x2: W - pad.r, y1: y(capacity), y2: y(capacity), class: "chart-capacity"}));
+    const cap = el("text", {x: pad.l + 4, y: y(capacity) - 4, class: "chart-capacity-label"});
+    cap.textContent = "full at " + size(capacity);
+    svg.appendChild(cap);
+
+    const line = pts.map((p, i) => `${i ? "L" : "M"}${x(p.t).toFixed(1)},${y(p.used).toFixed(1)}`).join("");
+    const base = y(0).toFixed(1);
+    svg.appendChild(el("path", {d: `${line}L${x(last.t).toFixed(1)},${base}L${x(t0).toFixed(1)},${base}Z`, class: "chart-area"}));
+    svg.appendChild(el("path", {d: line, class: "chart-line"}));
+    if (full) {
+      // from today's point to the capacity on the full day, cut at the chart's end
+      const share = full > last.t ? (t1 - last.t) / (full - last.t) : 1;
+      const endUsed = last.used + (capacity - last.used) * share;
+      svg.appendChild(el("path", {d: `M${x(last.t)},${y(last.used)}L${x(t1)},${y(endUsed)}`, class: "chart-forecast"}));
+      if (t1 === full) svg.appendChild(el("circle", {cx: x(full), cy: y(capacity), r: 4, class: "chart-dot"}));
+    }
+    svg.appendChild(el("circle", {cx: x(last.t), cy: y(last.used), r: 4, class: "chart-dot"}));
+
+    // hover: the nearest recorded day
+    const cross = el("line", {y1: pad.t, y2: H - pad.b, class: "chart-cross", visibility: "hidden"});
+    const dot = el("circle", {r: 4, class: "chart-dot", visibility: "hidden"});
+    const hit = el("rect", {x: pad.l, y: 0, width: W - pad.l - pad.r, height: H, fill: "transparent"});
+    svg.append(cross, dot, hit);
+    hit.addEventListener("mousemove", (ev) => {
+      const box = svg.getBoundingClientRect();
+      const px = (ev.clientX - box.left) * (W / box.width);
+      let best = pts[0];
+      for (const p of pts) if (Math.abs(x(p.t) - px) < Math.abs(x(best.t) - px)) best = p;
+      cross.setAttribute("x1", x(best.t)); cross.setAttribute("x2", x(best.t));
+      dot.setAttribute("cx", x(best.t)); dot.setAttribute("cy", y(best.used));
+      cross.setAttribute("visibility", "visible"); dot.setAttribute("visibility", "visible");
+      tip.textContent = `${dayText(best.t)} · used ${size(best.used)} · free ${size(best.free)}`;
+      tip.hidden = false;
+      const left = x(best.t) / W * box.width;
+      tip.style.left = Math.min(Math.max(left, 110), box.width - 110) + "px";
+    });
+    hit.addEventListener("mouseleave", () => {
+      cross.setAttribute("visibility", "hidden"); dot.setAttribute("visibility", "hidden");
+      tip.hidden = true;
+    });
+  }
+
+  function summary(disk) {
+    const last = disk.points[disk.points.length - 1];
+    const f = disk.forecast;
+    const p = node("p", "disk-summary");
+    p.appendChild(node("span", "", `Used ${size(last.used)}, free ${size(last.free)} of ${size(last.total)} · `));
+    if (f.full) {
+      const days = (time(f.full) - time(last.day)) / DAY;
+      const cls = days < 30 ? "error" : days < 90 ? "warn" : "";
+      p.appendChild(node("strong", cls, `full around ${dayText(time(f.full))}`));
+      p.appendChild(node("span", "muted", ` (+${size(f.per_day)} a day over the last ${f.days} days)`));
+    } else {
+      p.appendChild(node("span", "muted", f.reason + (f.per_day !== null ? ` (${size(Math.abs(f.per_day))} a day ${f.per_day < 0 ? "freed" : "used"} over the last ${f.days} days)` : "")));
+    }
+    return p;
+  }
+
+  function table(disk) {
+    const box = node("details");
+    box.appendChild(node("summary", "", "Daily values"));
+    const scroll = node("div", "scroll");
+    scroll.style.maxHeight = "40vh";
+    const t = node("table");
+    const head = t.insertRow();
+    for (const h of ["Day", "Used", "Free", "Size"]) head.appendChild(node("th", "", h));
+    for (const p of [...disk.points].reverse()) {
+      const r = t.insertRow();
+      r.insertCell().textContent = dayText(time(p.day));
+      for (const v of [p.used, p.free, p.total]) { const c = r.insertCell(); c.className = "mono"; c.textContent = size(v); }
+    }
+    scroll.appendChild(t); box.appendChild(scroll);
+    return box;
+  }
+
+  let data = [];
+  function render() {
+    const root = document.getElementById("disks");
+    root.replaceChildren();
+    if (!data.length) { root.appendChild(node("p", "muted", "No day recorded yet: the first is recorded within ten minutes of the start.")); return; }
+    for (const disk of data) {
+      const panel = node("section", "panel");
+      panel.id = disk.mount;
+      panel.style.marginBottom = "16px";
+      const h = node("h2", "mono", disk.mount);
+      h.title = `${disk.device} (${disk.type})`;
+      panel.append(h, summary(disk));
+      if (disk.points.length < 2) {
+        panel.append(node("p", "muted", "Recorded once a day: the chart starts with the second day."), table(disk));
+        root.appendChild(panel);
+        continue;
+      }
+      const box = node("div", "chart-box");
+      const svg = el("svg", {class: "chart disk-chart", role: "img",
+                             "aria-label": `Used space of ${disk.mount} by day, with the forecast`});
+      const tip = node("div", "chart-tip"); tip.hidden = true;
+      box.append(svg, tip);
+      panel.append(box, table(disk));
+      root.appendChild(panel);
+      draw(svg, tip, disk);
+    }
+    if (location.hash) {
+      const target = document.getElementById(decodeURIComponent(location.hash.slice(1)));
+      if (target) target.scrollIntoView();
+    }
+  }
+  async function load() {
+    try {
+      const resp = await fetch("{{ prefix }}/api/disks/history");
+      if (!resp.ok) throw new Error("HTTP " + resp.status);
+      data = (await resp.json()).disks;
+    } catch (e) {
+      document.getElementById("disks").replaceChildren(node("p", "error", "Could not load the history: " + e.message));
+      return;
+    }
+    render();
+  }
+  load();
+  window.addEventListener("resize", () => { if (data.length) render(); });
+})();
+</script>
+{% endblock %}

@@ -45,6 +45,10 @@ The screenshots show demo data.
 
 **Dashboard**: the servers with the state of their Odoo and their CPU, the
 whole machine (CPU, network, disks) and the last jobs, updated as they run.
+Every disk is recorded once a day (kept three years, in
+`<data>/disk_history.json`): its panel row says when it will be full, from the
+trend of the last 90 days (at least 7 days of data), and **Disks** (`/disks`)
+charts each disk's used space with that forecast.
 
 ![The Dashboard](docs/images/dashboard.png)
 

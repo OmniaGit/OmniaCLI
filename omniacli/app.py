@@ -27,6 +27,7 @@ from starlette.background import BackgroundTask
 
 from . import checks, disks, ops, plugins
 from .accesslog import AccessLog
+from .diskhistory import DiskHistory, DiskRecorder
 from .auth import ROLES as ACCESS_ROLES
 from .auth import Authenticator, Principal, hash_password, hash_token, new_token, verify_password
 from .config import (
@@ -191,6 +192,9 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
     jobs = JobManager(settings.jobs_dir)
     updater = AutoUpdater(settings, jobs)
     sampler = Sampler(settings)
+    # the disks once a day, next to the jobs like the sessions
+    disk_history = DiskHistory(settings.jobs_dir.parent / "disk_history.json")
+    disk_recorder = DiskRecorder(settings, disk_history)
     link_clients = LinkClients(link_transport)
     access_log = AccessLog(settings.logs_dir / "access.jsonl")
     # the browsers' logins: next to the jobs, like the access log
@@ -270,12 +274,14 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
     async def lifespan(app: FastAPI):
         updater.start()
         sampler.start()
+        disk_recorder.start()
         # not nullcontext(): it is an async context manager only from Python 3.10
         if mcp_manager:
             async with mcp_manager.run():
                 yield
         else:
             yield
+        await disk_recorder.stop()
         await sampler.stop()
         await updater.stop()
         await link_clients.close()
@@ -290,6 +296,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
     )
     app.state.settings, app.state.jobs, app.state.updater = settings, jobs, updater
     app.state.sampler = sampler
+    app.state.disk_history, app.state.disk_recorder = disk_history, disk_recorder
     app.state.access_log = access_log
     app.state.sessions, app.state.authenticator = sessions, authenticator
 
@@ -612,8 +619,22 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
 
     @app.get("/api/disks")
     async def disk_space():
-        """This machine's disks: size, free space and what is kept on each."""
-        return {"disks": await disks.disks(settings)}
+        """This machine's disks: size, free space, what is kept on each, and
+        when each will be full (diskhistory.forecast)."""
+        found = await disks.disks(settings)
+        for disk in found:
+            disk["forecast"] = disk_history.forecast_of(disk["mount"])
+        return {"disks": found}
+
+    @app.get("/api/disks/history")
+    async def disk_history_json():
+        """Every disk's daily points (up to three years) and its forecast."""
+        return {"disks": disk_history.series()}
+
+    @app.get("/disks")
+    async def disks_page(request: Request):
+        """The history of this machine's disks, and when each will be full."""
+        return _TEMPLATES.TemplateResponse(request, "disks.html", {})
 
     @app.post("/servers/{server}/{role}/pull")
     async def action_pull(request: Request, server: str, role: str, user: Principal = Depends(developer)):

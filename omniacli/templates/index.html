@@ -327,6 +327,11 @@
 <script>
 (function () {
   // the free space of each machine's disks, in its panel, once a minute
+  // a full date within 30 days is an error, within 90 a warning
+  function fullLevel(day) {
+    const days = (new Date(day) - new Date()) / 86400000;
+    return days < 30 ? "error" : days < 90 ? "warn" : "muted";
+  }
   const size = (b) => b >= 1099511627776 ? (b / 1099511627776).toFixed(2) + " TiB"
     : b >= 1073741824 ? (b / 1073741824).toFixed(1) + " GiB" : (b / 1048576).toFixed(0) + " MiB";
   const node = (tag, cls, text) => {
@@ -377,6 +382,17 @@
       bar.appendChild(fill);
       const note = node("div", "muted disk-note", "of " + size(d.total) + (d.holds.length ? " · " + d.holds.join(", ") : ""));
       row.append(head, bar, note);
+      // when it will be full (an OmniaCLI older than the history gives none)
+      if (d.forecast) {
+        const f = d.forecast;
+        const when = node("div", "disk-note " + (f.full ? fullLevel(f.full) : "muted"));
+        when.textContent = f.full ? `full around ${new Date(f.full).toLocaleDateString()} (+${size(f.per_day)}/day) · `
+                                  : f.reason[0].toUpperCase() + f.reason.slice(1) + " · ";
+        const history = node("a", "", "history");
+        history.href = base + "/disks#" + encodeURIComponent(d.mount);
+        when.appendChild(history);
+        row.appendChild(when);
+      }
       list.appendChild(row);
     }
   }
