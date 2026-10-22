@@ -509,7 +509,7 @@ branch stay different.
 **A module update fails with `PermissionError: … 'ezdxf.ini'`.** A program run
 as `odoo` started in OmniaCLI's folder, `/var/lib/omniacli` (`750`), and a
 library (ezdxf, imported by an Odoo module) looks for its ini file in the
-current folder. Since 2026.1.8 programs run as another user start in `/`.
+current folder. Since 2026.1.11 programs run as another user start in `/`.
 On an older version, `sudo chmod 751 /var/lib/omniacli` works around it; put
 it back to `750` after the upgrade.
 
@@ -517,7 +517,7 @@ it back to `750` after the upgrade.
 is a git submodule (a library inside an Odoo module), never initialised on
 the server: a reset does not touch submodules, and the check counts a
 submodule off its commit as an uncommitted change. `git submodule update
---init` fixes it. Since 2026.1.9 OmniaCLI does it after every pull and merge
+--init` fixes it. Since 2026.1.11 OmniaCLI does it after every pull and merge
 (see [Rules the actions follow](#rules-the-actions-follow)); the submodules'
 remotes must be readable by `omniacli` without a prompt.
 
