@@ -531,8 +531,26 @@ must have, its name, its own `self_test`): one that fails is disabled, and
 the **Plugins** page (admins) says why. The servers of a type without its
 plugin are kept as written, without actions, until it is back.
 
-The Odoo plugin is built in for now (`omniacli/odoo`, which imports only
-`plugin_api`).
+A plugin may also give:
+
+- **`fields()`**: its settings of an instance, which the server form draws
+  (with buttons next to a field that call the plugin's routes: Odoo's
+  *Reload* of the Odoo config, its *pip* buttons);
+- **`actions()`**: buttons of its own on the server page. The core checks the
+  role, runs the action as a job of the instance (or of the whole server) and
+  draws a confirm, a dialog of parameters, or a dialog of the plugin's own
+  template; they are posted to `/servers/<server>/<role>/x/<plugin>/<action>`;
+- **`router(host)`**: a FastAPI router served under `/x/<plugin>/` (login
+  needed; `host.needs(role)` for more), with its own templates
+  (`templates_dir`, which may extend `base.html`) and static files
+  (`static_dir`, at `/x/<plugin>/static/`);
+- **`dev_setup()`** and **`mcp_help`**: its part of the MCP tool `dev_setup`
+  and of the MCP instructions.
+
+Two plugins are built in: **generic** (git repositories and a systemd or
+init.d service, nothing else: what an install without plugins has) and
+**Odoo** (`omniacli/odoo`, which imports only `plugin_api`). The core imports
+neither: it reaches them through the contract only.
 
 ## Acknowledgements
 

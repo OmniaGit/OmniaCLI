@@ -18,7 +18,7 @@ as they are, without actions, until it is back.</p>
     <tr>
       <td class="mono">{{ info.name }}</td>
       <td>{{ info.plugin.label if info.plugin else "" }}</td>
-      <td>{% if info.plugin %}<span class="badge active">Loaded</span>{% else %}<span class="badge draft">Disabled</span><br><span class="error">{{ info.error }}</span>{% endif %}</td>
+      <td>{% if info.plugin %}<span class="badge active">Loaded</span>{% if route_errors.get(info.name) %}<br><span class="error">Its routes are not served: {{ route_errors[info.name] }}</span>{% endif %}{% else %}<span class="badge draft">Disabled</span><br><span class="error">{{ info.error }}</span>{% endif %}</td>
       <td>{{ info.source }}{% if info.version %} <span class="mono">{{ info.version }}</span>{% endif %}<br><span class="muted mono">{{ info.target }}</span></td>
       <td>{{ count.get(info.name, 0) }}</td>
     </tr>

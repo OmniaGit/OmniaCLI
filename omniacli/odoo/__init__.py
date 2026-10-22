@@ -8,13 +8,47 @@ package does.
 
 from __future__ import annotations
 
+import asyncio
 import configparser
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..plugin_api import PLUGIN_API, Check, ConfigError, Instance, Job, ServicePlugin
+from fastapi import APIRouter, Body, Depends, Request
+from fastapi.responses import JSONResponse
+
+from ..plugin_api import (
+    PLUGIN_API,
+    ROLES,
+    SERVER_NAME,
+    USER_NAME,
+    Action,
+    ActionRefused,
+    Check,
+    ConfigError,
+    Field,
+    FormButton,
+    Host,
+    Instance,
+    Job,
+    ServicePlugin,
+    capture,
+    restart,
+)
 from . import checks, odooconf, ops
+
+# Odoo config options that are secrets or belong to the server's own layout:
+# never given out by dev_setup
+_PRIVATE = re.compile(r"passw|secret|token|key|^(db_host|db_port|db_user|data_dir|logfile|pidfile"
+                      r"|addons_path|upgrade_path|pre_upgrade_scripts)$")
+
+MCP_HELP = """Servers of type odoo: update_test also updates the changed modules before
+the restart. dev_setup gives the Odoo and Python versions, the addons_path as
+repository folders and the Odoo config options without secrets: clone every
+repository at its branch, write an odoo.conf with those options and an
+addons_path of the local clones. A backup zip holds the database dump and the
+filestore: restore it with click-odoo-restoredb or Odoo's database manager."""
 
 
 @dataclass
@@ -119,3 +153,183 @@ class OdooPlugin(ServicePlugin):
     def disk_paths(self, instance: Instance) -> list[tuple[str, str]]:
         data_dir = _data_dir(instance.options.odoo_config)
         return [("filestore", data_dir)] if data_dir else []
+
+    # --- the server form, the server page, the routes, MCP --------------
+
+    mcp_help = MCP_HELP
+
+    def templates_dir(self) -> Path:
+        return Path(__file__).parent / "templates"
+
+    def fields(self) -> list[Field]:
+        return [
+            Field("database", "Database", required=True),
+            Field("odoo_config", "Odoo config file", "path", required=True, buttons=(
+                FormButton("Reload", "form/config", only_with_value=False,
+                           title="Read database, log file and repositories from this file"),)),
+            Field("venv_bin", "Venv bin (click-odoo-contrib)", "path", required=True, buttons=(
+                FormButton("pip requirements", "form/pip-requirements",
+                           title="pip install, in this venv, the requirements.txt of Odoo and of the repositories below",
+                           confirm="pip install the requirements.txt of Odoo and of the repositories in {venv_bin}?"),
+                FormButton("pip click-odoo", "form/pip-cli",
+                           title="pip install click-odoo-contrib, the scripts OmniaCLI runs, in this venv",
+                           confirm="pip install click-odoo-contrib in {venv_bin}?"))),
+            Field("http_port", "HTTP port", "number", restart_types=("process",),
+                  placeholder="empty: the port of the Odoo config",
+                  disabled_placeholder="only with restart type process",
+                  help="Restart type process only: OmniaCLI starts odoo-bin with --http-port, "
+                       "which wins over the Odoo config"),
+            Field("odoo_bin", "odoo-bin (update of chosen modules)", "path",
+                  placeholder="empty: odoo-bin found in a repository"),
+            Field("update_modules", "Update changed modules", "checkbox", default=True),
+        ]
+
+    def actions(self) -> list[Action]:
+        def as_whom(inst):
+            return f" as {inst.run_as}" if inst.run_as else ""
+
+        return [
+            Action("update", "Update modules", self._update, group="git", icon="github",
+                   dialog="update_dialog.html", prepare=_update_params, title=_update_title),
+            Action("pip-requirements", "pip requirements", self._pip_requirements, group="python",
+                   icon="python",
+                   tooltip="pip install the requirements.txt of Odoo and of the repositories in the venv",
+                   confirm=lambda inst: f"pip install, in {inst.options.venv_bin}{as_whom(inst)}, the "
+                                        f"requirements.txt of Odoo and of every repository of {inst.key}?",
+                   title=lambda inst, params: f"pip install requirements {inst.key}"),
+            Action("pip-cli", "pip click-odoo", self._pip_cli, group="python", icon="python",
+                   tooltip="pip install click-odoo-contrib, the scripts OmniaCLI runs in the venv",
+                   confirm=lambda inst: f"pip install {ops.CLI_PACKAGE} in "
+                                        f"{inst.options.venv_bin}{as_whom(inst)}?",
+                   title=lambda inst, params: f"pip install {ops.CLI_PACKAGE} {inst.key}"),
+        ]
+
+    async def _update(self, job: Job, instance: Instance, params: dict) -> None:
+        if params["mode"] == "chosen":
+            await ops.update_chosen_modules(job, instance, params["modules"])
+        else:
+            await ops.update_modules(job, instance, force=True)
+        if params["restart"]:
+            await restart(job, instance)
+
+    async def _pip_requirements(self, job: Job, instance: Instance, params: dict) -> None:
+        await ops.install_requirements(job, instance.options.venv_bin, instance.options.odoo_bin,
+                                       [r.path for r in instance.repositories], instance.run_as)
+
+    async def _pip_cli(self, job: Job, instance: Instance, params: dict) -> None:
+        await ops.install_cli(job, instance.options.venv_bin, instance.run_as)
+
+    def router(self, host: Host):
+        router = APIRouter()
+
+        def refuse(message: str):
+            return JSONResponse({"error": message}, status_code=400)
+
+        @router.get("/servers/{server}/{role}/addons")
+        async def addons(server: str, role: str):
+            """The modules the update dialog offers."""
+            instance = host.instance(server, role)
+            odoo_bin = ops.find_odoo_bin(instance)
+            return {
+                "addons": await asyncio.to_thread(ops.list_addons, instance),
+                "odoo_bin": str(odoo_bin) if odoo_bin else None,
+            }
+
+        @router.post("/form/config", dependencies=[Depends(host.needs("admin"))])
+        async def form_config(payload: dict = Body(...)):
+            """The database, log file and repositories an Odoo config gives."""
+            path = str((payload.get("values") or {}).get("odoo_config") or "").strip()
+            if not path:
+                return refuse("Set the Odoo config file first")
+            try:
+                found = await odooconf.read_odoo_config(path)
+            except ConfigError as exc:
+                return refuse(str(exc))
+            return {"fill": {k: found[k] for k in ("database", "log_file") if found[k]},
+                    "repositories": found["repositories"], "notes": found["notes"]}
+
+        async def form_pip(request, payload: dict, kind: str):
+            """The pip buttons of the server form: on the venv, odoo-bin and
+            repository folders typed there, saved or not (a draft too)."""
+            values = payload.get("values") or {}
+            venv_bin = Path(str(values.get("venv_bin") or "").strip())
+            if not venv_bin.is_absolute() or not os.access(venv_bin / "python", os.X_OK):
+                return refuse(f"No python in {venv_bin}: set the venv's bin folder")
+            odoo_text = str(values.get("odoo_bin") or "").strip()
+            odoo_bin = Path(odoo_text) if odoo_text else None
+            folders = [Path(str(r.get("path") or "").strip()) for r in values.get("repositories") or []
+                       if isinstance(r, dict) and str(r.get("path") or "").strip()]
+            folders = [p for p in folders if p.is_absolute() and p.is_dir()]
+            run_as = str(values.get("run_as") or "").strip() or None
+            if run_as is not None and not USER_NAME.fullmatch(run_as):
+                return refuse(f"{run_as!r} is not a user name")
+            name, role = str(payload.get("name") or "").strip(), str(payload.get("role") or "")
+            # the instance's key when the form names one: its jobs wait for each other
+            key = f"{name if SERVER_NAME.fullmatch(name) else 'form'}/{role if role in ROLES else 'venv'}"
+            if kind == "requirements":
+                job = host.submit(request, f"pip install requirements {key}", [key],
+                                  lambda job: ops.install_requirements(job, venv_bin, odoo_bin, folders, run_as))
+            else:
+                job = host.submit(request, f"pip install {ops.CLI_PACKAGE} {key}", [key],
+                                  lambda job: ops.install_cli(job, venv_bin, run_as))
+            return {"job": job.id}
+
+        @router.post("/form/pip-requirements", dependencies=[Depends(host.needs("admin"))])
+        async def form_pip_requirements(request: Request, payload: dict = Body(...)):
+            return await form_pip(request, payload, "requirements")
+
+        @router.post("/form/pip-cli", dependencies=[Depends(host.needs("admin"))])
+        async def form_pip_cli(request: Request, payload: dict = Body(...)):
+            return await form_pip(request, payload, "cli")
+
+        return router
+
+    async def dev_setup(self, instance: Instance, repositories: list[dict]) -> dict:
+        for repo, data in zip(instance.repositories, repositories):
+            data["has_odoo_bin"] = (repo.path / "odoo-bin").is_file()
+        parser = configparser.ConfigParser(interpolation=None)
+        try:
+            parser.read(instance.options.odoo_config, encoding="utf-8")
+        except (configparser.Error, UnicodeDecodeError):
+            pass
+        options = dict(parser.items("options")) if parser.has_section("options") else {}
+        addons = []
+        for raw in options.get("addons_path", "").replace("\n", ",").split(","):
+            if not raw.strip():
+                continue
+            folder = Path(raw.strip()).resolve()
+            owner = next((r for r in instance.repositories
+                          if folder == r.path.resolve() or r.path.resolve() in folder.parents), None)
+            addons.append({"repository": owner.name, "subpath": str(folder.relative_to(owner.path.resolve()))}
+                          if owner else {"outside_repositories": str(folder)})
+        odoo_bin = ops.find_odoo_bin(instance)
+        _, python = await capture([instance.options.venv_bin / "python", "-c",
+                                   "import sys; print('%d.%d.%d' % sys.version_info[:3])"])
+        return {
+            "database": instance.options.database,
+            "odoo_version": ops.odoo_major(odoo_bin) if odoo_bin else None,
+            "python": python or None,
+            "addons_path": addons,
+            "odoo_conf_options": {k: v for k, v in options.items() if not _PRIVATE.search(k)},
+        }
+
+
+def _update_params(instance: Instance, params: dict) -> dict:
+    """The update dialog's choice: the changed modules, or those chosen."""
+    mode = params.get("mode")
+    modules = [str(m).strip() for m in params.get("modules") or [] if str(m).strip()]
+    if mode == "chosen":
+        bad = [m for m in modules if not ops.ADDON_NAME.fullmatch(m)]
+        if not modules or bad:
+            raise ActionRefused(f"Invalid modules: {', '.join(bad)}" if bad else "Choose at least one module")
+    elif mode != "changed":
+        raise ActionRefused("mode must be 'changed' or 'chosen'")
+    return {"mode": mode, "modules": modules if mode == "chosen" else [], "restart": bool(params.get("restart"))}
+
+
+def _update_title(instance: Instance, params: dict) -> str:
+    if params["mode"] == "chosen":
+        title = f"Update {', '.join(params['modules'])} on {instance.key}"
+    else:
+        title = f"Update changed modules on {instance.key}"
+    return title + (" + restart" if params["restart"] else "")

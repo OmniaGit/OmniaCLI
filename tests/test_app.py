@@ -293,11 +293,11 @@ async def test_update_popup_actions(client, env):
     make_addons(env)
     test = env["settings"].instance("srv", "test")
     test.options.update_modules = False  # the explicit update runs anyway
-    data = (await client.get("/api/servers/srv/test/addons", headers={"Authorization": AUTH})).json()
+    data = (await client.get("/x/odoo/servers/srv/test/addons", headers={"Authorization": AUTH})).json()
     assert [a["name"] for a in data["addons"]] == ["in_repo", "outside"]
     assert data["odoo_bin"].endswith("odoo-bin")
 
-    url = "/api/servers/srv/test/update"
+    url = "/servers/srv/test/x/odoo/update"
     for body in ({"mode": "chosen", "modules": []}, {"mode": "chosen", "modules": ["bad;rm"]},
                  {"mode": "other"}):
         assert (await client.post(url, headers=POST, json=body)).status_code == 400
@@ -332,7 +332,8 @@ async def test_restart_action(client, env):
     assert data["status"] == "success"
     assert env["calls"].read_text() == "restart odoo-test\n"
     page = await client.get("/servers/srv?view=test", headers={"Authorization": AUTH})
-    assert 'class="open-update"' in page.text and "/servers/srv/test/restart" in page.text
+    assert 'data-action="odoo.update"' in page.text and 'data-url="/servers/srv/test/x/odoo/update"' in page.text
+    assert "/servers/srv/test/restart" in page.text
     assert "/servers/srv/production/restart" not in page.text
 
 
@@ -669,10 +670,11 @@ async def test_read_odoo_config(client, env):
     conf = tmp / "read.conf"
     conf.write_text(f"[options]\naddons_path = {addons}/sub,\n    {odoo},\n    {addons},\n"
                     f"    {tmp}/missing\ndb_name = False\ndbfilter = ^PROD$\nlogfile = /var/log/x.log\n")
-    resp = await client.post("/api/odoo-config", headers=POST, json={"path": str(conf)})
+    url = "/x/odoo/form/config"
+    resp = await client.post(url, headers=POST, json={"values": {"odoo_config": str(conf)}})
     data = resp.json()
     assert resp.status_code == 200, data
-    assert data["database"] == "PROD" and data["log_file"] == "/var/log/x.log"
+    assert data["fill"] == {"database": "PROD", "log_file": "/var/log/x.log"}
     assert data["repositories"] == [
         {"name": "addons", "path": str(addons), "remote": "origin", "branch": "main"},
         {"name": "odoo", "path": str(odoo), "remote": "origin", "branch": "main"},
@@ -681,13 +683,20 @@ async def test_read_odoo_config(client, env):
     assert any("odoo-bin" in n for n in data["notes"])
 
     conf.write_text("[options]\ndb_name = A,B\n")
-    data = (await client.post("/api/odoo-config", headers=POST, json={"path": str(conf)})).json()
-    assert data["database"] is None and data["log_file"] is None and data["repositories"] == []
+    data = (await client.post(url, headers=POST, json={"values": {"odoo_config": str(conf)}})).json()
+    assert data["fill"] == {} and data["repositories"] == []
     assert any("several databases" in n for n in data["notes"])
 
     for path, error in ((tmp / "none.conf", "cannot read"), (env["tmp"] / "odoo.log", "no [options]")):
-        resp = await client.post("/api/odoo-config", headers=POST, json={"path": str(path)})
+        resp = await client.post(url, headers=POST, json={"values": {"odoo_config": str(path)}})
         assert resp.status_code == 400 and error in resp.json()["error"]
+    resp = await client.post(url, headers=POST, json={"values": {}})
+    assert resp.status_code == 400 and "Set the Odoo config file first" in resp.json()["error"]
+    dev = {"Authorization": basic("dev"), "Origin": f"http://{HOST}"}
+    assert (await client.post(url, headers=dev, json={"values": {"odoo_config": str(conf)}})).status_code == 403
+    # the routes of a plugin need a login like every page
+    client.cookies.clear()
+    assert (await client.get("/x/odoo/servers/srv/test/addons")).status_code == 401
 
 
 async def test_incomplete_draft(client, env):
@@ -813,7 +822,8 @@ async def test_user_role_watches_and_restarts(client, env):
     # settings, paths and repositories: developers and admins only
     assert "Settings and repositories" not in page and "odoo.conf" not in page
     assert "Settings and repositories" in (await client.get("/servers/srv", headers={"Authorization": basic("dev")})).text
-    assert "Backup" not in page and "/config\">Servers<" not in page and "/pip-cli" not in page
+    assert "Backup" not in page and "/config\">Servers<" not in page and "/x/odoo/pip-cli" not in page
+    assert 'data-action="odoo.update"' not in page
     for action in ("restart", "start", "stop"):
         for role in ("production", "test"):
             assert f"/servers/srv/{role}/{action}" in page, (role, action)
@@ -827,7 +837,8 @@ async def test_user_role_watches_and_restarts(client, env):
     assert (await get("/api/servers/srv/test/backups")).status_code == 200
     for url in ("/config", "/config/new", "/config/srv/edit", "/backups/srv/test/x.zip"):
         assert (await get(url)).status_code == 403, url
-    for url in ("/servers/srv/test/pull", "/servers/srv/test/backup", "/servers/srv/test/pip-cli",
+    for url in ("/servers/srv/test/pull", "/servers/srv/test/backup", "/servers/srv/test/x/odoo/pip-cli",
+                "/servers/srv/test/x/odoo/update",
                 "/servers/srv/merge", "/api/servers/srv/test", "/api/servers/srv/deactivate"):
         assert (await post(url)).status_code == 403, url
 
@@ -1064,12 +1075,12 @@ async def test_pip_buttons(client, env):
     python.chmod(0o755)
     headers = {"Authorization": basic("dev"), "Origin": f"http://{HOST}"}
     page = (await client.get("/servers/srv?view=test", headers=headers)).text
-    assert "/servers/srv/test/pip-requirements" in page and "/servers/srv/test/pip-cli" in page
+    assert "/servers/srv/test/x/odoo/pip-requirements" in page and "/servers/srv/test/x/odoo/pip-cli" in page
     assert "pip-requirements" not in (await client.get("/servers/srv?view=test",
                                                         headers={"Authorization": basic("viewer")})).text
 
     # no requirements.txt anywhere: the job says so
-    resp = await client.post("/servers/srv/test/pip-requirements", headers=headers)
+    resp = await client.post("/servers/srv/test/x/odoo/pip-requirements", headers=headers)
     data = await wait_job(client, resp.headers["location"].rsplit("/", 1)[1])
     assert data["status"] == "failed" and "no requirements.txt" in data["error"]
 
@@ -1077,18 +1088,18 @@ async def test_pip_buttons(client, env):
     (odoo / "odoo-bin").write_text("")
     (odoo / "requirements.txt").write_text("lxml\n")
     (addons / "requirements.txt").write_text("requests\n")
-    resp = await client.post("/servers/srv/test/pip-requirements", headers=headers)
+    resp = await client.post("/servers/srv/test/x/odoo/pip-requirements", headers=headers)
     data = await wait_job(client, resp.headers["location"].rsplit("/", 1)[1])
     assert data["status"] == "success" and data["source"] == "manual: dev", data
     # Odoo's first, once even though odoo-bin is in a repository too
     assert calls.read_text().splitlines() == [
         f"python -m pip install --disable-pip-version-check -r {odoo}/requirements.txt -r {addons}/requirements.txt"]
 
-    resp = await client.post("/servers/srv/test/pip-cli", headers=headers)
+    resp = await client.post("/servers/srv/test/x/odoo/pip-cli", headers=headers)
     data = await wait_job(client, resp.headers["location"].rsplit("/", 1)[1])
     assert data["status"] == "success" and data["title"] == "pip install click-odoo-contrib srv/test"
     assert calls.read_text().splitlines()[-1] == "python -m pip install --disable-pip-version-check click-odoo-contrib"
-    for url in ("/servers/srv/test/pip-requirements", "/servers/srv/test/pip-cli"):
+    for url in ("/servers/srv/test/x/odoo/pip-requirements", "/servers/srv/test/x/odoo/pip-cli"):
         resp = await client.post(url, headers={"Authorization": basic("viewer"), "Origin": f"http://{HOST}"})
         assert resp.status_code == 403
 
@@ -1104,26 +1115,29 @@ async def test_pip_buttons_in_the_form(client, env, tmp_path):
     (odoo / "requirements.txt").write_text("lxml\n")
     headers = {"Authorization": AUTH, "Origin": f"http://{HOST}"}
     page = (await client.get("/config/srv/edit", headers=headers)).text
-    assert 'class="pip-buttons"' in page and 'data-pip="requirements"' in page and 'data-pip="cli"' in page
+    assert '"route": "form/pip-requirements"' in page and '"route": "form/pip-cli"' in page
 
-    body = {"kind": "requirements", "name": "newsrv", "role": "test", "venv_bin": str(venv),
-            "odoo_bin": "", "repositories": [str(odoo), "", "relative/path", str(tmp_path / "missing")]}
-    resp = await client.post("/api/venv/pip", json=body, headers=headers)
+    body = {"name": "newsrv", "role": "test", "values": {
+        "venv_bin": str(venv), "odoo_bin": "",
+        "repositories": [{"path": p} for p in (str(odoo), "", "relative/path", str(tmp_path / "missing"))]}}
+    resp = await client.post("/x/odoo/form/pip-requirements", json=body, headers=headers)
     assert resp.status_code == 200, resp.text
     data = await wait_job(client, resp.json()["job"])
     assert data["status"] == "success" and data["instances"] == ["newsrv/test"], data
     assert calls.read_text().splitlines() == [
         f"python -m pip install --disable-pip-version-check -r {odoo}/requirements.txt"]
-    resp = await client.post("/api/venv/pip", json={**body, "kind": "cli", "name": ""}, headers=headers)
+    resp = await client.post("/x/odoo/form/pip-cli", json={**body, "name": ""}, headers=headers)
     data = await wait_job(client, resp.json()["job"])
     assert data["status"] == "success" and data["title"] == "pip install click-odoo-contrib form/test"
     assert calls.read_text().splitlines()[-1].endswith("install --disable-pip-version-check click-odoo-contrib")
 
-    resp = await client.post("/api/venv/pip", json={**body, "venv_bin": str(tmp_path)}, headers=headers)
+    bad = {**body, "values": {**body["values"], "venv_bin": str(tmp_path)}}
+    resp = await client.post("/x/odoo/form/pip-cli", json=bad, headers=headers)
     assert resp.status_code == 400 and "No python in" in resp.json()["error"]
-    resp = await client.post("/api/venv/pip", json={**body, "kind": "x"}, headers=headers)
-    assert resp.status_code == 400
-    resp = await client.post("/api/venv/pip", json=body,
+    bad = {**body, "values": {**body["values"], "run_as": "no such user!"}}
+    resp = await client.post("/x/odoo/form/pip-cli", json=bad, headers=headers)
+    assert resp.status_code == 400 and "is not a user name" in resp.json()["error"]
+    resp = await client.post("/x/odoo/form/pip-requirements", json=body,
                              headers={"Authorization": basic("dev"), "Origin": f"http://{HOST}"})
     assert resp.status_code == 403
 

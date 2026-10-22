@@ -34,6 +34,7 @@ packages = ["omniacli", "omniacli.odoo"]
 
 [tool.setuptools.package-data]
 omniacli = ["templates/*.html", "static/*"]
+"omniacli.odoo" = ["templates/*.html"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

@@ -8,6 +8,7 @@ import asyncio
 import contextlib
 import importlib.metadata
 import importlib.util
+import logging
 import os
 import re
 from dataclasses import asdict
@@ -16,6 +17,7 @@ from typing import Optional
 from urllib.parse import parse_qs, quote, urlsplit
 
 import httpx
+import jinja2
 from fastapi import Body, Depends, FastAPI, HTTPException, Request, status
 from fastapi.exception_handlers import http_exception_handler
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
@@ -25,16 +27,10 @@ from starlette.background import BackgroundTask
 
 from . import checks, disks, ops, plugins
 from .accesslog import AccessLog
-# Odoo's own routes below (modules, pip, its config file) call the Odoo plugin
-# directly: the other routes reach any type through instance.plugin
-from .odoo import ops as odoo_ops
-from .odoo.odooconf import read_odoo_config
 from .auth import ROLES as ACCESS_ROLES
 from .auth import Authenticator, Principal, hash_password, hash_token, new_token, verify_password
 from .config import (
     ROLES,
-    SERVER_NAME,
-    USER_NAME,
     Access,
     ConfigError,
     Instance,
@@ -55,7 +51,7 @@ from .config import (
     server_to_dict,
 )
 from .jobs import JobManager, filter_jobs
-from .plugin_api import ENTRY_POINT_GROUP, PLUGIN_API
+from .plugin_api import ENTRY_POINT_GROUP, PLUGIN_API, ActionRefused, Host
 from .links import LIST_TIMEOUT, LinkClients, describe_error, link_headers
 from .logtail import read_since
 from .metrics import Sampler
@@ -78,8 +74,26 @@ def _page_context(request: Request) -> dict:
     }
 
 
-_TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"),
-                             context_processors=[_page_context])
+class _TemplateLoader(jinja2.BaseLoader):
+    """The core's templates, and "<plugin>/<name>" from the templates_dir of
+    a loaded plugin (looked up at every load: the plugins may be replaced)."""
+
+    def __init__(self, core: Path):
+        self.core = jinja2.FileSystemLoader(str(core))
+
+    def get_source(self, environment, template):
+        name, _, rest = template.partition("/")
+        plugin = plugins.registry().get(name) if rest else None
+        folder = plugin.templates_dir() if plugin is not None else None
+        if folder is not None:
+            return jinja2.FileSystemLoader(str(folder)).get_source(environment, rest)
+        return self.core.get_source(environment, template)
+
+
+_TEMPLATES = Jinja2Templates(
+    env=jinja2.Environment(loader=_TemplateLoader(Path(__file__).parent / "templates"),
+                           autoescape=jinja2.select_autoescape()),
+    context_processors=[_page_context])
 # The OmniaSolutions "O" (Client2019 Setup/dist/images/omnia.ico, 355x280,
 # centred on a transparent square); served without login, like any favicon.
 _STATIC = Path(__file__).parent / "static"
@@ -104,6 +118,44 @@ _MIN_PASSWORD = 8
 _LINK_REQUEST_HEADERS = ("content-type", "accept", "accept-language")
 _LINK_RESPONSE_HEADERS = ("content-type", "content-disposition", "content-length",
                           "content-encoding", "location", "cache-control")
+
+
+_logger = logging.getLogger(__name__)
+
+
+def _field_value(field, raw):
+    """A posted parameter as its Field's kind wants it (a form posts text,
+    a dialog's script JSON); ActionRefused when it cannot be one."""
+    if field.kind == "checkbox":
+        return raw not in (None, False, "", "0", "false", "off")
+    if raw is None:
+        # not posted (a script that leaves it out): its default
+        raw = field.default
+    text = "" if raw is None else str(raw).strip()
+    if field.kind == "number":
+        if text == "":
+            if field.required:
+                raise ActionRefused(f"{field.label}: a number is required")
+            return None
+        try:
+            return int(text)
+        except ValueError:
+            raise ActionRefused(f"{field.label}: {text!r} is not a whole number") from None
+    if field.required and not text:
+        raise ActionRefused(f"{field.label} is required")
+    if field.kind == "select" and text and text not in [str(value) for value, _ in field.choices]:
+        raise ActionRefused(f"{field.label}: {text!r} is not one of the choices")
+    return text
+
+
+def _field_dict(field) -> dict:
+    """A Field for the server form's script."""
+    return {"key": field.key, "label": field.label, "kind": field.kind, "default": field.default,
+            "required": field.required, "placeholder": field.placeholder, "help": field.help,
+            "choices": [list(c) for c in field.choices], "restart_types": list(field.restart_types),
+            "disabled_placeholder": field.disabled_placeholder,
+            "buttons": [{"label": b.label, "route": b.route, "title": b.title, "confirm": b.confirm,
+                         "only_with_value": b.only_with_value} for b in field.buttons]}
 
 
 def _version() -> str:
@@ -326,13 +378,6 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             raise HTTPException(status.HTTP_404_NOT_FOUND, f"No instance {server}/{role}")
         return instance
 
-    def odoo_instance(server: str, role: str) -> Instance:
-        """An instance of an Odoo server, for Odoo's own routes."""
-        instance = get_instance(server, role)
-        if instance.type != "odoo":
-            raise HTTPException(status.HTTP_404_NOT_FOUND, f"{server} is not an Odoo server")
-        return instance
-
     def started(request: Request, job, query: str = "") -> RedirectResponse:
         return RedirectResponse(f"{prefix_of(request)}/jobs/{job.id}{query}", status.HTTP_303_SEE_OTHER)
 
@@ -477,6 +522,15 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         elif view != "both":
             raise HTTPException(status.HTTP_404_NOT_FOUND, f"No instance {server}/{view}")
         shown = [srv.instances[r] for r in roles]
+        me = request.state.user
+        base = f"{prefix_of(request)}/servers/{srv.name}"
+        buttons = {i.key: action_buttons(i, i.plugin, "instance", me, f"{base}/{i.role}") for i in shown}
+        plugin = plugins.registry().get(srv.type)
+        server_buttons = action_buttons(srv, plugin, "server", me, base)
+        # each dialog of the plugin's own, drawn once
+        dialogs = sorted({f"{b['plugin']}/{b['action'].dialog}"
+                          for groups in [*buttons.values(), server_buttons]
+                          for group in groups.values() for b in group if b["action"].dialog})
         statuses = await asyncio.gather(
             *(asyncio.gather(*(ops.repository_status(r) for r in i.repositories)) for i in shown)
         )
@@ -487,6 +541,12 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
                 "server": srv,
                 "view": view if view in srv.instances else "both",
                 "instances": shown,
+                "buttons": buttons,
+                "server_buttons": server_buttons,
+                "dialogs": dialogs,
+                "core_groups": core_groups,
+                # the plugin's settings of each instance, as its fields name them
+                "settings_rows": {i.key: settings_rows(i) for i in shown},
                 "repo_status": {i.key: s for i, s in zip(shown, statuses)},
                 "auto_state": updater.state,
                 "busy": {i.key: jobs.is_busy(i.key) for i in srv.instances.values()},
@@ -498,6 +558,12 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
                 "jobs": [j for j in jobs.recent(200) if any(k.startswith(f"{server}/") for k in j.instances)][:10],
             },
         )
+
+    def settings_rows(inst: Instance) -> list[tuple]:
+        """(label, value, kind) of the plugin's fields that apply to the instance."""
+        values = inst.plugin.options_to_dict(inst.options)
+        return [(f.label, values.get(f.key), f.kind) for f in inst.plugin.fields()
+                if not f.restart_types or inst.restart.type in f.restart_types]
 
     @app.get("/api/info")
     async def info(user: Principal = Depends(current_user)):
@@ -574,108 +640,6 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
                 lambda job: ops.pull_restart(job, instance),
             )
         )
-
-    @app.post("/servers/{server}/{role}/pip-requirements")
-    async def action_pip_requirements(request: Request, server: str, role: str,
-                                      user: Principal = Depends(developer)):
-        instance = odoo_instance(server, role)
-        return started(
-            request,
-            jobs.submit(
-                f"pip install requirements {instance.key}",
-                [instance.key],
-                f"manual: {user}",
-                lambda job: odoo_ops.install_requirements(
-                    job, instance.options.venv_bin, instance.options.odoo_bin,
-                    [r.path for r in instance.repositories], instance.run_as),
-            )
-        )
-
-    @app.post("/servers/{server}/{role}/pip-cli")
-    async def action_pip_cli(request: Request, server: str, role: str,
-                             user: Principal = Depends(developer)):
-        instance = odoo_instance(server, role)
-        return started(
-            request,
-            jobs.submit(
-                f"pip install {odoo_ops.CLI_PACKAGE} {instance.key}",
-                [instance.key],
-                f"manual: {user}",
-                lambda job: odoo_ops.install_cli(job, instance.options.venv_bin, instance.run_as),
-            )
-        )
-
-    @app.post("/api/venv/pip")
-    async def form_pip(payload: dict = Body(...), user: Principal = Depends(admin)):
-        """The pip buttons of the server form: on the venv, odoo-bin and
-        repository folders typed there, saved or not (a draft too)."""
-        kind = payload.get("kind")
-        if kind not in ("requirements", "cli"):
-            return JSONResponse({"error": "kind must be 'requirements' or 'cli'"}, status_code=400)
-        venv_bin = Path(str(payload.get("venv_bin") or "").strip())
-        if not venv_bin.is_absolute() or not os.access(venv_bin / "python", os.X_OK):
-            return JSONResponse({"error": f"No python in {venv_bin}: set the venv's bin folder"},
-                                status_code=400)
-        odoo_text = str(payload.get("odoo_bin") or "").strip()
-        odoo_bin = Path(odoo_text) if odoo_text else None
-        folders = [Path(str(p).strip()) for p in payload.get("repositories") or [] if str(p).strip()]
-        folders = [p for p in folders if p.is_absolute() and p.is_dir()]
-        run_as = str(payload.get("run_as") or "").strip() or None
-        if run_as is not None and not USER_NAME.fullmatch(run_as):
-            return JSONResponse({"error": f"{run_as!r} is not a user name"}, status_code=400)
-        name, role = str(payload.get("name") or "").strip(), str(payload.get("role") or "")
-        # the instance's key when the form names one: its jobs wait for each other
-        key = f"{name if SERVER_NAME.fullmatch(name) else 'form'}/{role if role in ROLES else 'venv'}"
-        if kind == "requirements":
-            job = jobs.submit(f"pip install requirements {key}", [key], f"manual: {user}",
-                              lambda job: odoo_ops.install_requirements(job, venv_bin, odoo_bin, folders, run_as))
-        else:
-            job = jobs.submit(f"pip install {odoo_ops.CLI_PACKAGE} {key}", [key], f"manual: {user}",
-                              lambda job: odoo_ops.install_cli(job, venv_bin, run_as))
-        return {"job": job.id}
-
-    @app.get("/api/servers/{server}/{role}/addons")
-    async def addons(server: str, role: str):
-        instance = odoo_instance(server, role)
-        odoo_bin = odoo_ops.find_odoo_bin(instance)
-        return {
-            "addons": await asyncio.to_thread(odoo_ops.list_addons, instance),
-            "odoo_bin": str(odoo_bin) if odoo_bin else None,
-        }
-
-    @app.post("/api/servers/{server}/{role}/update")
-    async def action_update(
-        server: str, role: str, payload: dict = Body(...), user: Principal = Depends(developer)
-    ):
-        instance = odoo_instance(server, role)
-        mode = payload.get("mode")
-        modules = [str(m).strip() for m in payload.get("modules") or [] if str(m).strip()]
-        restart_after = bool(payload.get("restart"))
-        if mode == "chosen":
-            bad = [m for m in modules if not odoo_ops.ADDON_NAME.fullmatch(m)]
-            if not modules or bad:
-                return JSONResponse(
-                    {"error": f"Invalid modules: {', '.join(bad)}" if bad else "Choose at least one module"},
-                    status_code=400,
-                )
-            title = f"Update {', '.join(modules)} on {instance.key}"
-        elif mode == "changed":
-            title = f"Update changed modules on {instance.key}"
-        else:
-            return JSONResponse({"error": "mode must be 'changed' or 'chosen'"}, status_code=400)
-
-        async def action(job):
-            if mode == "chosen":
-                await odoo_ops.update_chosen_modules(job, instance, modules)
-            else:
-                await odoo_ops.update_modules(job, instance, force=True)
-            if restart_after:
-                await ops.restart(job, instance)
-
-        if restart_after:
-            title += " + restart"
-        job = jobs.submit(title, [instance.key], f"manual: {user}", action)
-        return {"job": job.id}
 
     @app.post("/servers/{server}/{role}/restart")
     async def action_restart(request: Request, server: str, role: str, user: Principal = Depends(anyone)):
@@ -793,6 +757,145 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             )
         )
 
+    # --- the plugins: their buttons on the server page, their routes -------
+
+    # the core's own groups of buttons, which a plugin's action may join
+    core_groups = ("service", "git", "backup")
+
+    def action_buttons(target, plugin, scope: str, me: Principal, base: str) -> dict:
+        """The plugin's actions the caller may run on target, by group:
+        {group: [button]}, the core's groups first."""
+        groups = {g: [] for g in core_groups}
+        if me.kind == "token":
+            return groups
+        info = plugin.describe(target) if scope == "instance" else {}
+        for action in plugin.actions():
+            if action.scope != scope or not me.can(action.role):
+                continue
+            groups.setdefault(action.group or plugin.name, []).append({
+                "action": action, "plugin": plugin.name,
+                "url": f"{base}/x/{plugin.name}/{action.id}",
+                "confirm": action.confirm_of(target),
+                "key": getattr(target, "key", getattr(target, "name", "")),
+                "info": info,
+                "dom_id": re.sub(r"[^A-Za-z0-9_-]", "-", f"act-{target_name(target)}-{plugin.name}-{action.id}"),
+            })
+        return groups
+
+    def target_name(target) -> str:
+        return getattr(target, "key", None) or target.name
+
+    async def posted_params(request: Request) -> tuple[dict, bool]:
+        """The parameters posted to an action: JSON (a dialog's script) or a
+        form (a button, the core's dialog); True when JSON. No body: no
+        parameters, answered as a form (a redirect), as the routes before the
+        plugins' actions answered (test_deb.sh posts so)."""
+        if request.headers.get("content-type", "").split(";")[0].strip() == "application/json":
+            if not await request.body():
+                return {}, False
+            try:
+                data = await request.json()
+            except ValueError:
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, "The body is not JSON") from None
+            if not isinstance(data, dict):
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, "The body must be a JSON object")
+            return data, True
+        form = parse_qs((await request.body()).decode("utf-8", "replace"), keep_blank_values=True)
+        return {k: v[-1] for k, v in form.items()}, False
+
+    async def run_action(request: Request, target, keys: list[str], plugin, name: str,
+                         action_id: str, scope: str, user: Principal):
+        if plugin is None or plugin.name != name:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, f"{target_name(target)} is not of type {name}")
+        action = next((a for a in plugin.actions() if a.id == action_id and a.scope == scope), None)
+        if action is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, f"{plugin.label} has no action {action_id}")
+        if not user.can(action.role):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, f"The {action.role} role is required")
+        raw, as_json = await posted_params(request)
+        try:
+            if action.params:
+                params = {f.key: _field_value(f, raw.get(f.key)) for f in action.params}
+            else:
+                # a dialog of the plugin's own: what its script posted
+                params = {k: v for k, v in raw.items() if k != "next"} if action.dialog else {}
+            if action.prepare is not None:
+                params = action.prepare(target, params)
+        except ActionRefused as exc:
+            return refuse(str(exc))
+        job = jobs.submit(action.title_of(target, params), keys, f"manual: {user}",
+                          lambda job: action.run(job, target, params))
+        if as_json:
+            return {"job": job.id}
+        back = raw.get("next")
+        if back:
+            return RedirectResponse(_next_path(back), status.HTTP_303_SEE_OTHER)
+        return started(request, job)
+
+    @app.post("/servers/{server}/{role}/x/{plugin}/{action}")
+    async def instance_action(request: Request, server: str, role: str, plugin: str, action: str,
+                              user: Principal = Depends(current_user)):
+        """An action of the plugin of the server, on one of its instances."""
+        instance = get_instance(server, role)
+        return await run_action(request, instance, [instance.key], instance.plugin, plugin, action,
+                                "instance", user)
+
+    @app.post("/servers/{server}/x/{plugin}/{action}")
+    async def server_action(request: Request, server: str, plugin: str, action: str,
+                            user: Principal = Depends(current_user)):
+        """An action of the plugin of the server, on the whole server."""
+        srv = active_server(server)
+        return await run_action(request, srv, [i.key for i in srv.instances.values()],
+                                plugins.registry().get(srv.type), plugin, action, "server", user)
+
+    class AppHost(Host):
+        """What a plugin's routes get from this application."""
+
+        def __init__(self, plugin):
+            self.plugin = plugin
+
+        def needs(self, role: str):
+            return needs(role)
+
+        def instance(self, server: str, role: str) -> Instance:
+            instance = get_instance(server, role)
+            if instance.plugin is not self.plugin:
+                raise HTTPException(status.HTTP_404_NOT_FOUND,
+                                    f"{server} is not a server of type {self.plugin.name}")
+            return instance
+
+        def submit(self, request, title: str, keys: list[str], action):
+            return jobs.submit(title, keys, f"manual: {request.state.user}", action)
+
+        def render(self, request, template: str, context: dict):
+            return _TEMPLATES.TemplateResponse(request, f"{self.plugin.name}/{template}", context)
+
+    @app.get("/x/{plugin}/static/{path:path}")
+    async def plugin_static(plugin: str, path: str):
+        """A file of a plugin's static_dir (before its router: it wins)."""
+        found = plugins.registry().get(plugin)
+        folder = found.static_dir() if found is not None else None
+        if folder is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "No such file")
+        folder = Path(folder).resolve()
+        target = (folder / path).resolve()
+        if folder not in target.parents or not target.is_file():
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "No such file")
+        return FileResponse(target)
+
+    # a plugin whose router cannot be made keeps its servers and buttons,
+    # without its routes; the Plugins page says why
+    route_errors: dict[str, str] = {}
+    app.state.plugin_route_errors = route_errors
+    for plugin_name, plugin in plugins.registry().plugins.items():
+        try:
+            router = plugin.router(AppHost(plugin))
+            if router is not None:
+                app.include_router(router, prefix=f"/x/{plugin_name}")
+        except Exception as exc:  # noqa: BLE001 - a plugin must not stop OmniaCLI
+            route_errors[plugin_name] = f"{type(exc).__name__}: {exc}"
+            _logger.warning("Plugin %s: its routes are not served: %s", plugin_name, route_errors[plugin_name])
+
     @app.get("/servers/{server}/{role}/log")
     async def log_page(request: Request, server: str, role: str):
         return _TEMPLATES.TemplateResponse(
@@ -873,6 +976,11 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
                     "server": data,
                     "active": bool(original and settings.servers[original].active),
                     "logs_dir": str(settings.logs_dir),
+                    # what the form offers: the loaded plugins, with their fields
+                    "types": {n: {"label": p.label, "has_process": p.has_process,
+                                  "fields": [_field_dict(f) for f in p.fields()]}
+                              for n, p in plugins.registry().plugins.items()},
+                    "default_type": plugins.DEFAULT_TYPE,
                 },
             },
         )
@@ -884,14 +992,11 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         return srv
 
     def editable(name: str):
-        """A server the form edits: the form is Odoo's, so an Odoo server
-        (one whose plugin is missing is left as written)."""
+        """A server the form edits: one whose plugin is there (one whose
+        plugin is missing is left as written)."""
         srv = configured(name)
         if srv.missing_plugin:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, f"{name} cannot be edited: {srv.error}")
-        if srv.type != "odoo":
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"{name} is of type {srv.type}: "
-                                "the form edits Odoo servers only")
         return srv
 
     @app.get("/config", dependencies=[Depends(admin)])
@@ -925,17 +1030,6 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
 
     def refuse(message: str, code: int = status.HTTP_400_BAD_REQUEST):
         return JSONResponse({"error": message}, status_code=code)
-
-    @app.post("/api/odoo-config", dependencies=[Depends(admin)])
-    async def odoo_config_read(payload: dict = Body(...)):
-        """The database, log file and repositories an Odoo config gives."""
-        path = str(payload.get("path") or "").strip()
-        if not path:
-            return refuse("Set the Odoo config file first")
-        try:
-            return await read_odoo_config(path)
-        except ConfigError as exc:
-            return refuse(str(exc))
 
     @app.post("/api/servers/save", dependencies=[Depends(admin)])
     async def config_save(payload: dict = Body(...)):
@@ -1136,7 +1230,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         return _TEMPLATES.TemplateResponse(
             request, "plugins.html",
             {"found": found, "count": count, "missing": missing, "api_version": PLUGIN_API,
-             "group": ENTRY_POINT_GROUP},
+             "group": ENTRY_POINT_GROUP, "route_errors": route_errors},
         )
 
     @app.get("/access", dependencies=[Depends(admin)])

@@ -7,6 +7,7 @@
 {% endblock %}
 {% block content %}
 {% from "_icons.html" import icon %}
+{% from "_actions.html" import action_button %}
 <div class="server-head" style="padding: 0 0 14px; border: 0">
   <h1 style="margin: 0">{{ server.name }}</h1>
   <div class="actions" style="margin: 0">
@@ -17,6 +18,9 @@
           onsubmit="return confirm('Back up production, merge the commits deployed on test into production, push, update modules and restart production {{ server.name }}?')">
       <button class="danger" {% if busy[server.production.key] or busy[server.test.key] %}disabled title="A job is running"{% endif %}>Merge test to production</button>
     </form>{% endif %}{% endif %}
+    {# the plugin's actions on the whole server #}
+    {% set server_off = "disabled" if busy.values() | select | list else "" %}
+    {% for group, found in server_buttons.items() %}{% for b in found %}{{ action_button(b, server_off) }}{% endfor %}{% endfor %}
   </div>
 </div>
 
@@ -36,15 +40,15 @@
       {% if inst.restart.type == "process" %}
       {% set pid = running.get(inst.key) %}
       {% if not pid %}
-      <form method="post" action="{{ base }}/restart" onsubmit="return confirm('Start Odoo of {{ inst.key }}?')">
+      <form method="post" action="{{ base }}/restart" onsubmit='return confirm({{ ("Start " ~ inst.plugin.label ~ " of " ~ inst.key ~ "?") | tojson }})'>
         <input type="hidden" name="next" value="{{ prefix }}/servers/{{ server.name }}?view={{ view }}">
         <button class="btn-start" {{ off }}>{{ icon("start") }}Start</button></form>
       {% else %}
       <form method="post" action="{{ base }}/stop"
-            onsubmit="return confirm('Stop Odoo of {{ inst.key }}? It stays stopped, also for the auto update, until Start.')">
+            onsubmit='return confirm({{ ("Stop " ~ inst.plugin.label ~ " of " ~ inst.key ~ "? It stays stopped, also for the auto update, until Start.") | tojson }})'>
         <input type="hidden" name="next" value="{{ prefix }}/servers/{{ server.name }}?view={{ view }}">
         <button class="btn-stop" {{ off }}>{{ icon("stop") }}Stop</button></form>
-      <form method="post" action="{{ base }}/restart" onsubmit="return confirm('Restart Odoo of {{ inst.key }}?')">
+      <form method="post" action="{{ base }}/restart" onsubmit='return confirm({{ ("Restart " ~ inst.plugin.label ~ " of " ~ inst.key ~ "?") | tojson }})'>
         <button class="btn-restart" {{ off }}>{{ icon("restart") }}Restart</button></form>
       {% endif %}
       {% else %}
@@ -70,32 +74,37 @@
         <button class="btn-restart" {{ off }}>{{ icon("restart") }}Restart</button></form>
       {% if inst.restart.type == "systemd" %}<span class="muted" style="align-self: center">service {{ state or "state unknown" }}</span>{% endif %}
       {% endif %}
+      {% for b in buttons[inst.key].service %}{{ action_button(b, off) }}{% endfor %}
       </div>
-      {% if can_act %}
+      {% if can_act or buttons[inst.key].git %}
       <div class="action-group">
+      {% if can_act %}
       <form method="post" action="{{ base }}/pull">
         <button {{ off }}>{{ icon("github") }}Git pull</button></form>
       <form method="post" action="{{ base }}/pull-restart"
-            onsubmit="return confirm('Pull, update changed modules and restart {{ inst.key }}?')">
+            onsubmit='return confirm({{ ("Pull, deploy and restart " ~ inst.key ~ "?") | tojson }})'>
         <button {{ off }}>{{ icon("github") }}Git pull + restart</button></form>
-      <button type="button" class="open-update" data-server="{{ server.name }}" data-role="{{ inst.role }}"
-              data-database="{{ inst.options.database }}" {{ off }}>{{ icon("github") }}Update modules</button>
+      {% endif %}
+      {% for b in buttons[inst.key].git %}{{ action_button(b, off) }}{% endfor %}
       </div>
+      {% endif %}
+      {% if (can_act and inst.plugin.has_backup) or buttons[inst.key].backup %}
       <div class="action-group">
+      {% if can_act and inst.plugin.has_backup %}
       <form method="post" action="{{ base }}/backup">
         <button {{ off }}>{{ icon("backup") }}Backup</button></form>
       <form method="post" action="{{ base }}/backup?download=1">
-        <button {{ off }} title="Back up the database and filestore, then download the zip">{{ icon("download") }}Backup + download</button></form>
-      </div>
-      <div class="action-group">
-      <form method="post" action="{{ base }}/pip-requirements"
-            onsubmit="return confirm('pip install, in {{ inst.options.venv_bin }}{% if inst.run_as %} as {{ inst.run_as }}{% endif %}, the requirements.txt of Odoo and of every repository of {{ inst.key }}?')">
-        <button {{ off }} title="pip install the requirements.txt of Odoo and of the repositories in the venv">{{ icon("python") }}pip requirements</button></form>
-      <form method="post" action="{{ base }}/pip-cli"
-            onsubmit="return confirm('pip install click-odoo-contrib in {{ inst.options.venv_bin }}{% if inst.run_as %} as {{ inst.run_as }}{% endif %}?')">
-        <button {{ off }} title="pip install click-odoo-contrib, the scripts OmniaCLI runs in the venv">{{ icon("python") }}pip click-odoo</button></form>
+        <button {{ off }} title="Back up, then download the zip">{{ icon("download") }}Backup + download</button></form>
+      {% endif %}
+      {% for b in buttons[inst.key].backup %}{{ action_button(b, off) }}{% endfor %}
       </div>
       {% endif %}
+      {# the plugin's own groups #}
+      {% for group, found in buttons[inst.key].items() if group not in core_groups and found %}
+      <div class="action-group">
+      {% for b in found %}{{ action_button(b, off) }}{% endfor %}
+      </div>
+      {% endfor %}
     </div>
     </div>
     {% endif %}
@@ -123,12 +132,16 @@
     <details style="margin-top: 12px">
       <summary>Settings and repositories</summary>
       <dl>
-        <dt>Database</dt><dd class="mono">{{ inst.options.database }}</dd>
-        <dt>Odoo config</dt><dd class="mono">{{ inst.options.odoo_config }}</dd>
+        <dt>Type</dt><dd>{{ inst.plugin.label }}</dd>
+        {% for label, value, kind in settings_rows[inst.key] %}
+        <dt>{{ label }}</dt>
+        {% if kind == "checkbox" %}<dd>{{ "yes" if value else "no" }}</dd>
+        {% elif value is none or value == "" %}<dd class="muted">–</dd>
+        {% else %}<dd class="{{ 'mono' if kind in ('path', 'number') }}">{{ value }}</dd>{% endif %}
+        {% endfor %}
         <dt>Log file</dt><dd class="mono">{{ inst.log_file }}</dd>
         {% if inst.restart.type == "process" %}
-        <dt>Odoo</dt><dd>started by OmniaCLI: {% if running.get(inst.key) %}running, pid <span class="mono">{{ running[inst.key] }}</span>{% else %}<span class="muted">stopped</span>{% endif %}</dd>
-        <dt>HTTP port</dt><dd class="mono">{{ inst.options.http_port or "of the Odoo config" }}</dd>
+        <dt>{{ inst.plugin.label }}</dt><dd>started by OmniaCLI: {% if running.get(inst.key) %}running, pid <span class="mono">{{ running[inst.key] }}</span>{% else %}<span class="muted">stopped</span>{% endif %}</dd>
         {% else %}
         <dt>Service</dt><dd class="mono">{{ inst.restart.type }}: {{ inst.restart.service }}</dd>
         {% endif %}
@@ -178,7 +191,7 @@
 <p><a href="{{ prefix }}/jobs?server={{ server.name | urlencode }}">All jobs of {{ server.name }}</a></p>
 <div class="panel">{% include "_jobs_table.html" %}</div>
 
-{% include "_update_dialog.html" %}
+{% for dialog in dialogs %}{% include dialog %}{% endfor %}
 {% include "_charts.html" %}
 {% include "_logview.html" %}
 <script>

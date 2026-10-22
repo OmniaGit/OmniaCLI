@@ -260,7 +260,7 @@ wait_job() {
     curl -s -b /tmp/cookies-admin "localhost:8090/api/jobs/$job" | python3 -c 'import json,sys; print("\n".join(json.load(sys.stdin)["lines"]))' > /tmp/job.log
     [ "$status" = success ] || { cat /tmp/job.log; return 1; }
 }
-JOB="$(curl "${API[@]}" localhost:8090/api/servers/runas/test/update -d '{"mode": "changed"}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["job"])')"
+JOB="$(curl "${API[@]}" localhost:8090/servers/runas/test/x/odoo/update -d '{"mode": "changed"}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["job"])')"
 wait_job "$JOB" || fail "update as odoo"
 grep -q "update as odoo, PYTHONPATH=/srv/odoo-src" /tmp/job.log || { cat /tmp/job.log; fail "update not run as odoo with PYTHONPATH"; }
 # /var/lib/omniacli (mode 750) is closed to odoo: its programs run in /
@@ -273,7 +273,7 @@ BACKUP="$(ls /var/lib/omniacli/backups/runas/test/)"
 [ "$(cat "/var/lib/omniacli/backups/runas/test/$BACKUP")" = dump ] || fail "backup file"
 ls /var/tmp | grep -q omniacli-backup && fail "backup staging folder left in /var/tmp"
 [ "$(curl -s -b /tmp/cookies-admin "localhost:8090/backups/runas/test/$BACKUP")" = dump ] || fail "backup made as odoo not downloadable"
-LOCATION="$(curl "${API[@]}" -o /dev/null -w '%{redirect_url}' -X POST localhost:8090/servers/runas/test/pip-requirements)"
+LOCATION="$(curl "${API[@]}" -o /dev/null -w '%{redirect_url}' -X POST localhost:8090/servers/runas/test/x/odoo/pip-requirements)"
 wait_job "${LOCATION##*/}" || fail "pip requirements as odoo"
 [ "$(stat -c %U "$SITE/six.py")" = odoo ] || fail "six not installed by odoo"
 echo "update, backup ($(stat -c '%U %a' "/var/lib/omniacli/backups/runas/test/$BACKUP")) and pip ran as odoo"

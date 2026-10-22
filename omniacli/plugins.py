@@ -16,14 +16,15 @@ import logging
 import re
 from dataclasses import dataclass, field
 
-from .plugin_api import ENTRY_POINT_GROUP, ServicePlugin, contract_problems
+from .plugin_api import ENTRY_POINT_GROUP, ServicePlugin, contract_problems, parts_problems
 
 _logger = logging.getLogger(__name__)
 
 # the type of a server whose mapping names none: every server before plugins
 DEFAULT_TYPE = "odoo"
-# the plugins that come inside the omniacli package
-BUILTIN = ("omniacli.odoo:OdooPlugin",)
+# the plugins that come inside the omniacli package: the generic type (git
+# and a service, nothing else: what an install without plugins has) and Odoo
+BUILTIN = ("omniacli.generic:GenericPlugin", "omniacli.odoo:OdooPlugin")
 PLUGIN_NAME = re.compile(r"[a-z][a-z0-9_]{0,31}")
 
 
@@ -82,7 +83,7 @@ def _check(info: PluginInfo, cls, taken: set[str]) -> None:
     if not problems:
         try:
             plugin = cls()
-            problems = [str(p) for p in plugin.self_test()]
+            problems = parts_problems(plugin) + [str(p) for p in plugin.self_test()]
         except Exception as exc:  # noqa: BLE001 - a plugin must not stop OmniaCLI
             problems = [f"{type(exc).__name__}: {exc}"]
     if problems:

@@ -14,6 +14,8 @@
       <label for="name">Name</label>
       <input type="text" id="name" required pattern="[A-Za-z0-9][A-Za-z0-9._\-]*"
              title="Letters, digits, '.', '_' and '-'">
+      <label for="type">Type</label>
+      <select id="type" title="The plugin that serves the server; an existing server keeps its type"></select>
     </div>
   </fieldset>
   <div id="roles"></div>
@@ -35,26 +37,15 @@
   <fieldset class="role-box">
     <legend><label><input type="checkbox" class="enabled"> <span class="role"></span></label></legend>
     <div class="body">
+      {# the plugin's fields, drawn by the script from the type #}
+      <div class="form-grid plugin-fields"></div>
       <div class="form-grid">
-        <label>Database</label><input type="text" data-k="database">
-        <label>Odoo config file</label>
-        <div class="with-button"><input type="text" data-k="odoo_config" class="mono">
-          <button type="button" class="reload-conf" title="Read database, log file and repositories from this file">Reload</button></div>
         <label>Log file</label><input type="text" data-k="log_file" class="mono">
-        <label>Venv bin (click-odoo-contrib)</label>
-        <div class="with-button"><input type="text" data-k="venv_bin" class="mono">
-          <span class="pip-buttons" hidden>
-            <button type="button" data-pip="requirements" title="pip install, in this venv, the requirements.txt of Odoo and of the repositories below">pip requirements</button>
-            <button type="button" data-pip="cli" title="pip install click-odoo-contrib, the scripts OmniaCLI runs, in this venv">pip click-odoo</button>
-          </span></div>
-        <label>Run as (system user)</label><input type="text" data-k="run_as" class="mono" placeholder="empty: the user running OmniaCLI" title="The venv's programs (update, backup, pip, checks) run as this user through sudo -n -u: the user of the Odoo service. Not with restart type process.">
-        <label>HTTP port</label><input type="number" min="1" max="65535" data-k="http_port" class="mono" placeholder="empty: the port of the Odoo config" title="Restart type process only: OmniaCLI starts odoo-bin with --http-port, which wins over the Odoo config">
-        <label>odoo-bin (update of chosen modules)</label><input type="text" data-k="odoo_bin" class="mono" placeholder="empty: odoo-bin found in a repository">
+        <label>Run as (system user)</label><input type="text" data-k="run_as" class="mono" placeholder="empty: the user running OmniaCLI" title="The type's programs (for Odoo: update, backup, pip, checks) run as this user through sudo -n -u: the user of the service. Not with restart type process.">
         <label>Restart with</label>
-        <select data-k="restart.type"><option value="systemd">systemd</option><option value="initd">init.d</option><option value="process">OmniaCLI starts odoo-bin itself</option></select>
+        <select data-k="restart.type"><option value="systemd">systemd</option><option value="initd">init.d</option><option value="process" class="process-option">OmniaCLI starts it itself</option></select>
         <label>Service name</label><input type="text" data-k="restart.service">
         <label>Use sudo -n</label><input type="checkbox" data-k="restart.sudo">
-        <label>Update changed modules</label><input type="checkbox" data-k="update_modules">
         <label>Auto update</label><input type="checkbox" data-k="auto_update.enabled">
         <label>Every (minutes)</label><input type="number" min="1" data-k="auto_update.interval_minutes">
         <label>Time window</label><input type="text" data-k="auto_update.window" placeholder="HH:MM-HH:MM, empty = always">
@@ -75,13 +66,22 @@
 <script>
 const MODEL = {{ model | tojson }};
 const ROLES = ["production", "test"];
+// the core's settings of an instance; the plugin's come from its fields
 const DEFAULTS = {
-  database: "", odoo_config: "", log_file: "", venv_bin: "", odoo_bin: "", run_as: "",
+  log_file: "", run_as: "",
   restart: {type: "systemd", service: "", sudo: true},
-  update_modules: true,
   auto_update: {enabled: false, interval_minutes: 10, window: ""},
-  repositories: [{name: "odoo", path: "", remote: "origin", branch: ""}],
+  repositories: [{name: "", path: "", remote: "origin", branch: ""}],
 };
+// keys left out when empty (the others are sent, empty, so that the checks name them)
+const OPTIONAL = ["auto_update.window", "run_as"];
+const typeSelect = document.getElementById("type");
+for (const [name, type] of Object.entries(MODEL.types)) typeSelect.add(new Option(type.label, name));
+typeSelect.value = MODEL.server.type || MODEL.default_type;
+if (!typeSelect.value) typeSelect.selectedIndex = 0;
+// an existing server keeps its type (a clone may change it)
+typeSelect.disabled = !!MODEL.original;
+const currentType = () => MODEL.types[typeSelect.value] || {label: "", fields: [], has_process: false};
 const get = (obj, path) => path.split(".").reduce((o, k) => (o == null ? undefined : o[k]), obj);
 function set(obj, path, value) {
   const keys = path.split("."), last = keys.pop();
@@ -100,6 +100,52 @@ function repoRow(tbody, repo) {
   const td = document.createElement("td"), del = document.createElement("button");
   del.type = "button"; del.textContent = "Remove"; del.onclick = () => tr.remove();
   td.appendChild(del); tr.appendChild(td); tbody.appendChild(tr);
+}
+
+// The plugin's fields of a role box, with the values given (a type change
+// keeps what is typed in the fields both types have).
+function pluginFields(box, role, values) {
+  const grid = box.querySelector(".plugin-fields");
+  grid.replaceChildren();
+  for (const field of currentType().fields) {
+    const label = document.createElement("label");
+    label.textContent = field.label;
+    let input;
+    if (field.kind === "select") {
+      input = document.createElement("select");
+      for (const [value, text] of field.choices) input.add(new Option(text, value));
+    } else {
+      input = document.createElement("input");
+      input.type = field.kind === "checkbox" ? "checkbox" : field.kind === "number" ? "number" : "text";
+      if (field.kind === "path") input.className = "mono";
+      if (field.kind === "number") input.classList.add("mono");
+    }
+    input.dataset.k = field.key;
+    input.dataset.plugin = "1";
+    input.placeholder = field.placeholder || "";
+    if (field.help) input.title = field.help;
+    const value = values && field.key in values ? values[field.key] : field.default;
+    if (input.type === "checkbox") input.checked = !!value; else input.value = value == null ? "" : value;
+    let cell = input;
+    if (field.buttons.length) {
+      cell = document.createElement("div");
+      cell.className = "with-button";
+      cell.appendChild(input);
+      for (const spec of field.buttons) {
+        const button = document.createElement("button");
+        button.type = "button"; button.textContent = spec.label; button.title = spec.title || "";
+        button.onclick = () => formButton(box, role, spec, button);
+        cell.appendChild(button);
+        if (spec.only_with_value) {
+          const show = () => { button.hidden = !input.value.trim(); };
+          input.addEventListener("input", show);
+          show();
+        }
+      }
+    }
+    grid.append(label, cell);
+  }
+  processFields(box);
 }
 
 const boxes = {};
@@ -121,87 +167,93 @@ for (const role of ROLES) {
   const tbody = box.querySelector("tbody");
   for (const repo of values.repositories || []) repoRow(tbody, repo);
   box.querySelector(".add-repo").onclick = () => repoRow(tbody, {remote: "origin"});
-  box.querySelector(".reload-conf").onclick = () => reloadConf(box);
-  const venv = box.querySelector('[data-k="venv_bin"]'), pipButtons = box.querySelector(".pip-buttons");
-  const showPip = () => { pipButtons.hidden = !venv.value.trim(); };
-  venv.addEventListener("input", showPip);
-  showPip();
-  for (const button of pipButtons.querySelectorAll("[data-pip]")) button.onclick = () => runPip(box, role, button.dataset.pip);
   const type = box.querySelector('[data-k="restart.type"]');
   type.onchange = () => processFields(box);
-  processFields(box);
+  pluginFields(box, role, data);
   document.getElementById("roles").appendChild(box);
   boxes[role] = box;
 }
+typeSelect.onchange = () => {
+  for (const role of ROLES) pluginFields(boxes[role], role, roleValues(boxes[role]));
+};
 
-// With restart type process OmniaCLI starts odoo-bin itself: no service, and
-// the log is the output it collects.
+// With restart type process OmniaCLI starts the service itself: no service,
+// and the log is the output it collects. A plugin's field may apply to some
+// restart types only.
 function processFields(box) {
-  const process = box.querySelector('[data-k="restart.type"]').value === "process";
+  const restartType = box.querySelector('[data-k="restart.type"]');
+  const type = currentType();
+  box.querySelector(".process-option").disabled = !type.has_process;
+  box.querySelector(".process-option").textContent = `OmniaCLI starts ${type.label || "it"} itself`;
+  if (!type.has_process && restartType.value === "process") restartType.value = "systemd";
+  const process = restartType.value === "process";
   for (const key of ["restart.service", "restart.sudo", "log_file", "run_as"]) {
     box.querySelector(`[data-k="${key}"]`).disabled = process;
   }
-  // only the odoo-bin OmniaCLI starts takes the port: a service's unit starts its own
-  const port = box.querySelector('[data-k="http_port"]');
-  port.disabled = !process;
-  port.placeholder = process ? "empty: the port of the Odoo config" : "only with restart type process";
-  if (!process) port.value = "";
-  box.querySelector('[data-k="log_file"]').placeholder = process ? "Odoo's output, in " + MODEL.logs_dir : "";
+  for (const field of type.fields) {
+    if (!field.restart_types.length) continue;
+    const input = box.querySelector(`[data-plugin][data-k="${field.key}"]`);
+    const on = field.restart_types.includes(restartType.value);
+    input.disabled = !on;
+    input.placeholder = on ? field.placeholder || "" : field.disabled_placeholder || "";
+    if (!on) { if (input.type === "checkbox") input.checked = false; else input.value = ""; }
+  }
+  box.querySelector('[data-k="log_file"]').placeholder = process ? `${type.label}'s output, in ` + MODEL.logs_dir : "";
   if (process) box.querySelector('[data-k="log_file"]').value = "";
-  // OmniaCLI stops its own Odoo with a signal, which it may not send to another user
+  // OmniaCLI stops its own process with a signal, which it may not send to another user
   box.querySelector('[data-k="run_as"]').placeholder = process ? "not with restart type process" : "empty: the user running OmniaCLI";
 }
 
-// pip in the venv typed here, saved or not: the job's log opens in a new
-// tab, so the form keeps what is typed
-async function runPip(box, role, kind) {
-  const value = (k) => box.querySelector(`[data-k="${k}"]`).value.trim();
-  const what = kind === "cli" ? "click-odoo-contrib" : "the requirements.txt of Odoo and of the repositories";
-  if (!confirm(`pip install ${what} in ${value("venv_bin")}?`)) return;
-  const tab = window.open("", "_blank");  // opened now: a tab opened after the answer may be blocked
-  const resp = await fetch("{{ prefix }}/api/venv/pip", {
-    method: "POST", headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({kind, role, name: document.getElementById("name").value.trim(),
-      venv_bin: value("venv_bin"), odoo_bin: value("odoo_bin"),
-      run_as: box.querySelector('[data-k="run_as"]').disabled ? "" : value("run_as"),
-      repositories: [...box.querySelectorAll('tbody [data-r="path"]')].map((i) => i.value.trim())}),
-  }).catch(() => null);
-  const data = resp ? await resp.json().catch(() => ({})) : {};
-  if (resp && resp.ok) {
-    if (tab) tab.location.href = "{{ prefix }}/jobs/" + data.job; else location.href = "{{ prefix }}/jobs/" + data.job;
-    return;
-  }
-  if (tab) tab.close();
+function showError(text) {
   const errorBox = document.getElementById("error");
-  errorBox.textContent = data.error || data.detail || (resp ? "Error " + resp.status : "The server does not answer");
+  errorBox.textContent = text;
   errorBox.hidden = false;
   window.scrollTo(0, 0);
 }
 
-// Fill database, log file and repositories from the Odoo config file; a
-// repository already listed with the same path keeps its name (it pairs
-// test with production).
-async function reloadConf(box) {
-  const notes = box.querySelector(".conf-notes"), button = box.querySelector(".reload-conf");
-  const path = box.querySelector('[data-k="odoo_config"]').value.trim();
+// A button of a plugin's field: what is typed for the role, saved or not,
+// goes to the plugin's route. A job opens in a new tab, so the form keeps
+// what is typed; values to fill go in the form (a repository already listed
+// with the same path keeps its name: it pairs test with production).
+async function formButton(box, role, spec, button) {
+  const values = roleValues(box);
+  if (spec.confirm && !confirm(spec.confirm.replace(/\{(\w+)\}/g, (all, key) => values[key] ?? ""))) return;
+  // opened now: a tab opened after the answer may be blocked; closed if no job comes
+  const tab = spec.confirm ? window.open("", "_blank") : null;
   button.disabled = true;
-  const resp = await fetch("{{ prefix }}/api/odoo-config", {
-    method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({path}),
+  const resp = await fetch(`{{ prefix }}/x/${typeSelect.value}/${spec.route}`, {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({name: document.getElementById("name").value.trim(), role, values}),
   }).catch(() => null);
   button.disabled = false;
   const data = resp ? await resp.json().catch(() => ({})) : {};
-  notes.hidden = false;
-  notes.replaceChildren();
+  const notes = box.querySelector(".conf-notes");
   const line = (text, cls) => { const p = document.createElement("p"); p.textContent = text; if (cls) p.className = cls; notes.appendChild(p); };
   if (!resp || !resp.ok) {
-    line(data.error || data.detail || (resp ? "Error " + resp.status : "The server does not answer"), "error");
+    if (tab) tab.close();
+    const text = data.error || data.detail || (resp ? "Error " + resp.status : "The server does not answer");
+    // a button that fills shows its error under the fields, one that starts a job at the top
+    if (!spec.confirm) { notes.hidden = false; notes.replaceChildren(); line(text, "error"); }
+    else showError(text);
     return;
   }
-  const loaded = [];
-  for (const key of ["database", "log_file"]) {
-    if (data[key] && !box.querySelector(`[data-k="${key}"]`).disabled) { box.querySelector(`[data-k="${key}"]`).value = data[key]; loaded.push(key.replace("_", " ")); }
+  if (data.job !== undefined) {
+    const url = "{{ prefix }}/jobs/" + data.job;
+    if (tab) tab.location.href = url; else window.open(url, "_blank") || (location.href = url);
+    return;
   }
-  if (data.repositories.length) {
+  if (tab) tab.close();
+  notes.hidden = false;
+  notes.replaceChildren();
+  const loaded = [];
+  for (const [key, value] of Object.entries(data.fill || {})) {
+    const input = box.querySelector(`[data-k="${key}"]`);
+    if (value != null && value !== "" && input && !input.disabled) {
+      if (input.type === "checkbox") input.checked = !!value; else input.value = value;
+      loaded.push(key.replace(/_/g, " "));
+    }
+  }
+  if ((data.repositories || []).length) {
     const tbody = box.querySelector("tbody"), names = {};
     for (const tr of tbody.querySelectorAll("tr")) {
       const p = tr.querySelector('[data-r="path"]').value.trim().replace(/\/+$/, "");
@@ -212,7 +264,27 @@ async function reloadConf(box) {
     loaded.push(data.repositories.length + " repositories");
   }
   line(loaded.length ? "Loaded " + loaded.join(", ") + "." : "Nothing loaded.", loaded.length ? "status success" : "");
-  for (const note of data.notes) line(note, "muted");
+  for (const note of data.notes || []) line(note, "muted");
+}
+
+// What is typed for a role, as the servers file has it (null: a role left blank).
+function roleValues(box) {
+  const data = {};
+  for (const input of box.querySelectorAll("[data-k]")) {
+    if (input.disabled) continue;
+    let value = input.type === "checkbox" ? input.checked : input.value.trim();
+    if (input.type === "number") value = value === "" ? "" : Number(value);
+    if (value === "" && (OPTIONAL.includes(input.dataset.k) || (input.dataset.plugin && input.type === "number"))) continue;
+    set(data, input.dataset.k, value);
+  }
+  data.repositories = [];
+  for (const tr of box.querySelectorAll("tbody tr")) {
+    const repo = {};
+    for (const input of tr.querySelectorAll("[data-r]")) repo[input.dataset.r] = input.value.trim();
+    // name and remote alone are the defaults of an untouched row
+    if (repo.path || repo.branch) data.repositories.push(repo);
+  }
+  return data;
 }
 
 document.getElementById("form").addEventListener("submit", async (ev) => {
@@ -220,28 +292,13 @@ document.getElementById("form").addEventListener("submit", async (ev) => {
   const activate = ev.submitter ? ev.submitter.dataset.activate === "1" : false;
   if (!activate && MODEL.active && !confirm("Save as draft? The server goes offline: no actions and no auto update until Test & activate.")) return;
   for (const b of document.querySelectorAll("button[type=submit]")) b.disabled = true;
-  // this form is the Odoo plugin's: it saves servers of type odoo
-  const server = {type: "odoo"};
+  const server = {type: typeSelect.value};
   for (const role of ROLES) {
     const box = boxes[role];
     if (!box.querySelector(".enabled").checked) continue;
-    const data = {};
-    for (const input of box.querySelectorAll("[data-k]")) {
-      if (input.disabled) continue;
-      let value = input.type === "checkbox" ? input.checked : input.value.trim();
-      if (input.type === "number") value = Number(value);
-      if (["auto_update.window", "odoo_bin", "run_as", "http_port"].includes(input.dataset.k) && !value) continue;
-      set(data, input.dataset.k, value);
-    }
-    data.repositories = [];
-    for (const tr of box.querySelectorAll("tbody tr")) {
-      const repo = {};
-      for (const input of tr.querySelectorAll("[data-r]")) repo[input.dataset.r] = input.value.trim();
-      // name and remote alone are the defaults of an untouched row
-      if (repo.path || repo.branch) data.repositories.push(repo);
-    }
-    // a role left blank is a role not used
-    const typed = ["database", "odoo_config", "log_file", "venv_bin", "odoo_bin"].some((k) => data[k]);
+    const data = roleValues(box);
+    // a role left blank is a role not used: no text typed in a field
+    const typed = data.log_file || currentType().fields.some((f) => typeof data[f.key] === "string" && data[f.key]);
     if (!typed && !data.repositories.length) continue;
     server[role] = data;
   }

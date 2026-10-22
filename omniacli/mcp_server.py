@@ -11,12 +11,9 @@ without it OmniaCLI runs without /mcp.
 from __future__ import annotations
 
 import asyncio
-import configparser
 import contextvars
 import json
-import os
 import re
-from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 from mcp.server.mcpserver import Context, MCPServer
@@ -25,8 +22,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from . import ops
-from .odoo import ops as odoo_ops
+from . import ops, plugins
 from .accesslog import AccessLog
 from .auth import ROLES as ACCESS_ROLES
 from .auth import Authenticator
@@ -38,28 +34,27 @@ from .scheduler import AutoUpdater
 
 MAX_WAIT = 600  # seconds a tool may wait for its job
 _RECORD = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d+ \d+ (\w+) ")
-# Odoo config options that are secrets or belong to the server's own layout:
-# never given out
-_PRIVATE = re.compile(r"passw|secret|token|key|^(db_host|db_port|db_user|data_dir|logfile|pidfile"
-                      r"|addons_path|upgrade_path|pre_upgrade_scripts)$")
 
-INSTRUCTIONS = """OmniaCLI deploys Odoo instances from git: each server has a production and a
-test instance. Read with list_servers, server_status, read_log, list_jobs,
-get_job, pending_updates. The only action is update_test (git pull, update of
-the changed modules, restart of the test instance). dev_setup describes an
-instance (repositories, branches, commits, addons_path, Odoo version, config
-options without secrets, backups) so that you can rebuild it locally:
-clone every repository at its branch, write an odoo.conf with the given
-options and an addons_path of the local clones; for the data, download a
-backup zip (database dump and filestore) with an HTTP GET to the server's
-base URL + its path, with the same Authorization: Bearer header, and restore
-it (click-odoo-restoredb, or Odoo's database manager). backup_test makes a
-fresh backup of a test instance. With an admin token, backup backs up any
+INSTRUCTIONS = """OmniaCLI deploys services (Odoo and the other types of its plugins) from git:
+each server has a production and a test instance. Read with list_servers,
+server_status, read_log, list_jobs, get_job, pending_updates. The only action
+is update_test (git pull, what the server's type does after a pull, restart
+of the test instance). dev_setup describes an instance (repositories,
+branches, commits, backups, and what its type tells) so that you can rebuild
+it locally; for the data, download a backup zip with an HTTP GET to the
+server's base URL + its path, with the same Authorization: Bearer header.
+backup_test makes a fresh backup of a test instance. With an admin token, backup backs up any
 instance (production too) and list_backups lists an instance's backups, each
 with the path to download it; these two and dev_setup also reach the draft
 servers (complete ones) with an admin token. read_server gives a
 server's whole configuration and add_draft_server adds a server as a draft:
 an administrator makes it live from the web interface (Test & activate)."""
+
+
+def _instructions() -> str:
+    """The core's instructions, then what each plugin tells of its type."""
+    helps = [p.mcp_help.strip() for p in plugins.registry().plugins.values() if p.mcp_help.strip()]
+    return "\n\n".join([INSTRUCTIONS, *helps])
 
 # the role an MCP token needs for a tool; the others: any token
 TOOL_ROLES = {"update_test": "developer", "backup_test": "developer",
@@ -135,7 +130,7 @@ def create_mcp(settings: Settings, jobs: JobManager, updater: AutoUpdater, sampl
                authenticator: Authenticator, access_log: AccessLog, add_draft) -> tuple[Route, object]:
     """The /mcp route and the session manager to run in the app's lifespan.
     add_draft(name, data): the app's own way to add a draft server."""
-    server = MCPServer(name="OmniaCLI", instructions=INSTRUCTIONS)
+    server = MCPServer(name="OmniaCLI", instructions=_instructions())
 
     def caller(ctx: Context) -> str:
         # the route checked this very header before the request got here
@@ -354,14 +349,12 @@ def create_mcp(settings: Settings, jobs: JobManager, updater: AutoUpdater, sampl
 
     @server.tool()
     async def dev_setup(server_name: str, ctx: Context, role: str = "test") -> dict:
-        """What is needed to rebuild an instance locally: Odoo and Python
-        versions, every repository (remote URL, branch, commit), the
-        addons_path as repository folders, the Odoo config options without
-        secrets nor server paths, and the backups (database + filestore).
+        """What is needed to rebuild an instance locally: every repository
+        (remote URL, branch, commit), the backups, and what the server's type
+        tells (Odoo: Odoo and Python versions, the addons_path as repository
+        folders, the Odoo config options without secrets nor server paths).
         Of an active server; with an admin token, of a draft too."""
         inst = instance(server_name, role, ctx)
-        if inst.type != "odoo":
-            raise ToolError(f"{server_name} is of type {inst.type}: dev_setup is for Odoo servers")
         repos = []
         for repo in inst.repositories:
             _, url = await ops.capture(["git", "remote", "get-url", repo.remote], cwd=repo.path)
@@ -370,35 +363,11 @@ def create_mcp(settings: Settings, jobs: JobManager, updater: AutoUpdater, sampl
                 "name": repo.name, "url": _public_url(url), "remote": repo.remote,
                 "branch": repo.branch, "commit": commit,
                 "requirements": sorted(p.name for p in repo.path.glob("requirements*.txt")),
-                "has_odoo_bin": (repo.path / "odoo-bin").is_file(),
             })
-        parser = configparser.ConfigParser(interpolation=None)
-        try:
-            parser.read(inst.options.odoo_config, encoding="utf-8")
-        except (configparser.Error, UnicodeDecodeError):
-            pass
-        options = dict(parser.items("options")) if parser.has_section("options") else {}
-        addons = []
-        for raw in options.get("addons_path", "").replace("\n", ",").split(","):
-            if not raw.strip():
-                continue
-            folder = Path(raw.strip()).resolve()
-            owner = next((r for r in inst.repositories
-                          if folder == r.path.resolve() or r.path.resolve() in folder.parents), None)
-            addons.append({"repository": owner.name, "subpath": str(folder.relative_to(owner.path.resolve()))}
-                          if owner else {"outside_repositories": str(folder)})
-        odoo_bin = odoo_ops.find_odoo_bin(inst)
-        _, python = await ops.capture([inst.options.venv_bin / "python", "-c",
-                                       "import sys; print('%d.%d.%d' % sys.version_info[:3])"])
-        return {
-            "server": inst.server, "role": role, "database": inst.options.database,
-            "odoo_version": odoo_ops.odoo_major(odoo_bin) if odoo_bin else None,
-            "python": python or None,
-            "repositories": repos,
-            "addons_path": addons,
-            "odoo_conf_options": {k: v for k, v in options.items() if not _PRIVATE.search(k)},
-            "backups": backups_of(inst, 10),
-        }
+        # the type's part; it may add to the repositories
+        own = await inst.plugin.dev_setup(inst, repos)
+        return {"server": inst.server, "role": role, "type": inst.type, **own,
+                "repositories": repos, "backups": backups_of(inst, 10)}
 
     server.streamable_http_app(
         streamable_http_path="/mcp", stateless_http=True, json_response=True,

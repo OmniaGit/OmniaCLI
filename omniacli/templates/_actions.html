@@ -1,0 +1,44 @@
+{# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C · SPDX-License-Identifier: AGPL-3.0-or-later -#}
+{# The buttons of a plugin's actions (app.action_buttons): a form that posts
+   at once, a button that opens the plugin's own dialog, or a button that
+   opens the core's dialog of the action's params. -#}
+{% from "_icons.html" import icon %}
+{% macro action_button(b, off) %}
+{% set a = b.action %}
+{% if a.dialog %}
+<button type="button" data-action="{{ b.plugin }}.{{ a.id }}" data-url="{{ b.url }}" data-key="{{ b.key }}"
+        data-info='{{ b.info | tojson }}' {% if a.tooltip %}title="{{ a.tooltip }}"{% endif %} {{ off }}>{% if a.icon %}{{ icon(a.icon) }}{% endif %}{{ a.label }}</button>
+{% elif a.params %}
+<button type="button" onclick="document.getElementById('{{ b.dom_id }}').showModal()"
+        {% if a.tooltip %}title="{{ a.tooltip }}"{% endif %} {{ off }}>{% if a.icon %}{{ icon(a.icon) }}{% endif %}{{ a.label }}</button>
+<dialog id="{{ b.dom_id }}">
+  <form method="post" action="{{ b.url }}" {% if b.confirm %}onsubmit='return confirm({{ b.confirm | tojson }})'{% endif %}>
+    <h2 style="margin-bottom: 4px">{{ a.label }}</h2>
+    <p class="muted" style="margin-top: 0">{{ b.key }}</p>
+    <div class="form-grid">
+    {% for f in a.params %}
+      <label for="{{ b.dom_id }}-{{ f.key }}">{{ f.label }}</label>
+      {% if f.kind == "checkbox" %}
+      <input type="checkbox" id="{{ b.dom_id }}-{{ f.key }}" name="{{ f.key }}" {% if f.default %}checked{% endif %} {% if f.help %}title="{{ f.help }}"{% endif %}>
+      {% elif f.kind == "select" %}
+      <select id="{{ b.dom_id }}-{{ f.key }}" name="{{ f.key }}">
+        {% for value, label in f.choices %}<option value="{{ value }}" {% if value == f.default %}selected{% endif %}>{{ label }}</option>{% endfor %}
+      </select>
+      {% else %}
+      <input type="{{ 'number' if f.kind == 'number' else 'text' }}" id="{{ b.dom_id }}-{{ f.key }}" name="{{ f.key }}"
+             {% if f.kind == "path" %}class="mono"{% endif %} {% if f.required %}required{% endif %}
+             value="{{ f.default if f.default is not none else '' }}" placeholder="{{ f.placeholder }}" {% if f.help %}title="{{ f.help }}"{% endif %}>
+      {% endif %}
+    {% endfor %}
+    </div>
+    <div class="actions">
+      <button class="danger">{{ a.label }}</button>
+      <button type="button" onclick="this.closest('dialog').close()">Cancel</button>
+    </div>
+  </form>
+</dialog>
+{% else %}
+<form method="post" action="{{ b.url }}" {% if b.confirm %}onsubmit='return confirm({{ b.confirm | tojson }})'{% endif %}>
+  <button {% if a.tooltip %}title="{{ a.tooltip }}"{% endif %} {{ off }}>{% if a.icon %}{{ icon(a.icon) }}{% endif %}{{ a.label }}</button></form>
+{% endif %}
+{% endmacro %}

@@ -1,4 +1,6 @@
 {# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C · SPDX-License-Identifier: AGPL-3.0-or-later -#}
+{# The dialog of the action "update" of the Odoo plugin: drawn once on the
+   server page, it opens for the buttons data-action="odoo.update". -#}
 <dialog id="update-dialog">
   <form method="dialog" id="update-form">
     <h2 id="update-title" style="margin-bottom: 4px"></h2>
@@ -58,7 +60,7 @@
   }
   async function load() {
     list.innerHTML = '<span class="muted">Loading…</span>';
-    const resp = await fetch(`{{ prefix }}/api/servers/${target.server}/${target.role}/addons`);
+    const resp = await fetch(`{{ prefix }}/x/odoo/servers/${target.server}/${target.role}/addons`);
     const data = await resp.json();
     list.innerHTML = "";
     group("In the instance's repositories", data.addons.filter((a) => a.in_repository));
@@ -74,9 +76,10 @@
   for (const radio of dialog.querySelectorAll("input[name=mode]")) radio.onchange = refresh;
   document.getElementById("update-cancel").onclick = () => dialog.close();
 
-  for (const button of document.querySelectorAll(".open-update")) {
+  for (const button of document.querySelectorAll('[data-action="odoo.update"]')) {
     button.onclick = () => {
-      target = button.dataset;
+      const [server, role] = button.dataset.key.split("/");
+      target = {server, role, url: button.dataset.url, database: JSON.parse(button.dataset.info).database};
       document.getElementById("update-title").textContent = `Update modules ${target.server}/${target.role}`;
       document.getElementById("update-sub").textContent = `Database ${target.database}`;
       dialog.querySelector("input[value=changed]").checked = true;
@@ -92,7 +95,7 @@
     if (body.mode === "chosen" && !body.modules.length) { errorBox.textContent = "Choose at least one module."; return; }
     const what = body.mode === "chosen" ? body.modules.join(", ") : "the changed modules";
     if (!confirm(`Update ${what} on ${target.server}/${target.role} (database ${target.database})?`)) return;
-    const resp = await fetch(`{{ prefix }}/api/servers/${target.server}/${target.role}/update`, {
+    const resp = await fetch(target.url, {
       method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body),
     });
     const data = await resp.json().catch(() => ({}));
