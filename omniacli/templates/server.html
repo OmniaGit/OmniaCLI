@@ -88,13 +88,17 @@
       {% for b in buttons[inst.key].git %}{{ action_button(b, off) }}{% endfor %}
       </div>
       {% endif %}
-      {% if (can_act and inst.plugin.has_backup) or buttons[inst.key].backup %}
+      {% if (can_act and inst.plugin.has_backup) or buttons[inst.key].backup or from_link[inst.key] %}
       <div class="action-group">
       {% if can_act and inst.plugin.has_backup %}
       <form method="post" action="{{ base }}/backup">
         <button {{ off }}>{{ icon("backup") }}Backup</button></form>
       <form method="post" action="{{ base }}/backup?download=1">
         <button {{ off }} title="Back up, then download the zip">{{ icon("download") }}Backup + download</button></form>
+      {% endif %}
+      {% if from_link[inst.key] %}
+      <button type="button" {{ off }} data-from-link='{{ from_link[inst.key] | tojson }}' data-key="{{ inst.key }}"
+              title="Back up {{ from_link[inst.key].label }}, download it and restore it into {{ inst.key }}">{{ icon("download") }}Copy from link</button>
       {% endif %}
       {% for b in buttons[inst.key].backup %}{{ action_button(b, off) }}{% endfor %}
       </div>
@@ -192,6 +196,7 @@
 <div class="panel">{% include "_jobs_table.html" %}</div>
 
 {% for dialog in dialogs %}{% include dialog %}{% endfor %}
+{% if from_link %}{% include "_from_link_dialog.html" %}{% endif %}
 {% include "_charts.html" %}
 {% include "_logview.html" %}
 <script>

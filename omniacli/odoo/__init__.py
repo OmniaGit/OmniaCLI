@@ -247,13 +247,8 @@ class OdooPlugin(ServicePlugin):
         if None not in majors.values() and majors["production"] != majors["test"]:
             raise JobFailed(f"production runs Odoo {majors['production']}, test Odoo {majors['test']}: "
                             "a database is not loaded into another version")
-        major = majors["test"]
-        if major is not None and major >= 20:
+        if majors["test"] is not None and majors["test"] >= 20:
             raise JobFailed("click-odoo-restoredb does not restore Odoo 20 and later")
-        neutralize = major is None or major >= 16
-        if not neutralize:
-            job.log(f"WARNING: Odoo {major} cannot be neutralized (Odoo 16 and later): the copy keeps "
-                    "production's scheduled actions and outgoing mail servers")
         folder = self._host.backup_folder(prod)
         if params["backup"]:
             backup_zip = folder / params["backup"]
@@ -263,24 +258,54 @@ class OdooPlugin(ServicePlugin):
         else:
             folder.mkdir(parents=True, exist_ok=True)
             backup_zip = await self.backup(job, prod, folder)
+        await self.restore(job, test, backup_zip, {"neutralize": True})
+
+    def restore_fields(self) -> list[Field]:
+        return [Field("neutralize", "Neutralize (Odoo 16 and later): no scheduled actions, no outgoing mail",
+                      kind="checkbox", default=True)]
+
+    async def restore(self, job: Job, instance: Instance, backup_zip: Path, options: dict) -> None:
+        """Stop the instance, restore the backup into its database, update the
+        changed modules, start it. Refused, before anything is touched, for a
+        backup of another Odoo version and for Odoo 20 and later."""
+        odoo_bin = ops.find_odoo_bin(instance)
+        major = ops.odoo_major(odoo_bin) if odoo_bin else None
+        found = ops.backup_major(backup_zip)
+        if found is None:
+            job.log(f"WARNING: {backup_zip.name} names no Odoo version (no manifest.json): not compared "
+                    "with the instance's")
+        elif major is not None and found != major:
+            raise JobFailed(f"{backup_zip.name} is a database of Odoo {found}, {instance.key} runs Odoo "
+                            f"{major}: a database is not loaded into another version")
+        major = major if major is not None else found
+        if major is not None and major >= 20:
+            raise JobFailed("click-odoo-restoredb does not restore Odoo 20 and later")
+        neutralize = bool(options.get("neutralize", True))
+        if neutralize and major is not None and major < 16:
+            neutralize = False
+            job.log(f"WARNING: Odoo {major} cannot be neutralized (Odoo 16 and later): the copy keeps "
+                    "the scheduled actions and outgoing mail servers of the backup")
+        elif not neutralize:
+            job.log("WARNING: not neutralized: the copy keeps the scheduled actions and outgoing mail "
+                    "servers of the backup")
         # init.d: no stop from here; Odoo's drop of the database ends its
         # connections, and the restart at the end starts it on the copy
-        stoppable = test.restart.type in ("systemd", "process")
+        stoppable = instance.restart.type in ("systemd", "process")
         if stoppable:
-            await stop(job, test)
+            await stop(job, instance)
         else:
-            job.log(f"--- {test.key} is an init.d service: not stopped, restarted at the end")
+            job.log(f"--- {instance.key} is an init.d service: not stopped, restarted at the end")
         try:
-            await ops.restore(job, test, backup_zip, neutralize)
+            await ops.restore(job, instance, backup_zip, neutralize)
         except JobFailed:
-            job.log(f"{test.key}" + (" is left stopped" if stoppable else " is not restarted")
+            job.log(f"{instance.key}" + (" is left stopped" if stoppable else " is not restarted")
                     + ": its database may be missing or half restored")
             raise
-        await ops.update_modules(job, test, force=True)
+        await ops.update_modules(job, instance, force=True)
         if stoppable:
-            await start(job, test)
+            await start(job, instance)
         else:
-            await restart(job, test)
+            await restart(job, instance)
 
     async def _update(self, job: Job, instance: Instance, params: dict) -> None:
         if params["mode"] == "chosen":

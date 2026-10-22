@@ -102,7 +102,8 @@ class Check:
 
 FIELD_KINDS = ("text", "path", "number", "checkbox", "select")
 # the keys of an instance's mapping that the core reads: no field may take them
-CORE_KEYS = ("repositories", "restart", "log_file", "run_as", "auto_update", "status", "type")
+CORE_KEYS = ("repositories", "restart", "log_file", "run_as", "from_link", "auto_update", "status",
+             "type")
 ROLE_NAMES = ("user", "developer", "admin")
 
 
@@ -293,6 +294,17 @@ class ServicePlugin(ABC):
         """Back up the instance into dest_dir (it exists), return the file."""
         raise JobFailed(f"{self.label} has no backup")
 
+    async def restore(self, job: Job, instance: Instance, backup_zip: Path, options: dict) -> None:
+        """Load a file of backup (made here or by a linked instance) into the
+        instance, whose data it replaces. options: the values of
+        restore_fields. Raise JobFailed before touching anything when the
+        file does not fit the instance."""
+        raise JobFailed(f"{self.label} has no restore")
+
+    def restore_fields(self) -> list[Field]:
+        """What is asked before a restore (checkbox or text), given as options."""
+        return []
+
     def process_command(self, instance: Instance) -> tuple[list[str], Path]:
         """(command, working directory) of the process OmniaCLI starts itself
         (restart type process). Its output goes to the instance's log."""
@@ -365,9 +377,13 @@ class ServicePlugin(ABC):
     def has_process(self) -> bool:
         return type(self).process_command is not ServicePlugin.process_command
 
+    @property
+    def has_restore(self) -> bool:
+        return type(self).restore is not ServicePlugin.restore
+
 
 # the methods a plugin must write as async def
-ASYNC_METHODS = ("checks", "after_pull", "backup", "dev_setup")
+ASYNC_METHODS = ("checks", "after_pull", "backup", "restore", "dev_setup")
 _ID = re.compile(r"[a-z][a-z0-9_-]{0,31}")
 
 
@@ -422,4 +438,7 @@ def parts_problems(plugin: ServicePlugin) -> list[str]:
             problems.append(f"action {a.id}: no template {a.dialog} in the plugin's templates_dir")
         if a.dialog and a.params:
             problems.append(f"action {a.id}: a dialog of its own or params, not both")
+    for f in plugin.restore_fields():
+        if not isinstance(f, Field) or f.kind not in ("checkbox", "text"):
+            problems.append(f"restore field {f!r} is not a plugin_api.Field of kind checkbox or text")
     return problems

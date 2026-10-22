@@ -6,9 +6,11 @@ from __future__ import annotations
 
 import configparser
 import datetime
+import json
 import re
 import shutil
 import tempfile
+import zipfile
 from pathlib import Path
 
 from ..plugin_api import Instance, Job, JobFailed, as_user, base_env, run
@@ -253,6 +255,21 @@ async def backup(job: Job, instance: Instance, dest_dir: Path) -> Path:
     finally:
         shutil.rmtree(staging, ignore_errors=True)
     return dest
+
+
+def backup_major(backup_zip: Path) -> int | None:
+    """The major Odoo version of the database in a backup zip, from the
+    manifest.json click-odoo-backupdb (and Odoo's own backup) writes in it;
+    None when it has none."""
+    try:
+        with zipfile.ZipFile(backup_zip) as zf:
+            manifest = json.loads(zf.read("manifest.json"))
+    except (OSError, KeyError, ValueError, zipfile.BadZipFile):
+        return None
+    if not isinstance(manifest, dict):
+        return None
+    match = re.match(r"(?:saas~)?(\d+)", str(manifest.get("major_version") or manifest.get("version") or ""))
+    return int(match.group(1)) if match else None
 
 
 async def restore(job: Job, instance: Instance, backup_zip: Path, neutralize: bool) -> None:

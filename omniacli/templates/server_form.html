@@ -49,6 +49,12 @@
         <label>Auto update</label><input type="checkbox" data-k="auto_update.enabled">
         <label>Every (minutes)</label><input type="number" min="1" data-k="auto_update.interval_minutes">
         <label>Time window</label><input type="text" data-k="auto_update.window" placeholder="HH:MM-HH:MM, empty = always">
+        <label class="from-link-row">Database from link</label>
+        <div class="from-link-row with-button" title="Copy from link: an instance of a linked OmniaCLI whose backups are restored into this one">
+          <select data-k="from_link.link" class="from-link-link"><option value="">none</option></select>
+          <input type="text" data-k="from_link.server" class="mono from-link-server" placeholder="server there" list="">
+          <select data-k="from_link.role"><option value="production">production</option><option value="test">test</option></select>
+        </div>
       </div>
       <div class="conf-notes" hidden></div>
       <h3 style="font-size: 14px; margin: 16px 0 6px">Repositories</h3>
@@ -68,7 +74,7 @@ const MODEL = {{ model | tojson }};
 const ROLES = ["production", "test"];
 // the core's settings of an instance; the plugin's come from its fields
 const DEFAULTS = {
-  log_file: "", run_as: "",
+  log_file: "", run_as: "", from_link: {link: "", server: "", role: "production"},
   restart: {type: "systemd", service: "", sudo: true},
   auto_update: {enabled: false, interval_minutes: 10, window: ""},
   repositories: [{name: "", path: "", remote: "origin", branch: ""}],
@@ -164,6 +170,7 @@ for (const role of ROLES) {
     const value = get(values, input.dataset.k);
     if (input.type === "checkbox") input.checked = !!value; else input.value = value == null ? "" : value;
   }
+  linkFields(box, get(values, "from_link.link") || "");
   const tbody = box.querySelector("tbody");
   for (const repo of values.repositories || []) repoRow(tbody, repo);
   box.querySelector(".add-repo").onclick = () => repoRow(tbody, {remote: "origin"});
@@ -174,8 +181,37 @@ for (const role of ROLES) {
   boxes[role] = box;
 }
 typeSelect.onchange = () => {
-  for (const role of ROLES) pluginFields(boxes[role], role, roleValues(boxes[role]));
+  for (const role of ROLES) {
+    pluginFields(boxes[role], role, roleValues(boxes[role]));
+    for (const el of boxes[role].querySelectorAll(".from-link-row")) el.hidden = !currentType().has_restore;
+  }
 };
+
+// Database from link: the links of this instance; a link no longer there
+// stays shown, to be changed. The servers there are offered once a link is chosen.
+function linkFields(box, current) {
+  const select = box.querySelector(".from-link-link");
+  for (const name of MODEL.links) select.add(new Option(name, name));
+  if (current && !MODEL.links.includes(current)) select.add(new Option(current + " (no such link)", current));
+  select.value = current;
+  const server = box.querySelector(".from-link-server");
+  const listId = "from-link-servers-" + Math.random().toString(36).slice(2);
+  const datalist = document.createElement("datalist");
+  datalist.id = listId; server.setAttribute("list", listId); server.after(datalist);
+  async function offer() {
+    datalist.replaceChildren();
+    server.disabled = box.querySelector('[data-k="from_link.role"]').disabled = !select.value;
+    if (!select.value || !MODEL.links.includes(select.value)) return;
+    try {
+      const resp = await fetch(`{{ prefix }}/links/${select.value}/api/servers`, {headers: {Accept: "application/json"}});
+      const data = await resp.json();
+      for (const s of data.servers || data || []) if (s.name) datalist.appendChild(new Option(s.name));
+    } catch (e) { /* typed by hand */ }
+  }
+  select.onchange = offer;
+  offer();
+  for (const el of box.querySelectorAll(".from-link-row")) el.hidden = !currentType().has_restore;
+}
 
 // With restart type process OmniaCLI starts the service itself: no service,
 // and the log is the output it collects. A plugin's field may apply to some
@@ -277,6 +313,7 @@ function roleValues(box) {
     if (value === "" && (OPTIONAL.includes(input.dataset.k) || (input.dataset.plugin && input.type === "number"))) continue;
     set(data, input.dataset.k, value);
   }
+  if (!data.from_link || !data.from_link.link || !currentType().has_restore) delete data.from_link;
   data.repositories = [];
   for (const tr of box.querySelectorAll("tbody tr")) {
     const repo = {};

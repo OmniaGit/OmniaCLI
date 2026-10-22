@@ -25,7 +25,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from fastapi.templating import Jinja2Templates
 from starlette.background import BackgroundTask
 
-from . import checks, disks, ops, plugins
+from . import checks, disks, linkcopy, ops, plugins
 from .accesslog import AccessLog
 from .diskhistory import DiskHistory, DiskRecorder
 from .auth import ROLES as ACCESS_ROLES
@@ -541,10 +541,21 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         statuses = await asyncio.gather(
             *(asyncio.gather(*(ops.repository_status(r) for r in i.repositories)) for i in shown)
         )
+        # Copy from link: for a user who logs in here, with the role it needs
+        from_link = {
+            i.key: {"url": f"{base}/{i.role}/from-link", "link": i.from_link.link, "server": i.from_link.server,
+                    "role": i.from_link.role, "label": i.from_link.label,
+                    "known": i.from_link.link in settings.link_targets,
+                    "database": str(i.plugin.describe(i).get("database") or i.key) if i.role == "production" else ""}
+            for i in shown
+            if i.from_link and i.plugin.has_restore and me.kind == "user" and me.can(from_link_role(i))
+        }
         return _TEMPLATES.TemplateResponse(
             request,
             "server.html",
             {
+                "from_link": from_link,
+                "restore_fields": [_field_dict(f) for f in plugin.restore_fields()] if plugin else [],
                 "server": srv,
                 "view": view if view in srv.instances else "both",
                 "instances": shown,
@@ -760,6 +771,61 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         if not _BACKUP_NAME.fullmatch(name) or path.parent != folder or not path.is_file():
             raise HTTPException(status.HTTP_404_NOT_FOUND, "No such backup")
         return FileResponse(path, media_type="application/zip", filename=name)
+
+    def from_link_role(instance: Instance) -> str:
+        """Who may copy a linked instance's database into instance: a production
+        is an admin's."""
+        return "admin" if instance.role == "production" else "developer"
+
+    @app.post("/servers/{server}/{role}/from-link")
+    async def action_from_link(request: Request, server: str, role: str,
+                               user: Principal = Depends(developer)):
+        """Back up the instance's from_link there (or take one of its backups),
+        download it into the instance's backups and restore it here."""
+        instance = get_instance(server, role)
+        src = instance.from_link
+        if src is None or not instance.plugin.has_restore:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, f"{instance.key} has no database from a link")
+        if user.kind != "user":
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Only a user who logs in here may use a link")
+        if not user.can(from_link_role(instance)):
+            raise HTTPException(status.HTTP_403_FORBIDDEN,
+                                f"The {from_link_role(instance)} role is required for a production")
+        link = settings.link_targets.get(src.link)
+        if link is None:
+            return refuse(f"No link {src.link}: add it on the Links page, or change the server")
+        raw, _ = await posted_params(request)
+        backup = str(raw.get("backup") or "").strip()
+        if backup and not linkcopy.BACKUP_NAME.fullmatch(backup):
+            return refuse(f"{backup!r} is not the name of a backup zip")
+        if instance.role == "production":
+            # the database it replaces, typed
+            expected = str(instance.plugin.describe(instance).get("database") or instance.key)
+            if str(raw.get("confirm") or "").strip() != expected:
+                return refuse(f"Type {expected} to replace the production database")
+        try:
+            options = {f.key: _field_value(f, raw.get(f.key)) for f in instance.plugin.restore_fields()}
+        except ActionRefused as exc:
+            return refuse(str(exc))
+        headers = link_headers(link, user.name, user.role)
+
+        async def action(job):
+            # the steps, drawn by the job page as they go
+            progress = job.result["progress"] = {
+                "steps": [{"id": "backup", "label": f"Backup {backup}" if backup else "Backup",
+                           "where": link.name},
+                          {"id": "download", "label": "Transfer", "where": f"{link.name} → here"},
+                          {"id": "restore", "label": "Restore", "where": instance.key}],
+                "step": "backup", "done": 0, "total": 0,
+            }
+            dest = await linkcopy.fetch_backup(job, link_clients.client(link), link, headers, src,
+                                               backup, backup_folder(instance), progress)
+            progress["step"] = "restore"
+            await instance.plugin.restore(job, instance, dest, options)
+
+        job = jobs.submit(f"Copy from {src.label} to {instance.key} ({backup or 'new backup'})",
+                          [instance.key], f"manual: {user}", action)
+        return {"job": job.id}
 
     @app.post("/servers/{server}/merge")
     async def action_merge(request: Request, server: str, user: Principal = Depends(admin)):
@@ -1013,10 +1079,12 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
                     "active": bool(original and settings.servers[original].active),
                     "logs_dir": str(settings.logs_dir),
                     # what the form offers: the loaded plugins, with their fields
-                    "types": {n: {"label": p.label, "has_process": p.has_process,
+                    "types": {n: {"label": p.label, "has_process": p.has_process, "has_restore": p.has_restore,
                                   "fields": [_field_dict(f) for f in p.fields()]}
                               for n, p in plugins.registry().plugins.items()},
                     "default_type": plugins.DEFAULT_TYPE,
+                    # where a database may come from (Copy from link)
+                    "links": sorted(settings.link_targets),
                 },
             },
         )

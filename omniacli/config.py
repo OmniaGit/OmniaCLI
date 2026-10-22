@@ -82,6 +82,19 @@ class AutoUpdate:
 
 
 @dataclass
+class LinkSource:
+    """Where an instance's database may be copied from: an instance of a
+    server of a linked OmniaCLI (links file), backed up there and restored here."""
+    link: str
+    server: str
+    role: str
+
+    @property
+    def label(self) -> str:
+        return f"{self.link} › {self.server}/{self.role}"
+
+
+@dataclass
 class Instance:
     server: str
     role: str
@@ -97,6 +110,7 @@ class Instance:
     # Odoo the user of its service: its database login, filestore and venv);
     # None: as the user running OmniaCLI. git always runs as that user.
     run_as: str | None = None
+    from_link: LinkSource | None = None
 
     @property
     def type(self) -> str:
@@ -328,6 +342,7 @@ def _parse_instance(server: str, role: str, data: dict, logs_dir: Path | None, p
             # OmniaCLI stops its own process with a signal, which it may not
             # send to another user's process
             raise ConfigError(f"{where}.run_as: not available with restart type process")
+    from_link = _parse_from_link(data.get("from_link"), f"{where}.from_link")
     options = plugin.parse_options(data, where, restart_type)
     return Instance(
         server=server,
@@ -343,7 +358,27 @@ def _parse_instance(server: str, role: str, data: dict, logs_dir: Path | None, p
         options=options,
         auto_update=_parse_auto_update(data.get("auto_update"), f"{where}.auto_update"),
         run_as=run_as,
+        from_link=from_link,
     )
+
+
+def _parse_from_link(data, where: str) -> LinkSource | None:
+    """{link, server, role}; empty or no link: none."""
+    if not data:
+        return None
+    if not isinstance(data, dict):
+        raise ConfigError(f"{where}: a mapping of link, server and role")
+    link = str(data.get("link") or "").strip()
+    if not link:
+        return None
+    server = str(data.get("server") or "").strip()
+    role = str(data.get("role") or "production").strip()
+    for key, value in (("link", link), ("server", server)):
+        if not SERVER_NAME.fullmatch(value):
+            raise ConfigError(f"{where}.{key}: {value!r} is not a name of letters, digits and . _ -")
+    if role not in ROLES:
+        raise ConfigError(f"{where}.role: one of {', '.join(ROLES)}")
+    return LinkSource(link=link, server=server, role=role)
 
 
 def parse_servers(data: dict, logs_dir: Path | None = None) -> dict[str, Server]:
@@ -420,6 +455,9 @@ def instance_to_dict(instance: Instance) -> dict:
         data["auto_update"]["window"] = auto.window_label()
     if instance.run_as is not None:
         data["run_as"] = instance.run_as
+    if instance.from_link is not None:
+        src = instance.from_link
+        data["from_link"] = {"link": src.link, "server": src.server, "role": src.role}
     if instance.restart.type == "process":
         # both follow from the type: the log is OmniaCLI's, there is no service
         del data["log_file"], data["restart"]["service"], data["restart"]["sudo"]

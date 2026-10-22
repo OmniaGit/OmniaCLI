@@ -1,0 +1,107 @@
+{# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C · SPDX-License-Identifier: AGPL-3.0-or-later -#}
+{# Copy from link: drawn once on the server page, it opens for the buttons
+   data-from-link (url, link, server, role, label, known, database). The
+   backups there are listed through the link's pages here (/links/<link>/). -#}
+<dialog id="from-link-dialog">
+  <form method="dialog" id="from-link-form">
+    <h2 id="from-link-title" style="margin-bottom: 4px"></h2>
+    <p class="muted" id="from-link-sub" style="margin-top: 0"></p>
+    <label><input type="radio" name="backup" value="" checked> A new backup there, now</label>
+    <div id="from-link-backups" class="scroll" style="max-height: 35vh; margin: 6px 0"></div>
+    <div id="from-link-options">
+      {% for f in restore_fields %}
+      {% if f.kind == "checkbox" %}
+      <label style="display: block; margin-top: 6px"><input type="checkbox" data-option="{{ f.key }}" {{ "checked" if f.default }}> {{ f.label }}</label>
+      {% else %}
+      <label style="display: block; margin-top: 6px">{{ f.label }} <input type="text" data-option="{{ f.key }}" value="{{ f.default or '' }}" placeholder="{{ f.placeholder }}"></label>
+      {% endif %}
+      {% endfor %}
+    </div>
+    <div id="from-link-confirm" hidden style="margin-top: 10px">
+      <label>A production database is replaced: type <strong class="mono" id="from-link-db"></strong> to go on
+        <input type="text" id="from-link-typed" autocomplete="off" class="mono" style="display: block; margin-top: 4px"></label>
+    </div>
+    <p id="from-link-error" class="error"></p>
+    <div class="actions">
+      <button type="submit" class="danger">Copy here</button>
+      <button type="button" id="from-link-cancel">Cancel</button>
+    </div>
+  </form>
+</dialog>
+<script>
+(function () {
+  const dialog = document.getElementById("from-link-dialog");
+  const list = document.getElementById("from-link-backups");
+  const errorBox = document.getElementById("from-link-error");
+  const typed = document.getElementById("from-link-typed");
+  let target = null, key = "";
+  const sizeText = (b) => b >= 1073741824 ? (b / 1073741824).toFixed(2) + " GiB"
+    : b >= 1048576 ? (b / 1048576).toFixed(1) + " MiB" : Math.max(1, Math.round(b / 1024)) + " KiB";
+
+  async function load() {
+    list.innerHTML = '<span class="muted">Loading the backups there…</span>';
+    let files;
+    try {
+      const resp = await fetch(`{{ prefix }}/links/${target.link}/api/servers/${target.server}/${target.role}/backups`,
+                               {headers: {Accept: "application/json"}});
+      if (!resp.ok) {
+        const data = await resp.json().catch(() => ({}));
+        throw new Error(data.error || data.detail || "HTTP " + resp.status);
+      }
+      files = await resp.json();
+    } catch (e) { list.textContent = "Could not list the backups there: " + e.message; return; }
+    list.replaceChildren();
+    if (!files.length) { list.innerHTML = '<span class="muted">No backups there yet.</span>'; return; }
+    for (const f of files) {
+      const label = document.createElement("label");
+      label.style.display = "block";
+      const radio = document.createElement("input");
+      radio.type = "radio"; radio.name = "backup"; radio.value = f.file;
+      label.append(radio, ` ${f.file} `);
+      const info = document.createElement("span");
+      info.className = "muted";
+      info.textContent = `${new Date(f.time * 1000).toLocaleString()}, ${sizeText(f.size)}`;
+      label.appendChild(info);
+      list.appendChild(label);
+    }
+  }
+  document.getElementById("from-link-cancel").onclick = () => dialog.close();
+  for (const button of document.querySelectorAll("[data-from-link]")) {
+    button.onclick = () => {
+      target = JSON.parse(button.dataset.fromLink); key = button.dataset.key;
+      document.getElementById("from-link-title").textContent = `Copy from link into ${key}`;
+      document.getElementById("from-link-sub").textContent =
+        `${target.label}: backed up there, downloaded into the backups of ${key}, then restored here `
+        + "(its database and filestore are dropped first).";
+      dialog.querySelector('input[name=backup][value=""]').checked = true;
+      document.getElementById("from-link-confirm").hidden = !target.database;
+      document.getElementById("from-link-db").textContent = target.database;
+      typed.value = ""; errorBox.textContent = "";
+      dialog.showModal();
+      if (target.known) load();
+      else list.textContent = `There is no link ${target.link} here: add it on the Links page.`;
+    };
+  }
+  document.getElementById("from-link-form").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const backup = dialog.querySelector("input[name=backup]:checked").value;
+    const body = {backup};
+    for (const input of dialog.querySelectorAll("[data-option]")) {
+      body[input.dataset.option] = input.type === "checkbox" ? input.checked : input.value.trim();
+    }
+    if (target.database) {
+      if (typed.value.trim() !== target.database) { errorBox.textContent = `Type ${target.database} to go on.`; return; }
+      body.confirm = typed.value.trim();
+    } else {
+      const what = backup ? `the backup ${backup}` : "a new backup";
+      if (!confirm(`Drop the database of ${key} and load ${what} of ${target.label} into it?`)) return;
+    }
+    const resp = await fetch(target.url, {
+      method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (resp.ok) { location.href = "{{ prefix }}/jobs/" + data.job; return; }
+    errorBox.textContent = data.error || data.detail || ("Error " + resp.status);
+  });
+})();
+</script>

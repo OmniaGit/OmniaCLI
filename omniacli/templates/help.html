@@ -235,6 +235,11 @@ fields.</p>
     programs (update, backup, pip, checks) run as that user with <span class="mono">sudo -n -u</span>, so they reach the
     database, the filestore and the venv as Odoo does. Empty: as the user running OmniaCLI. Git always runs as
     OmniaCLI's user. Not with restart type <em>process</em>.</td></tr>
+  <tr><td>Database from link</td><td>optional: a link of the Links page, a server of that linked instance and its role
+    (for example <span class="mono">customer</span>, <span class="mono">erp</span>, production). The instance's page then has
+    <strong>Copy from link</strong>: a backup made there (new or already there) is downloaded into this instance's backups
+    and restored into its database, which is dropped first. A production needs the admin role and its database name
+    typed.</td></tr>
   <tr><td>HTTP port</td><td>restart type <em>process</em> only: the port Odoo listens on, passed as
     <span class="mono">--http-port</span> (<span class="mono">--xmlrpc-port</span> before Odoo 11), which wins over the
     config. Empty: the port of the config. It applies at the next Start or Restart.</td></tr>

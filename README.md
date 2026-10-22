@@ -75,6 +75,14 @@ modules of the instance come back as buttons (*Recent*).
 
 ![The Copy production to test dialog](docs/images/copy-dialog.png)
 
+**Copy from link**: a backup made on a linked instance (a new one or one
+already there), transferred here and restored; the job page follows each
+step, the transfer with its size, speed and time left.
+
+![The Copy from link dialog](docs/images/copy-from-link.png)
+
+![A Copy from link job during the transfer](docs/images/copy-from-link-job.png)
+
 **A job**, and the **Servers** page where servers are added, tested and
 activated.
 
@@ -101,6 +109,7 @@ stopped with *Stop job*.
 | pip click-odoo | ✓ | ✓ | `<venv_bin>/python -m pip install click-odoo-contrib`, the scripts OmniaCLI runs in the venv |
 | Merge test to production | | ✓ | backup production, merge, push, update modules, restart production |
 | Copy production to test | ✓ → | ✓ | a popup asks which backup of production: a new one or one already made; then stop test, `click-odoo-restoredb --copy --force --neutralize` into the test database (drops it and its filestore first; `--neutralize` from Odoo 16: no scheduled actions, no outgoing mail), `click-odoo-update`, start test. Refused when production and test run different Odoo versions, and on Odoo 20+ (click-odoo-restoredb refuses it). A systemd test needs its Start/Stop sudoers lines; an init.d one is not stopped, it is restarted at the end |
+| Copy from link | ✓ (admin) | ✓ | for an instance with a **Database from link**: a popup asks which backup of that instance of the linked OmniaCLI: a new one, made there now, or one already there; whether to neutralize; and for a production its database name, typed. The zip is downloaded into this instance's backups as `<link>_<file>` (through `<file>.part`: a cut download leaves nothing), then restored as above: stop, `click-odoo-restoredb --copy --force [--neutralize]`, `click-odoo-update`, start. Refused, before anything is touched, when the backup's `manifest.json` names another Odoo version than the instance's |
 | Log | ✓ | ✓ | `tail -F` of the Odoo log in the browser, with an "errors only" filter |
 
 The two pip buttons are also next to the **Venv bin** field of the server
@@ -380,7 +389,14 @@ Users page, and a CA file when its certificate is from the customer's own CA.
   instance you are on: every action runs there, recorded as
   `manual: link <its name for you> (<your user>)`;
 - you act there with the lower of your role here and the link's role there.
-  Only users who log in here use links, not tokens.
+  Only users who log in here use links, not tokens;
+- an instance here may take its database from an instance there: in the
+  server form, **Database from link** names the link, the server there and
+  its role. *Copy from link* on the instance's page then backs it up there,
+  downloads the zip and restores it here (see the table of actions). It needs
+  the developer role there (for the link and for you) and here, the admin
+  role for a production here. Stopping the job here does not stop a backup
+  already running there.
 
 ### Groups
 
@@ -701,7 +717,10 @@ A plugin may also give:
   (`templates_dir`, which may extend `base.html`) and static files
   (`static_dir`, at `/x/<plugin>/static/`);
 - **`dev_setup()`** and **`mcp_help`**: its part of the MCP tool `dev_setup`
-  and of the MCP instructions.
+  and of the MCP instructions;
+- **`restore()`** and **`restore_fields()`**: load a backup zip into an
+  instance, with the choices asked first (Odoo: neutralize). The core's
+  *Copy from link* is offered only for a type that has it.
 
 Two plugins are built in: **generic** (git repositories and a systemd or
 init.d service, nothing else: what an install without plugins has) and

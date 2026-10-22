@@ -18,7 +18,7 @@
 {% endblock %}
 {% block content %}
 {% from "_icons.html" import runner %}
-<h1>{{ job.title }}</h1>
+<h1 style="overflow-wrap: anywhere">{{ job.title }}</h1>
 {# the job's state at a glance: a runner while it runs, a thumbs up when it
    succeeds, a danger sign when it fails #}
 <div class="job-state" id="job-state" data-status="{{ job.status }}" role="status" aria-live="polite">
@@ -40,6 +40,54 @@
     <span class="job-state-text">{{ {"interrupted": "Interrupted: OmniaCLI stopped while it ran", "stopped": "Stopped by an administrator"}.get(job.status, "Failed: see the error and the log below") }}</span>
   </div>
 </div>
+{# the steps of a job that has them (result.progress: a copy from a link),
+   with the bytes of a transfer #}
+<style>
+.steps { display: flex; align-items: stretch; margin: 0 0 14px; }
+.step { flex: 1 1 0; min-width: 0; padding: 10px 14px; border: 1px solid var(--border); border-radius: var(--r);
+  background: var(--panel); color: var(--muted); transition: border-color .3s, color .3s; }
+.step-head { display: flex; align-items: center; gap: 8px; font-weight: 600; }
+.step-where { font-size: 12px; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.step-mark { width: 18px; height: 18px; flex: none; border-radius: 50%; border: 2px solid currentColor;
+  display: grid; place-items: center; font-size: 11px; line-height: 1; }
+.step.active { color: var(--warn); border-color: var(--warn); }
+.step.active .step-mark { border-right-color: transparent; animation: step-spin .8s linear infinite; }
+.step.done { color: var(--ok); }
+.step.done .step-mark { background: var(--ok); border-color: var(--ok); color: var(--panel); animation: step-pop .35s ease; }
+.step.failed { color: var(--err); border-color: var(--err); }
+.step.failed .step-mark { background: var(--err); border-color: var(--err); color: var(--panel); }
+.step-wire { flex: 0 0 56px; position: relative; align-self: center; height: 2px; background: var(--border); overflow: hidden; }
+/* data moving from the other instance to here while the transfer runs */
+.step-wire.flowing { background: repeating-linear-gradient(90deg, var(--warn) 0 6px, transparent 6px 12px);
+  background-size: 24px 2px; animation: step-flow .5s linear infinite; }
+.step-wire.done { background: var(--ok); }
+.step-bar { height: 8px; margin-top: 10px; border-radius: 4px; background: var(--border); overflow: hidden; }
+.step-bar > div { height: 100%; width: 0; background: var(--warn); transition: width 1.4s linear; }
+.step-bar.moving > div { background-image: repeating-linear-gradient(45deg, rgba(255,255,255,.35) 0 6px, transparent 6px 12px);
+  background-size: 17px 17px; animation: step-stripes .6s linear infinite; }
+/* no size known: a stretch that sweeps across */
+.step-bar.unknown > div { width: 30% !important; animation: step-sweep 1.4s ease-in-out infinite; transition: none; }
+.step.done .step-bar > div { background: var(--ok); width: 100% !important; animation: none; }
+.step.failed .step-bar > div { background: var(--err); animation: none; }
+.step-figures { font-size: 12px; margin-top: 6px; font-family: var(--mono); color: var(--text); min-height: 1.2em; }
+@keyframes step-spin { to { transform: rotate(360deg); } }
+@keyframes step-pop { 0% { transform: scale(.3); } 70% { transform: scale(1.25); } 100% { transform: none; } }
+@keyframes step-flow { from { background-position: 0 0; } to { background-position: 12px 0; } }
+@keyframes step-stripes { from { background-position: 0 0; } to { background-position: 17px 0; } }
+@keyframes step-sweep { 0% { transform: translateX(-100%); } 100% { transform: translateX(340%); } }
+@media (prefers-reduced-motion: reduce) {
+  .step.active .step-mark, .step-wire.flowing, .step-bar.moving > div, .step-bar.unknown > div, .step.done .step-mark { animation: none; }
+  .step-bar > div { transition: none; }
+}
+@media (max-width: 640px) {
+  .steps { flex-direction: column; }
+  .step-wire { flex: 0 0 18px; width: 2px; height: auto; align-self: flex-start; margin-left: 22px; }
+  .step-wire.flowing { background: repeating-linear-gradient(180deg, var(--warn) 0 6px, transparent 6px 12px);
+    background-size: 2px 24px; animation-name: step-flow-down; }
+  @keyframes step-flow-down { from { background-position: 0 0; } to { background-position: 0 12px; } }
+}
+</style>
+<div class="steps" id="steps" hidden aria-live="polite"></div>
 {% if is_admin and job.status in ("queued", "running") %}
 <form method="post" action="{{ prefix }}/jobs/{{ job.id }}/stop" id="stop-form" class="actions"
       onsubmit="return confirm('Stop this job? Its program is ended (SIGTERM, SIGKILL after 10 s); what the job did before stays done, a step cut halfway stays halfway.')">
@@ -81,6 +129,7 @@
     document.getElementById("finished").textContent = data.finished || "";
     document.getElementById("error").textContent = data.error || "";
     if ({{ can_act | tojson }} && data.status === "success" && data.result && data.result.download) offerDownload(data.result);
+    if (data.result && data.result.progress) showSteps(data.result.progress, data.status);
     const done = ["success", "failed", "interrupted", "stopped"].includes(data.status);
     const stop = document.getElementById("stop-form");
     if (stop && done) stop.hidden = true;
@@ -98,6 +147,77 @@
                   failed: "Failed: see the error and the log below"}[status];
     if (text) box.querySelector(status === "queued" || status === "running" ? ".job-running .job-state-text"
                                 : ".job-failed .job-state-text").textContent = text;
+  }
+  // The steps: done before the current one, the current one active (failed
+  // when the job ended on it), pending after; the transfer with its bytes,
+  // speed and time left, from what changed since the last look.
+  const sizeText = (b) => b >= 1073741824 ? (b / 1073741824).toFixed(2) + " GiB"
+    : b >= 1048576 ? (b / 1048576).toFixed(1) + " MiB" : Math.max(0, Math.round(b / 1024)) + " KiB";
+  const clock = (s) => s >= 3600 ? `${Math.floor(s / 3600)}:${String(Math.floor(s / 60) % 60).padStart(2, "0")}:${String(Math.floor(s % 60)).padStart(2, "0")}`
+    : `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+  let lastBytes = null, speed = 0, stepSince = {};
+  function showSteps(progress, status) {
+    const box = document.getElementById("steps");
+    if (box.hidden) {
+      box.hidden = false;
+      progress.steps.forEach((s, i) => {
+        if (i) { const wire = document.createElement("div"); wire.className = "step-wire"; box.appendChild(wire); }
+        const card = document.createElement("div");
+        card.className = "step"; card.dataset.id = s.id;
+        card.innerHTML = '<div class="step-head"><span class="step-mark"></span><span class="step-label"></span></div>'
+          + '<div class="step-where muted"></div><div class="step-bar"><div></div></div><div class="step-figures"></div>';
+        card.querySelector(".step-label").textContent = s.label;
+        card.querySelector(".step-where").textContent = s.where || "";
+        box.appendChild(card);
+      });
+    }
+    const ids = progress.steps.map((s) => s.id);
+    const ended = ["success", "failed", "interrupted", "stopped"].includes(status);
+    const current = status === "success" ? ids.length : Math.max(0, ids.indexOf(progress.step));
+    const cards = [...box.querySelectorAll(".step")], wires = [...box.querySelectorAll(".step-wire")];
+    const now = Date.now();
+    cards.forEach((card, i) => {
+      const state = i < current ? "done" : i > current ? "" : ended ? "failed" : "active";
+      card.className = "step" + (state ? " " + state : "");
+      card.querySelector(".step-mark").textContent = state === "done" ? "✓" : state === "failed" ? "!" : "";
+      const bar = card.querySelector(".step-bar"), fill = bar.firstElementChild;
+      const figures = card.querySelector(".step-figures");
+      if (state === "active" && !stepSince[card.dataset.id]) stepSince[card.dataset.id] = now;
+      const elapsed = stepSince[card.dataset.id] ? (now - stepSince[card.dataset.id]) / 1000 : 0;
+      if (card.dataset.id === "download" && (state === "active" || (state === "failed" && progress.done))) {
+        const done = progress.done || 0, total = progress.total || 0;
+        if (lastBytes) {
+          const rate = (done - lastBytes.done) / Math.max(.2, (now - lastBytes.t) / 1000);
+          speed = speed ? speed * .6 + rate * .4 : rate;  // smoothed
+        } else if (progress.since) {
+          speed = done / Math.max(1, now / 1000 - progress.since);  // the average so far
+        }
+        lastBytes = {done, t: now};
+        bar.className = "step-bar" + (state === "active" ? (total ? " moving" : " unknown") : "");
+        if (total) fill.style.width = Math.min(100, done / total * 100).toFixed(1) + "%";
+        const left = total && speed > 0 ? ` · ${clock((total - done) / speed)} left` : "";
+        figures.textContent = total
+          ? `${sizeText(done)} / ${sizeText(total)} · ${Math.floor(done / total * 100)}% · ${sizeText(speed)}/s${left}`
+          : `${sizeText(done)} · ${sizeText(speed)}/s`;
+      } else if (state === "active") {
+        bar.className = "step-bar unknown";
+        figures.textContent = clock(elapsed);
+      } else if (state === "done") {
+        bar.className = "step-bar";
+        if (card.dataset.id === "download" && progress.total) figures.textContent = sizeText(progress.total);
+        else if (stepSince[card.dataset.id] && !card.dataset.took) {
+          card.dataset.took = "1"; figures.textContent = clock(elapsed);
+        }
+      } else if (state !== "failed") {
+        bar.className = "step-bar"; fill.style.width = "0";
+      }
+    });
+    wires.forEach((wire, i) => {
+      // the wire into the transfer flows while it runs
+      const into = cards[i + 1];
+      wire.className = "step-wire" + (i + 1 < current ? " done"
+        : into.dataset.id === "download" && into.classList.contains("active") ? " flowing" : "");
+    });
   }
   // a backup's zip: always a link; started by itself when the job was
   // launched with "Backup + download" (?download=1), once
