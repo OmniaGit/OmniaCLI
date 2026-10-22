@@ -37,9 +37,15 @@
       <path d="M12 2.5 1.5 21h21z" stroke-linejoin="round"/>
       <path class="danger-mark" d="M12 9v5.5M12 17.2v.3" stroke-linecap="round"/>
     </svg>
-    <span class="job-state-text">{{ "Interrupted: OmniaCLI stopped while it ran" if job.status == "interrupted" else "Failed: see the error and the log below" }}</span>
+    <span class="job-state-text">{{ {"interrupted": "Interrupted: OmniaCLI stopped while it ran", "stopped": "Stopped by an administrator"}.get(job.status, "Failed: see the error and the log below") }}</span>
   </div>
 </div>
+{% if is_admin and job.status in ("queued", "running") %}
+<form method="post" action="{{ prefix }}/jobs/{{ job.id }}/stop" id="stop-form" class="actions"
+      onsubmit="return confirm('Stop this job? Its program is ended (SIGTERM, SIGKILL after 10 s); what the job did before stays done, a step cut halfway stays halfway.')">
+  <button class="btn-stop">Stop job</button>
+</form>
+{% endif %}
 <div class="panel">
   <dl>
     <dt>Status</dt><dd class="status {{ job.status }}" id="status">{{ job.status }}</dd>
@@ -75,7 +81,10 @@
     document.getElementById("finished").textContent = data.finished || "";
     document.getElementById("error").textContent = data.error || "";
     if ({{ can_act | tojson }} && data.status === "success" && data.result && data.result.download) offerDownload(data.result);
-    if (!["success", "failed", "interrupted"].includes(data.status)) setTimeout(poll, 1500);
+    const done = ["success", "failed", "interrupted", "stopped"].includes(data.status);
+    const stop = document.getElementById("stop-form");
+    if (stop && done) stop.hidden = true;
+    if (!done) setTimeout(poll, 1500);
   }
   // the animated state: changed only when the status changes, so each
   // animation plays once
@@ -85,6 +94,7 @@
     box.dataset.status = status;
     const text = {queued: "Queued: waiting for another job on the same instance", running: "Running…",
                   interrupted: "Interrupted: OmniaCLI stopped while it ran",
+                  stopped: "Stopped by an administrator",
                   failed: "Failed: see the error and the log below"}[status];
     if (text) box.querySelector(status === "queued" || status === "running" ? ".job-running .job-state-text"
                                 : ".job-failed .job-state-text").textContent = text;

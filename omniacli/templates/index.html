@@ -130,7 +130,7 @@
   // The jobs, of this instance and of every link, every 5 s: the runners
   // show while an instance has a running job, the Last jobs table follows
   // this instance's jobs, and a notice says when a job ends.
-  const FINISHED = ["success", "failed", "interrupted"];
+  const FINISHED = ["success", "failed", "interrupted", "stopped"];
   const runnerHtml = document.getElementById("mini-runner").innerHTML;
   const seen = {};  // "<link>|<job id>": the status seen last
   const busyBefore = {};  // link: its busy instances at the last answer

@@ -102,7 +102,7 @@ button:hover, .button:hover { border-color: var(--accent); color: var(--accent);
 button.danger { border-color: var(--err); color: var(--err); }
 button:disabled { opacity: .5; cursor: not-allowed; }
 .status { font-weight: 600; }
-.status.success { color: var(--ok); } .status.failed, .status.interrupted, .error { color: var(--err); }
+.status.success { color: var(--ok); } .status.failed, .status.interrupted, .status.stopped, .error { color: var(--err); }
 .status.running, .status.queued { color: var(--warn); }
 .muted { color: var(--muted); }
 pre.console { background: var(--code-bg); color: var(--code-text); padding: 12px;
@@ -181,7 +181,8 @@ svg.spark { width: 160px; height: 28px; display: block; }
   border: 1px solid var(--border); border-radius: var(--r); background: var(--panel); font-weight: 600; }
 .job-state[data-status="queued"] .job-running, .job-state[data-status="running"] .job-running,
 .job-state[data-status="success"] .job-done,
-.job-state[data-status="failed"] .job-failed, .job-state[data-status="interrupted"] .job-failed { display: flex; }
+.job-state[data-status="failed"] .job-failed, .job-state[data-status="interrupted"] .job-failed,
+.job-state[data-status="stopped"] .job-failed { display: flex; }
 .job-running { color: var(--warn); }
 .runner { width: 48px; height: 44px; flex: none; overflow: visible; }
 /* in a line of text: no taller than the text, without speed lines and ground */

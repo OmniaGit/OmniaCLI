@@ -8,6 +8,7 @@ command of its process) its plugin does: instance.plugin."""
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import datetime
 import os
 import shlex
@@ -74,12 +75,28 @@ def _program(cmd: list) -> str:
     return Path(args[0]).name if args else "sudo"
 
 
+def _signal_group(proc: asyncio.subprocess.Process, sig: int) -> None:
+    """sig to the command's process group (started in a session of its own:
+    its children too, pip's builds, Odoo's workers); to the command alone
+    when the group cannot be signalled."""
+    try:
+        os.killpg(proc.pid, sig)
+    except ProcessLookupError:
+        pass
+    except PermissionError:
+        with contextlib.suppress(ProcessLookupError):
+            proc.send_signal(sig)
+
+
 async def _terminate(proc: asyncio.subprocess.Process) -> None:
-    proc.terminate()
+    """SIGTERM, SIGKILL after KILL_WAIT. A command of another user (sudo -u)
+    gets the SIGTERM through sudo, which passes it on; the SIGKILL reaches
+    only sudo: a program of that user that ignores SIGTERM keeps running."""
+    _signal_group(proc, signal.SIGTERM)
     try:
         await asyncio.wait_for(proc.wait(), KILL_WAIT)
     except asyncio.TimeoutError:
-        proc.kill()
+        _signal_group(proc, signal.SIGKILL)
         await proc.wait()
 
 
@@ -119,6 +136,11 @@ async def run(
     except asyncio.TimeoutError:
         await _terminate(proc)
         raise JobFailed(f"{_program(cmd)} did not finish within {timeout:.0f} s")
+    except asyncio.CancelledError:
+        # the job was stopped: so is its program
+        job.log(f"--- stopping {_program(cmd)} (pid {proc.pid})")
+        await _terminate(proc)
+        raise
     if check and returncode:
         raise JobFailed(f"{_program(cmd)} exited with code {returncode}")
     return returncode
@@ -147,6 +169,9 @@ async def capture(
     except asyncio.TimeoutError:
         await _terminate(proc)
         return 124, f"no answer within {timeout:.0f} s"
+    except asyncio.CancelledError:
+        await _terminate(proc)
+        raise
     return proc.returncode, out.decode(errors="replace").strip()
 
 

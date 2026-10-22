@@ -17,14 +17,16 @@ from typing import Awaitable, Callable
 
 _logger = logging.getLogger(__name__)
 
-QUEUED, RUNNING, SUCCESS, FAILED, INTERRUPTED = (
+QUEUED, RUNNING, SUCCESS, FAILED, INTERRUPTED, STOPPED = (
     "queued",
     "running",
     "success",
     "failed",
     "interrupted",
+    # an administrator stopped it (a job that hangs or loops)
+    "stopped",
 )
-FINISHED = (SUCCESS, FAILED, INTERRUPTED)
+FINISHED = (SUCCESS, FAILED, INTERRUPTED, STOPPED)
 
 
 class JobFailed(Exception):
@@ -86,6 +88,9 @@ class JobManager:
         self.jobs: OrderedDict[str, Job] = OrderedDict()
         self._locks: dict[str, asyncio.Lock] = {}
         self._tasks: set[asyncio.Task] = set()
+        # the task of each job not finished, and who asked to stop it
+        self._running: dict[str, asyncio.Task] = {}
+        self._stop_by: dict[str, str] = {}
         self._load()
 
     def _load(self) -> None:
@@ -142,20 +147,45 @@ class JobManager:
         self._save(job)
         task = asyncio.get_running_loop().create_task(self._run(job, action))
         self._tasks.add(task)
+        self._running[job.id] = task
         task.add_done_callback(self._tasks.discard)
+        task.add_done_callback(lambda _: self._running.pop(job.id, None))
         return job
+
+    def stop(self, job_id: str, by: str) -> bool:
+        """Stop a queued or running job: its task is cancelled, which ends the
+        program it runs (ops.run: SIGTERM to its process group, SIGKILL after
+        KILL_WAIT). False when the job is not running any more."""
+        task = self._running.get(job_id)
+        job = self.jobs.get(job_id)
+        if task is None or task.done() or job is None or job.finished_flag:
+            return False
+        if job_id not in self._stop_by:
+            self._stop_by[job_id] = by
+            job.log(f"--- stop asked by {by}")
+        task.cancel()
+        return True
 
     async def _run(self, job: Job, action: Callable[[Job], Awaitable[None]]) -> None:
         locks = [self.lock(key) for key in job.instances]  # sorted: no deadlock
         if any(lock.locked() for lock in locks):
             job.log("Waiting for another job on the same instance to finish")
-        for lock in locks:
-            await lock.acquire()
+        held = []
         try:
+            for lock in locks:
+                await lock.acquire()
+                held.append(lock)
             job.status, job.started = RUNNING, _now()
             self._save(job)
             await action(job)
             job.status = SUCCESS
+        except asyncio.CancelledError:
+            by = self._stop_by.pop(job.id, None)
+            if by is None:
+                # OmniaCLI is stopping: the job is interrupted (see _load)
+                raise
+            job.status, job.error = STOPPED, f"stopped by {by}"
+            job.log(f"STOPPED by {by}: what the job did before stays done")
         except JobFailed as exc:
             job.status, job.error = FAILED, str(exc)
             job.log(f"FAILED: {exc}")
@@ -166,5 +196,5 @@ class JobManager:
         finally:
             job.finished = _now()
             self._save(job)
-            for lock in reversed(locks):
+            for lock in reversed(held):
                 lock.release()

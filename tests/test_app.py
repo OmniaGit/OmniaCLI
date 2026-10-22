@@ -49,7 +49,7 @@ async def client(env):
 async def wait_job(client, job_id):
     for _ in range(200):
         data = (await client.get(f"/api/jobs/{job_id}", headers={"Authorization": AUTH})).json()
-        if data["status"] in ("success", "failed", "interrupted"):
+        if data["status"] in ("success", "failed", "interrupted", "stopped"):
             return data
         await asyncio.sleep(0.05)
     raise AssertionError("job did not finish")

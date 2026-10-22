@@ -935,6 +935,17 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         live = [srv.name for srv in settings.active_servers()]
         return _TEMPLATES.TemplateResponse(request, "job.html", {"job": job, "live": live})
 
+    @app.post("/jobs/{job_id}/stop")
+    async def job_stop(request: Request, job_id: str, user: Principal = Depends(admin)):
+        """Stop a queued or running job (one that hangs or loops): its program
+        is ended, what it did before stays done."""
+        job = jobs.get(job_id)
+        if job is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "No such job")
+        if not jobs.stop(job_id, str(user)):
+            raise HTTPException(status.HTTP_409_CONFLICT, f"The job is not running: it is {job.status}")
+        return RedirectResponse(f"{prefix_of(request)}/jobs/{job.id}", status.HTTP_303_SEE_OTHER)
+
     @app.get("/api/jobs")
     async def jobs_json(limit: int = 20):
         """The last jobs, without their logs, and the instances busy now: the
