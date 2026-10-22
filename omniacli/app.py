@@ -770,7 +770,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             return groups
         info = plugin.describe(target) if scope == "instance" else {}
         for action in plugin.actions():
-            if action.scope != scope or not me.can(action.role):
+            if action.scope != scope or not me.can(action.role) or not action.applies_to(target):
                 continue
             groups.setdefault(action.group or plugin.name, []).append({
                 "action": action, "plugin": plugin.name,
@@ -808,8 +808,9 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         if plugin is None or plugin.name != name:
             raise HTTPException(status.HTTP_404_NOT_FOUND, f"{target_name(target)} is not of type {name}")
         action = next((a for a in plugin.actions() if a.id == action_id and a.scope == scope), None)
-        if action is None:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, f"{plugin.label} has no action {action_id}")
+        if action is None or not action.applies_to(target):
+            raise HTTPException(status.HTTP_404_NOT_FOUND, f"{plugin.label} has no action {action_id} "
+                                                           f"for {target_name(target)}")
         if not user.can(action.role):
             raise HTTPException(status.HTTP_403_FORBIDDEN, f"The {action.role} role is required")
         raw, as_json = await posted_params(request)
@@ -866,6 +867,9 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
 
         def submit(self, request, title: str, keys: list[str], action):
             return jobs.submit(title, keys, f"manual: {request.state.user}", action)
+
+        def backup_folder(self, instance: Instance) -> Path:
+            return backup_folder(instance)
 
         def render(self, request, template: str, context: dict):
             return _TEMPLATES.TemplateResponse(request, f"{self.plugin.name}/{template}", context)

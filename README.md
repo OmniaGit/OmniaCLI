@@ -73,6 +73,7 @@ activated.
 | pip requirements | ✓ | ✓ | `<venv_bin>/python -m pip install -r` the `requirements.txt` next to `odoo-bin` and that of every repository having one, in one call |
 | pip click-odoo | ✓ | ✓ | `<venv_bin>/python -m pip install click-odoo-contrib`, the scripts OmniaCLI runs in the venv |
 | Merge test to production | | ✓ | backup production, merge, push, update modules, restart production |
+| Copy production to test | ✓ → | ✓ | a popup asks which backup of production: a new one or one already made; then stop test, `click-odoo-restoredb --copy --force --neutralize` into the test database (drops it and its filestore first; `--neutralize` from Odoo 16: no scheduled actions, no outgoing mail), `click-odoo-update`, start test. Refused when production and test run different Odoo versions, and on Odoo 20+ (click-odoo-restoredb refuses it). A systemd test needs its Start/Stop sudoers lines; an init.d one is not stopped, it is restarted at the end |
 | Log | ✓ | ✓ | `tail -F` of the Odoo log in the browser, with an "errors only" filter |
 
 The two pip buttons are also next to the **Venv bin** field of the server

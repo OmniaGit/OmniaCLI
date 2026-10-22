@@ -74,6 +74,11 @@ def fake_venv(tmp_path) -> Path:
     (bin_dir / "click-odoo-update").write_text(
         f'#!/bin/sh\necho "update $*" >> {calls}\necho updated\n'
     )
+    # fails when the file restore-fails exists next to the calls
+    (bin_dir / "click-odoo-restoredb").write_text(
+        f'#!/bin/sh\necho "restore $*" >> {calls}\n'
+        f'if [ -e {tmp_path / "restore-fails"} ]; then echo "restore failed" >&2; exit 1; fi\n'
+    )
     (bin_dir / "click-odoo-backupdb").write_text(
         f'#!/bin/sh\necho "backup $*" >> {calls}\n'
         'for last; do :; done\necho dump > "$last"\n'

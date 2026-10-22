@@ -48,13 +48,17 @@ ENTRY_POINT_GROUP = "omniacli.plugins"
 run = _ops.run
 capture = _ops.capture
 as_user = _ops.as_user
-# restart an instance as the core does (its service, or the process it starts)
+# restart, start and stop an instance as the core does (its service, or the
+# process it starts; start and stop: systemd or process only)
 restart = _ops.restart
+start = _ops.start
+stop = _ops.stop
+service_state = _ops.service_state
 
 __all__ = [
     "PLUGIN_API", "ENTRY_POINT_GROUP", "ServicePlugin", "Check", "ERROR", "WARNING",
     "ConfigError", "Instance", "Repository", "Server", "Job", "JobFailed",
-    "run", "capture", "as_user", "restart", "base_env", "system_user",
+    "run", "capture", "as_user", "restart", "start", "stop", "service_state", "base_env", "system_user",
     "ROLES", "SERVER_NAME", "USER_NAME", "Field", "FormButton", "Action", "ActionRefused", "Host",
 ]
 
@@ -190,6 +194,12 @@ class Action:
     # plugin's describe of the instance as JSON) and posts JSON to data-url,
     # which answers {"job": id}
     dialog: str = ""
+    # whether the action applies to target (its button shows, it may run);
+    # None: always
+    available: Callable | None = None
+
+    def applies_to(self, target) -> bool:
+        return self.available is None or bool(self.available(target))
 
     def title_of(self, target, params: dict) -> str:
         if callable(self.title):
@@ -221,6 +231,11 @@ class Host(ABC):
     @abstractmethod
     def submit(self, request, title: str, keys: list[str], action: Callable) -> Job:
         """Start action(job) as a job of the instances keys, by the caller."""
+
+    @abstractmethod
+    def backup_folder(self, instance: Instance) -> Path:
+        """The folder of the instance's backups (the core's backup writes
+        there, the server page lists them); it may not exist yet."""
 
     @abstractmethod
     def render(self, request, template: str, context: dict) -> Any:

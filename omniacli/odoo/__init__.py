@@ -32,9 +32,13 @@ from ..plugin_api import (
     Host,
     Instance,
     Job,
+    JobFailed,
+    Server,
     ServicePlugin,
     capture,
     restart,
+    start,
+    stop,
 )
 from . import checks, odooconf, ops
 
@@ -42,6 +46,9 @@ from . import checks, odooconf, ops
 # never given out by dev_setup
 _PRIVATE = re.compile(r"passw|secret|token|key|^(db_host|db_port|db_user|data_dir|logfile|pidfile"
                       r"|addons_path|upgrade_path|pre_upgrade_scripts)$")
+
+# a backup the copy of production may load: a zip of the production's folder
+_BACKUP_NAME = re.compile(r"[A-Za-z0-9._-]+\.zip")
 
 MCP_HELP = """Servers of type odoo: update_test also updates the changed modules before
 the restart. dev_setup gives the Odoo and Python versions, the addons_path as
@@ -88,6 +95,11 @@ class OdooPlugin(ServicePlugin):
     name = "odoo"
     label = "Odoo"
     api_version = PLUGIN_API
+
+    def __init__(self):
+        # what the core gives the routes; the copy of production uses it too
+        # (router, called by the core when it serves the plugin)
+        self._host: Host | None = None
 
     def parse_options(self, data: dict, where: str, restart_type: str) -> OdooOptions:
         http_port = data.get("http_port")
@@ -202,7 +214,73 @@ class OdooPlugin(ServicePlugin):
                    confirm=lambda inst: f"pip install {ops.CLI_PACKAGE} in "
                                         f"{inst.options.venv_bin}{as_whom(inst)}?",
                    title=lambda inst, params: f"pip install {ops.CLI_PACKAGE} {inst.key}"),
+            Action("copy-production", "Copy production to test", self._copy_production, scope="server",
+                   icon="backup", dialog="copy_dialog.html", prepare=self._copy_params,
+                   available=lambda srv: srv.production is not None and srv.test is not None,
+                   tooltip="Load a backup of production (a new one or one already made) into the "
+                           "test database, neutralized, then update the modules and start test",
+                   title=lambda srv, params: f"Copy production to test {srv.name} "
+                                             f"({params['backup'] or 'new backup'})"),
         ]
+
+    def _copy_params(self, server: Server, params: dict) -> dict:
+        """The backup to load: empty for a new one, else a zip of production's backups."""
+        name = str(params.get("backup") or "").strip()
+        if name:
+            if self._host is None:
+                raise ActionRefused("the routes of the Odoo plugin are not served")
+            path = self._host.backup_folder(server.production) / name
+            if not _BACKUP_NAME.fullmatch(name) or not path.is_file():
+                raise ActionRefused(f"No backup {name} of {server.production.key}")
+        return {"backup": name}
+
+    async def _copy_production(self, job: Job, server: Server, params: dict) -> None:
+        """Back up production (or take a backup of it), stop test, restore the
+        backup into the test database, update the changed modules, start test."""
+        prod, test = server.production, server.test
+        if self._host is None:
+            raise JobFailed("the routes of the Odoo plugin are not served: no backup folder")
+        majors = {}
+        for inst in (prod, test):
+            odoo_bin = ops.find_odoo_bin(inst)
+            majors[inst.role] = ops.odoo_major(odoo_bin) if odoo_bin else None
+        if None not in majors.values() and majors["production"] != majors["test"]:
+            raise JobFailed(f"production runs Odoo {majors['production']}, test Odoo {majors['test']}: "
+                            "a database is not loaded into another version")
+        major = majors["test"]
+        if major is not None and major >= 20:
+            raise JobFailed("click-odoo-restoredb does not restore Odoo 20 and later")
+        neutralize = major is None or major >= 16
+        if not neutralize:
+            job.log(f"WARNING: Odoo {major} cannot be neutralized (Odoo 16 and later): the copy keeps "
+                    "production's scheduled actions and outgoing mail servers")
+        folder = self._host.backup_folder(prod)
+        if params["backup"]:
+            backup_zip = folder / params["backup"]
+            if not backup_zip.is_file():
+                raise JobFailed(f"No backup {params['backup']} of {prod.key}")
+            job.log(f"--- backup of production: {backup_zip.name}")
+        else:
+            folder.mkdir(parents=True, exist_ok=True)
+            backup_zip = await self.backup(job, prod, folder)
+        # init.d: no stop from here; Odoo's drop of the database ends its
+        # connections, and the restart at the end starts it on the copy
+        stoppable = test.restart.type in ("systemd", "process")
+        if stoppable:
+            await stop(job, test)
+        else:
+            job.log(f"--- {test.key} is an init.d service: not stopped, restarted at the end")
+        try:
+            await ops.restore(job, test, backup_zip, neutralize)
+        except JobFailed:
+            job.log(f"{test.key}" + (" is left stopped" if stoppable else " is not restarted")
+                    + ": its database may be missing or half restored")
+            raise
+        await ops.update_modules(job, test, force=True)
+        if stoppable:
+            await start(job, test)
+        else:
+            await restart(job, test)
 
     async def _update(self, job: Job, instance: Instance, params: dict) -> None:
         if params["mode"] == "chosen":
@@ -220,6 +298,7 @@ class OdooPlugin(ServicePlugin):
         await ops.install_cli(job, instance.options.venv_bin, instance.run_as)
 
     def router(self, host: Host):
+        self._host = host
         router = APIRouter()
 
         def refuse(message: str):

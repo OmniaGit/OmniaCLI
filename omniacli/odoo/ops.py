@@ -253,3 +253,31 @@ async def backup(job: Job, instance: Instance, dest_dir: Path) -> Path:
     finally:
         shutil.rmtree(staging, ignore_errors=True)
     return dest
+
+
+async def restore(job: Job, instance: Instance, backup_zip: Path, neutralize: bool) -> None:
+    """click-odoo-restoredb of a backup zip into the instance's database: the
+    database and its filestore are dropped first (--force), the copy gets a
+    new dbuuid (--copy), and with neutralize Odoo disables its crons and
+    outgoing mails (--neutralize, Odoo 16 and later)."""
+    opts = instance.options
+    cmd = [opts.venv_bin / "click-odoo-restoredb", "-c", opts.odoo_config, "--copy", "--force"]
+    if neutralize:
+        cmd.append("--neutralize")
+    env = odoo_env(instance)
+    job.log(f"--- restore {backup_zip.name} into database {opts.database}"
+            + (" (neutralized)" if neutralize else ""))
+    if instance.run_as is None:
+        await run(job, [*cmd, opts.database, backup_zip], env=env)
+        return
+    # run_as cannot read the backup folder: a copy it may read, in a folder
+    # only OmniaCLI writes to
+    staging = Path(tempfile.mkdtemp(prefix="omniacli-restore-", dir=BACKUP_STAGING))
+    try:
+        staging.chmod(0o755)
+        staged = staging / backup_zip.name
+        shutil.copyfile(backup_zip, staged)
+        staged.chmod(0o644)
+        await run(job, as_user(instance.run_as, [*cmd, opts.database, staged], env), env=env)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
