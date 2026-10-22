@@ -9,6 +9,7 @@
       Changed modules only <span class="muted">(automatic, click-odoo-update)</span></label><br>
     <label><input type="radio" name="mode" value="chosen"> These modules <span class="muted">(odoo-bin -u)</span></label>
     <div id="chosen-box">
+      <div id="addon-recent" class="actions" style="margin: 8px 0" hidden></div>
       <input type="text" id="addon-filter" placeholder="Filter modules…" style="margin: 8px 0">
       <div id="addon-list" class="addon-list"><span class="muted">Loading…</span></div>
       <label>Other modules, comma separated
@@ -31,7 +32,50 @@
   const extra = document.getElementById("addon-extra");
   const errorBox = document.getElementById("update-error");
   const chosenBox = document.getElementById("chosen-box");
+  const recentBox = document.getElementById("addon-recent");
   let target = null;
+
+  // The last choices of modules of each instance, kept in this browser only
+  // (a viewer's convenience): the newest first, at most RECENT_MAX.
+  const RECENT_MAX = 5;
+  const recentKey = () => `omniacli.update.recent|{{ prefix }}|${target.server}/${target.role}`;
+  function readRecent() {
+    try {
+      const found = JSON.parse(localStorage.getItem(recentKey()) || "[]");
+      return Array.isArray(found) ? found.filter((m) => Array.isArray(m) && m.length) : [];
+    } catch (e) { return []; }
+  }
+  function saveRecent(modules) {
+    const same = (a) => a.length === modules.length && a.every((m) => modules.includes(m));
+    const kept = [modules, ...readRecent().filter((a) => !same(a))].slice(0, RECENT_MAX);
+    try { localStorage.setItem(recentKey(), JSON.stringify(kept)); } catch (e) { /* not kept: no harm */ }
+  }
+  // a recent choice: its modules checked in the list, those not listed typed
+  function applyRecent(modules) {
+    const listed = new Set();
+    for (const box of list.querySelectorAll(".addon input")) {
+      box.checked = modules.includes(box.value);
+      if (box.checked) listed.add(box.value);
+    }
+    extra.value = modules.filter((m) => !listed.has(m)).join(", ");
+    dialog.querySelector("input[value=chosen]").checked = true;
+    refresh();
+  }
+  function showRecent() {
+    const recent = readRecent();
+    recentBox.replaceChildren();
+    recentBox.hidden = !recent.length;
+    if (!recent.length) return;
+    const label = document.createElement("span");
+    label.className = "muted"; label.style.alignSelf = "center"; label.textContent = "Recent:";
+    recentBox.appendChild(label);
+    for (const modules of recent) {
+      const button = document.createElement("button");
+      button.type = "button"; button.textContent = modules.join(", "); button.title = "Choose these modules";
+      button.onclick = () => applyRecent(modules);
+      recentBox.appendChild(button);
+    }
+  }
 
   const mode = () => dialog.querySelector("input[name=mode]:checked").value;
   function chosen() {
@@ -85,7 +129,7 @@
       dialog.querySelector("input[value=changed]").checked = true;
       filter.value = ""; extra.value = ""; errorBox.textContent = "";
       document.getElementById("update-restart").checked = false;
-      refresh(); dialog.showModal(); load();
+      refresh(); showRecent(); dialog.showModal(); load();
     };
   }
   document.getElementById("update-form").addEventListener("submit", async (ev) => {
@@ -99,7 +143,11 @@
       method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body),
     });
     const data = await resp.json().catch(() => ({}));
-    if (resp.ok) { location.href = "{{ prefix }}/jobs/" + data.job; return; }
+    if (resp.ok) {
+      if (body.mode === "chosen") saveRecent(body.modules);
+      location.href = "{{ prefix }}/jobs/" + data.job;
+      return;
+    }
     errorBox.textContent = data.error || ("Error " + resp.status);
   });
 })();
