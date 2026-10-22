@@ -11,10 +11,14 @@ database, an Odoo config file, a log file and a systemd service, an init.d
 script, or an Odoo that OmniaCLI starts itself.
 
 - **Dashboard**: every server with the state of its Odoo, Start / Stop /
-  Restart, its CPU, and the CPU, network and disks of the machine.
-- **Deploy**: git pull, update of the changed modules, restart; auto update
-  in a time window; merge of what was tested into production, after a backup.
-- **Backups** of database and filestore, to download.
+  Restart, its CPU, and the CPU, network and disks of the machine, with the
+  day each disk will be full.
+- **Deploy**: git pull (submodules included), update of the changed or chosen
+  modules, restart; auto update in a time window; merge of what was tested
+  into production, after a backup.
+- **Backups** of database and filestore, to download; **copy of production
+  into test**, neutralized.
+- **Jobs** shown live; an administrator stops one that hangs.
 - **Logs** in the browser, with an "errors only" filter.
 - **Links**: operate the OmniaCLI of other machines from your own.
 - **MCP**: AI clients (Claude Code and others) read, update test instances
@@ -52,10 +56,24 @@ charts each disk's used space with that forecast.
 
 ![The Dashboard](docs/images/dashboard.png)
 
+**Disks**: each disk's used space by day, with the dashed forecast up to the
+day it is full.
+
+![The Disks page](docs/images/disks.png)
+
 **A server**: production and test side by side, with their actions, load and
-live log.
+live log; *Merge test to production* and *Copy production to test* at the top.
 
 ![The page of a server](docs/images/server.png)
+
+**Update modules**: the changed modules or chosen ones. The last choices of
+modules of the instance come back as buttons (*Recent*).
+
+![The Update modules dialog](docs/images/update-dialog.png)
+
+**Copy production to test**: a new backup of production, or one already made.
+
+![The Copy production to test dialog](docs/images/copy-dialog.png)
 
 **A job**, and the **Servers** page where servers are added, tested and
 activated.
@@ -64,13 +82,18 @@ activated.
 
 ![The Servers page](docs/images/servers.png)
 
+**A job stopped by an administrator**: a module update that never ended,
+stopped with *Stop job*.
+
+![A stopped job](docs/images/job-stopped.png)
+
 ## What it does
 
 | Action | Production | Test | What runs |
 |---|---|---|---|
 | Git pull | ✓ | ✓ | `git pull --ff-only <remote> <branch>` in every repository, then `git submodule update --init --recursive` in those with submodules |
 | Git pull + restart | ✓ | ✓ | pull, `click-odoo-update` (only the changed modules), restart |
-| Update modules | ✓ | ✓ | a popup asks: the changed modules (`click-odoo-update`) or chosen ones (`odoo-bin -u … --stop-after-init --workers=0`), and whether to restart after |
+| Update modules | ✓ | ✓ | a popup asks: the changed modules (`click-odoo-update`) or chosen ones (`odoo-bin -u … --stop-after-init --workers=0`), and whether to restart after. The last 5 choices of modules of each instance are offered again; they are kept in the browser (`localStorage`), so each browser has its own |
 | Restart | ✓ | ✓ | the instance's systemd or init.d restart, or OmniaCLI's own start of `odoo-bin` (see below) |
 | Start, Stop | ✓ | ✓ | `systemctl start`/`stop` of a systemd service (each needs its sudoers line, the **Start/Stop permission** check prints them), or OmniaCLI's own Odoo; a stopped Odoo stays stopped for the auto update |
 | Backup | ✓ | ✓ | `click-odoo-backupdb` → `<backup_dir>/<server>/<role>/<db>_<timestamp>.zip` |
@@ -111,6 +134,14 @@ prepared before Test & activate. The job's log opens in a new tab.
 - **Jobs**: every action is a job. Its output, its status and its error are
   shown live in the web page, and the last 500 are kept in `jobs_dir`.
 - Only one job runs on an instance at a time; the others wait.
+- **Stop job** (admins, on the page of a queued or running job): for a job
+  that hangs or loops. The program it runs gets SIGTERM, with its whole
+  process group (pip's builds, Odoo's workers), and SIGKILL after 10 seconds.
+  The job ends as `stopped`, "stopped by <user>"; the steps after the stopped
+  one do not run (a stopped module update is not followed by the restart),
+  and what the job did before stays done. The instance is free for the next
+  job at once. With `run_as` the SIGKILL reaches only `sudo`: a program of
+  that user that ignores SIGTERM keeps running.
 
 ### Rules the actions follow
 
@@ -385,7 +416,9 @@ The user that runs OmniaCLI needs:
   user (PostgreSQL `peer` login on the socket included), and so are the
   filestore and the venv. git still runs as OmniaCLI's user. The venv's
   folder in sudoers allows its programs, `SETENV` passes `PYTHONPATH` (the
-  folder of `odoo-bin`); the **Run as** check prints the line:
+  folder of `odoo-bin`). These programs start in `/`, not in OmniaCLI's own
+  folder (`/var/lib/omniacli`, which that user cannot enter). The **Run as**
+  check prints the line:
 
   ```
   omniacli ALL=(odoo) NOPASSWD:SETENV: /opt/odoo/venvs/odoo18/bin/
@@ -404,6 +437,118 @@ The user that runs OmniaCLI needs:
 omniacli ALL=(root) NOPASSWD: /usr/bin/systemctl --no-ask-password restart odoo-customer-a
 omniacli ALL=(root) NOPASSWD: /etc/init.d/odoo-customer-a-test restart
 ```
+
+### Configuration cases
+
+Problems met putting OmniaCLI on an existing Odoo 18 server (Odoo as the
+systemd service of user `odoo`, instances with `run_as: odoo`), each with
+what the check or the job said, the cause and the fix. Paths are examples.
+
+**"Odoo config: Permission denied", "Log file … is not readable".** The
+checks run as `omniacli`. The Odoo configs were `640 odoo:odoo` and
+`/var/log/odoo` was `750 odoo:odoo`: readable files in a folder `omniacli`
+cannot enter are not readable either. Both are readable by group `odoo`, so:
+
+```bash
+sudo adduser omniacli odoo
+sudo -u omniacli head -c 1 /etc/odoo/odoo.conf; echo " $?"   # 0: readable
+sudo systemctl restart omniacli     # the service gets the new group only when it starts
+```
+
+`omniacli` then reads everything group `odoo` reads. To give it only these
+files, use ACLs instead (`setfacl -m u:omniacli:r <config>`,
+`setfacl -m u:omniacli:rx /var/log/odoo` and `setfacl -d -m u:omniacli:r
+/var/log/odoo` for the files logrotate creates). An Odoo config left `666`
+during tests is readable and writable by every user of the machine (its
+database password; an `addons_path` that runs their code as `odoo`): put it
+back to `640`.
+
+**"fatal: detected dubious ownership in repository".** The repositories
+belonged to `odoo` (`755`), and git runs as `omniacli`. `safe.directory` alone
+is not enough when `omniacli` cannot write there: the pull would then fail.
+Give OmniaCLI the repositories it manages:
+
+```bash
+sudo chown -R omniacli:odoo /opt/odoo/repos/customer
+sudo -u omniacli -H git -C /opt/odoo/repos/customer status --short
+```
+
+Odoo keeps reading the code (the folders stay `755`). From then on pull as
+`omniacli` (`sudo -u omniacli -H git …`), not as `odoo` or root. The first
+`git status` after the `chown` takes a while on a big repository (git
+refreshes its index): it is not stuck. Run every manual git command on these
+repositories as `omniacli` too, `git … remote -v` included: root gets the same
+"dubious ownership".
+
+**"remote origin branch 18.0 not reachable: could not read Username for
+'https://github.com': terminal prompts disabled".** `omniacli` had no git
+credentials, and OmniaCLI never lets git ask for them. A deploy key of
+`omniacli` on the GitHub repository, then the remote on SSH:
+
+```bash
+sudo -u omniacli -H mkdir -p -m 700 /var/lib/omniacli/.ssh
+sudo -u omniacli -H ssh-keygen -t ed25519 -N '' -f /var/lib/omniacli/.ssh/id_ed25519
+sudo -u omniacli -H sh -c 'ssh-keyscan github.com >> ~/.ssh/known_hosts'
+# add the .pub as a deploy key of the repository on GitHub
+sudo -u omniacli -H git -C /opt/odoo/repos/customer remote set-url origin git@github.com:<owner>/<repo>.git
+sudo -u omniacli -H git -C /opt/odoo/repos/customer ls-remote origin 18.0
+```
+
+A read-only key is enough for the checks and the pulls. *Merge test to
+production* pushes, so it needs **Allow write access**; where whoever merges
+the code brings it to production on GitHub, keep the key read-only and leave
+the merge to them (with a read-only key the button's push fails after the
+local merge, which then has to be undone by hand). Production and test clones
+of the same GitHub repository share one key.
+
+**"test repositories without a production repository of the same name".**
+*Merge test to production* pairs repositories by `name`: give the test
+repository the name of its production one (`customer` in both); path and
+branch stay different.
+
+**A module update fails with `PermissionError: … 'ezdxf.ini'`.** A program run
+as `odoo` started in OmniaCLI's folder, `/var/lib/omniacli` (`750`), and a
+library (ezdxf, imported by an Odoo module) looks for its ini file in the
+current folder. Since 2026.1.8 programs run as another user start in `/`.
+On an older version, `sudo chmod 751 /var/lib/omniacli` works around it; put
+it back to `750` after the upgrade.
+
+**A repository stays " M lib/three.js" after `git reset --hard`.** That path
+is a git submodule (a library inside an Odoo module), never initialised on
+the server: a reset does not touch submodules, and the check counts a
+submodule off its commit as an uncommitted change. `git submodule update
+--init` fixes it. Since 2026.1.9 OmniaCLI does it after every pull and merge
+(see [Rules the actions follow](#rules-the-actions-follow)); the submodules'
+remotes must be readable by `omniacli` without a prompt.
+
+**"Failed to restart odoo.service: Interactive authentication required".**
+The restart ran `systemctl` without `sudo`: the instance's restart had
+`sudo: false`. Turn **Use sudo -n** on in the server form, and allow the
+commands in sudoers with the full path `command -v systemctl` prints:
+
+```
+omniacli ALL=(root) NOPASSWD: /usr/bin/systemctl --no-ask-password restart odoo.service
+omniacli ALL=(root) NOPASSWD: /usr/bin/systemctl --no-ask-password start odoo.service
+omniacli ALL=(root) NOPASSWD: /usr/bin/systemctl --no-ask-password stop odoo.service
+```
+
+`sudo -u omniacli sudo -n -l /usr/bin/systemctl --no-ask-password restart
+odoo.service` prints the command when the line matches. The start and stop
+lines are for the Start and Stop buttons and *Copy production to test*;
+the **Start/Stop permission** check says which are missing.
+
+**`<string>:38: (ERROR/3) Unexpected indentation` in an update job.** These
+are docutils messages about a module's badly indented RST description: the
+update goes on. When it fails, the job shows where Odoo stopped
+(`Error: while parsing …/data/….xml`), the reason (the traceback) is in the
+Odoo log, which the **Log** page shows once `omniacli` can read it.
+
+**A link or an MCP client to an OmniaCLI behind a self-signed certificate.**
+The linking OmniaCLI verifies it with the link's **CA file**: the server's
+certificate itself (with its IP in `subjectAltName`), copied to the linking
+machine and readable by `omniacli` there. Claude Code runs on Node, which
+does not use that file: start it with
+`NODE_EXTRA_CA_CERTS=<that certificate>`.
 
 ## Odoo started by OmniaCLI (restart type `process`)
 
@@ -447,11 +592,11 @@ provides: OmniaCLI installed by hand on Python 3.9 runs without it.
 | `list_backups` | (admin token) an instance's backups, each with its download path |
 | `read_server` | (admin token) a server's whole configuration, active or draft |
 | `add_draft_server` | (admin token) a new server, always a **draft**: it goes live only with Test & activate on the web |
+| `dev_setup` | what a client needs to rebuild an instance locally: remote URLs (without credentials), branches, commits, `addons_path` as repository folders, Odoo and Python versions, the Odoo config options without secrets nor server paths, and the backups to download |
 
 With an admin token `dev_setup`, `backup` and `list_backups` also reach the
 draft servers (saved complete), and their backups download with that token;
 every other tool works on the active servers only.
-| `dev_setup` | what a client needs to rebuild an instance locally: remote URLs (without credentials), branches, commits, `addons_path` as repository folders, Odoo and Python versions, the Odoo config options without secrets nor server paths, and the backups to download |
 
 Access is by bearer token, never by the users' passwords. Create one per
 client on the **Users** page (the token is shown once), or by hand: add its
