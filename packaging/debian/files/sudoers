@@ -1,5 +1,6 @@
 # OmniaCLI restarts the Odoo services with "sudo -n". Allow each service here,
 # with exactly the command OmniaCLI runs (see the job log), for example:
+# (with OMNIACLI_USER in /etc/default/omniacli, the lines name that user)
 #
 # omniacli ALL=(root) NOPASSWD: /usr/bin/systemctl --no-ask-password restart odoo-prod
 # omniacli ALL=(root) NOPASSWD: /etc/init.d/odoo-test restart

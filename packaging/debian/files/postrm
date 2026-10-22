@@ -10,6 +10,8 @@ case "$1" in
     purge)
         rm -rf /opt/omniacli/venv /opt/omniacli/venv.old /opt/omniacli/python /opt/omniacli/python.old /opt/omniacli/.python.*
         rm -f /etc/omniacli/omniacli.yaml /etc/omniacli/initial-admin-password
+        rm -f /etc/systemd/system/omniacli.service.d/omniacli-user.conf
+        rmdir /etc/systemd/system/omniacli.service.d 2>/dev/null || true
         rmdir /etc/omniacli 2>/dev/null || true
         # the configuration and the job history go; the backups stay
         rm -rf /var/lib/omniacli/jobs

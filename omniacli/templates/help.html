@@ -294,6 +294,9 @@ omniacli ALL=(odoo) NOPASSWD:SETENV: /opt/odoo/venvs/odoo18/bin/</pre>
 <p>The last line is for <strong>Run as</strong> <span class="mono">odoo</span>: it allows the programs of that venv
 folder, and <span class="mono">SETENV</span> passes <span class="mono">PYTHONPATH</span>. Check a sudoers file with
 <span class="mono">sudo visudo -cf /etc/sudoers.d/omniacli</span>.</p>
+<p>On a development workstation, whose repositories and configs belong to you, the whole service may run as your
+user: <span class="mono">OMNIACLI_USER=&lt;user&gt;</span> in <span class="mono">/etc/default/omniacli</span>, then
+<span class="mono">sudo dpkg-reconfigure omniacli</span>. The sudoers lines then name that user.</p>
 
 <h3>Typical configurations</h3>
 <ul>

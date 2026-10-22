@@ -8,3 +8,11 @@
 # every request.
 #OMNIACLI_HOST=127.0.0.1
 #OMNIACLI_PORT=8090
+
+# The system user the service runs as: everything OmniaCLI does itself (git,
+# reading the Odoo configs and logs, its files in /var/lib/omniacli) runs as
+# that user, in group omniacli. Empty: omniacli. On a development workstation
+# your own user reaches your repositories and configs as you do. The sudoers
+# lines then name this user. Not root. After a change apply it with
+#   sudo dpkg-reconfigure omniacli
+#OMNIACLI_USER=

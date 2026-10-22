@@ -280,6 +280,56 @@ echo "update, backup ($(stat -c '%U %a' "/var/lib/omniacli/backups/runas/test/$B
 # purge keeps the backups: this one goes, so the purge below removes everything
 rm -rf /var/lib/omniacli/backups/runas
 
+step "OMNIACLI_USER: the service as a workstation user, kept by an upgrade, then omniacli again"
+wait_up() { for i in $(seq 30); do curl -s -o /dev/null localhost:8090 && return 0; sleep 1; done; return 1; }
+service_user() { stat -c %U "/proc/$(systemctl show -p MainPID --value omniacli)"; }
+owners() { stat -c '%U:%G' /var/lib/omniacli /var/lib/omniacli/jobs /var/lib/omniacli/servers.yaml | sort -u; }
+DROPIN=/etc/systemd/system/omniacli.service.d/omniacli-user.conf
+# a workspace closed to other users (744), as on a development workstation
+adduser --quiet --disabled-password --gecos "" dev
+install -d -o dev -g dev -m 744 /home/dev/workspace
+printf '[options]\ndb_name = DEV\n' > /home/dev/workspace/odoo.conf
+chown dev:dev /home/dev/workspace/odoo.conf
+FORM='{"values": {"odoo_config": "/home/dev/workspace/odoo.conf"}}'
+curl "${API[@]}" localhost:8090/x/odoo/form/config -d "$FORM" | grep -q "Permission denied" \
+  || fail "the workspace of dev readable by omniacli: the test proves nothing"
+echo "OMNIACLI_USER=nobody-here" >> /etc/default/omniacli
+dpkg-reconfigure omniacli > /tmp/reconf.log 2>&1 && fail "an unknown OMNIACLI_USER accepted"
+grep -q "no such user" /tmp/reconf.log || { cat /tmp/reconf.log; fail "no reason for the unknown user"; }
+sed -i 's/^OMNIACLI_USER=.*/OMNIACLI_USER=dev/' /etc/default/omniacli
+dpkg-reconfigure omniacli > /tmp/reconf.log 2>&1 || { tail -20 /tmp/reconf.log; fail "dpkg-reconfigure with OMNIACLI_USER=dev"; }
+wait_up || fail "service not up as dev"
+[ "$(service_user)" = dev ] || fail "service runs as $(service_user), not dev"
+[ "$(owners)" = dev:omniacli ] || fail "data owned by $(owners), not dev:omniacli"
+login admin "$PW"
+curl "${API[@]}" localhost:8090/x/odoo/form/config -d "$FORM" | grep -q '"database":"DEV"' || fail "config of dev not read as dev"
+# git and the restart as dev: the repository is the developer's, sudoers names dev
+chown -R dev:dev /srv/odoo /srv/remote.git
+echo "dev ALL=(root) NOPASSWD: $SYSTEMCTL --no-ask-password restart odoo-dummy" >> /etc/sudoers.d/omniacli
+visudo -cf /etc/sudoers.d/omniacli >/dev/null || fail "sudoers invalid with the line of dev"
+git -C /srv/dev commit -q --allow-empty -m three && git -C /srv/dev push -q origin main
+LOCATION="$(curl "${API[@]}" -o /dev/null -w '%{redirect_url}' -X POST localhost:8090/servers/demo/production/pull-restart)"
+wait_job "${LOCATION##*/}" || fail "pull-restart as dev"
+[ "$(git -C /srv/odoo log -1 --format=%s)" = three ] || fail "repository not pulled as dev"
+[ "$(stat -c %U /srv/odoo/.git/FETCH_HEAD)" = dev ] || fail "git did not run as dev"
+dpkg -i /opt/omniacli-test/omniacli.deb > /tmp/reinstall.log 2>&1 || { tail -20 /tmp/reinstall.log; fail "upgrade as dev"; }
+wait_up || fail "service not up after the upgrade"
+[ "$(service_user)" = dev ] || fail "the upgrade gave the service back to $(service_user)"
+[ "$(owners)" = dev:omniacli ] || fail "the upgrade gave the data back to $(owners)"
+login admin "$PW"
+curl "${API[@]}" localhost:8090/api/access/users/save \
+  -d '{"name": "marta", "role": "user", "password": "marta-pass-1", "new": true}' | grep -q '"ok":true' \
+  || fail "users.yaml not written as dev after the upgrade"
+echo "as dev: config read, pulled and restarted, upgrade kept it"
+sed -i '/^OMNIACLI_USER=/d' /etc/default/omniacli
+dpkg-reconfigure omniacli > /tmp/reconf.log 2>&1 || { tail -20 /tmp/reconf.log; fail "dpkg-reconfigure back to omniacli"; }
+wait_up || fail "service not up as omniacli again"
+[ "$(service_user)" = omniacli ] || fail "service runs as $(service_user), not omniacli again"
+[ "$(owners)" = omniacli:omniacli ] || fail "data owned by $(owners), not omniacli again"
+[ ! -e "$DROPIN" ] || fail "drop-in left without OMNIACLI_USER"
+chown -R omniacli:omniacli /srv/odoo /srv/remote.git
+login admin "$PW"
+
 step "reinstall keeps config, servers and password"
 HASH_BEFORE="$(sha256sum /etc/omniacli/omniacli.yaml)"
 dpkg -i /opt/omniacli-test/omniacli.deb > /tmp/reinstall.log 2>&1 || { tail -20 /tmp/reinstall.log; fail "reinstall"; }

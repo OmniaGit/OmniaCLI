@@ -6,6 +6,9 @@ set -e
 VENV=/opt/omniacli/venv
 CONFIG=/etc/omniacli/omniacli.yaml
 PASSWORD_FILE=/etc/omniacli/initial-admin-password
+DATA=/var/lib/omniacli
+# written from OMNIACLI_USER of /etc/default/omniacli, removed without it
+USER_DROPIN=/etc/systemd/system/omniacli.service.d/omniacli-user.conf
 
 BUNDLED=/opt/omniacli/python
 # The Python for a machine without any python3.10+ (Debian 11 has 3.9): a
@@ -118,14 +121,52 @@ create_config() {
     echo "omniacli: user 'admin', password in $PASSWORD_FILE (readable by root only)"
 }
 
+# The user the service runs as: OMNIACLI_USER of /etc/default/omniacli (read,
+# not sourced: systemd reads that file too), omniacli when empty.
+service_user() {
+    value=$(sed -n 's/^[[:space:]]*OMNIACLI_USER=//p' /etc/default/omniacli 2>/dev/null | tail -n 1 \
+        | sed 's/[[:space:]]*$//; s/^"\(.*\)"$/\1/; s/^'"'"'\(.*\)'"'"'$/\1/')
+    echo "${value:-omniacli}"
+}
+
+# The service runs as user, in group omniacli (it reads the config,
+# root:omniacli 640): a drop-in for another user, none for omniacli; the
+# data folder and what is in it owned by user, also after a change of user.
+apply_service_user() {
+    user="$1"
+    if [ "$user" = root ] || [ "$(id -u "$user" 2>/dev/null)" = 0 ]; then
+        echo "omniacli: OMNIACLI_USER=$user in /etc/default/omniacli: not root" >&2
+        exit 1
+    fi
+    if ! getent passwd "$user" >/dev/null; then
+        echo "omniacli: OMNIACLI_USER=$user in /etc/default/omniacli: no such user" >&2
+        exit 1
+    fi
+    if [ "$user" = omniacli ]; then
+        rm -f "$USER_DROPIN"
+        rmdir "$(dirname "$USER_DROPIN")" 2>/dev/null || true
+    else
+        install -d -m 755 "$(dirname "$USER_DROPIN")"
+        printf '%s\n' "# Written by the omniacli package from OMNIACLI_USER of /etc/default/omniacli:" \
+            "# change it there, then sudo dpkg-reconfigure omniacli." \
+            "[Service]" "User=$user" "Group=omniacli" > "$USER_DROPIN"
+        echo "omniacli: the service runs as $user (OMNIACLI_USER)"
+    fi
+    if [ "$(stat -c %U "$DATA")" != "$user" ]; then
+        chown -R "$user:omniacli" "$DATA"
+    fi
+    install -d -o "$user" -g omniacli -m 750 "$DATA" "$DATA/jobs" "$DATA/backups" "$DATA/logs"
+}
+
 case "$1" in
     configure)
         if ! getent passwd omniacli >/dev/null; then
             adduser --quiet --system --group --home /var/lib/omniacli \
                 --gecos "OmniaCLI" omniacli
         fi
-        install -d -o omniacli -g omniacli -m 750 \
-            /var/lib/omniacli /var/lib/omniacli/jobs /var/lib/omniacli/backups /var/lib/omniacli/logs
+        # created once: install -d would give an existing one back to omniacli
+        [ -d "$DATA" ] || install -d -o omniacli -g omniacli -m 750 "$DATA"
+        apply_service_user "$(service_user)"
         build_venv
         create_config
         ;;

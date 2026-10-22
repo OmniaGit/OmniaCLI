@@ -201,6 +201,8 @@ The package:
 
 - creates the system user `omniacli` and runs the service `omniacli` as that
   user, on `127.0.0.1:8090` (change it in `/etc/default/omniacli`);
+- runs it as another user when `OMNIACLI_USER` is set in
+  `/etc/default/omniacli` (see below);
 - builds `/opt/omniacli/venv` at installation with that Python and the
   dependency versions locked for it (`packaging/debian/requirements`).
   **The machine must reach PyPI while installing**, and also `github.com`
@@ -212,6 +214,26 @@ The package:
 - keeps the servers file, the jobs and the backups in `/var/lib/omniacli`;
 - installs `/etc/sudoers.d/omniacli`, all comments, to be completed;
 - on purge, deletes configuration and jobs but keeps the backups.
+
+### The service as another user (OMNIACLI_USER)
+
+On a development workstation the repositories, the Odoo configs and the logs
+are the developer's, often in a folder other users cannot enter: the service
+user `omniacli` cannot read them (`cannot read .../odoo.conf: Permission
+denied`). Run the whole service as that user instead:
+
+```bash
+echo OMNIACLI_USER=mboscolo | sudo tee -a /etc/default/omniacli
+sudo dpkg-reconfigure omniacli
+```
+
+Everything OmniaCLI does itself then runs as that user, in group `omniacli`:
+git (with that user's git configuration and credentials), reading the
+configs and logs, its files in `/var/lib/omniacli` (given to that user, and
+kept so by upgrades). The sudoers lines name that user
+(`mboscolo ALL=(root) NOPASSWD: ...`). Not root. Remove the line and run
+`dpkg-reconfigure` again to go back to `omniacli`. On a server keep
+`omniacli`, with `run_as` for the programs of an Odoo venv.
 
 ### Build and test the package
 
