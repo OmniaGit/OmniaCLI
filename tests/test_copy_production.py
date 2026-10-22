@@ -43,6 +43,15 @@ async def test_copy_with_a_new_backup(client, env):
     assert len(done) == 5  # production is neither stopped nor restarted
 
 
+async def test_copy_with_a_new_backup_without_filestore(client, env):
+    resp = await client.post(URL, headers=POST, json={"backup": "", "no_filestore": True})
+    job = await wait_job(client, resp.json()["job"])
+    assert job["status"] == "success" and job["title"].endswith("(new backup without filestore)"), job
+    done = calls(env)
+    assert " --no-filestore DB_production " in done[0] and done[0].endswith("_nofilestore.zip")
+    assert done[2].endswith("_nofilestore.zip")
+
+
 async def test_copy_of_a_backup_already_made(client, env):
     folder = env["settings"].backup_dir / "srv" / "production"
     folder.mkdir(parents=True)

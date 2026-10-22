@@ -290,9 +290,17 @@ class ServicePlugin(ABC):
         """Checks of a server having both instances (target "server")."""
         return []
 
-    async def backup(self, job: Job, instance: Instance, dest_dir: Path) -> Path:
-        """Back up the instance into dest_dir (it exists), return the file."""
+    async def backup(self, job: Job, instance: Instance, dest_dir: Path, options: dict | None = None) -> Path:
+        """Back up the instance into dest_dir (it exists), return the file.
+        options: the values of backup_fields; None or a key left out: its
+        default (the backup before a merge passes none)."""
         raise JobFailed(f"{self.label} has no backup")
+
+    def backup_fields(self) -> list[Field]:
+        """What may be chosen for a backup (checkbox or text), given as
+        options. A checkbox not posted is off: its off must be the backup
+        made without any choice."""
+        return []
 
     async def restore(self, job: Job, instance: Instance, backup_zip: Path, options: dict) -> None:
         """Load a file of backup (made here or by a linked instance) into the
@@ -438,7 +446,8 @@ def parts_problems(plugin: ServicePlugin) -> list[str]:
             problems.append(f"action {a.id}: no template {a.dialog} in the plugin's templates_dir")
         if a.dialog and a.params:
             problems.append(f"action {a.id}: a dialog of its own or params, not both")
-    for f in plugin.restore_fields():
-        if not isinstance(f, Field) or f.kind not in ("checkbox", "text"):
-            problems.append(f"restore field {f!r} is not a plugin_api.Field of kind checkbox or text")
+    for what, fields in (("backup", plugin.backup_fields()), ("restore", plugin.restore_fields())):
+        for f in fields:
+            if not isinstance(f, Field) or f.kind not in ("checkbox", "text"):
+                problems.append(f"{what} field {f!r} is not a plugin_api.Field of kind checkbox or text")
     return problems

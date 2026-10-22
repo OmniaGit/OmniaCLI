@@ -144,8 +144,13 @@ class OdooPlugin(ServicePlugin):
     async def after_pull(self, job: Job, instance: Instance) -> None:
         await ops.update_modules(job, instance)
 
-    async def backup(self, job: Job, instance: Instance, dest_dir: Path) -> Path:
-        return await ops.backup(job, instance, dest_dir)
+    async def backup(self, job: Job, instance: Instance, dest_dir: Path, options: dict | None = None) -> Path:
+        return await ops.backup(job, instance, dest_dir, filestore=not (options or {}).get("no_filestore"))
+
+    def backup_fields(self) -> list[Field]:
+        return [Field("no_filestore", "Without filestore", kind="checkbox", default=False,
+                      help="Database only, no attachments: a smaller backup. Restored, the instance has no "
+                           "attachments (the restore drops its filestore)")]
 
     def process_command(self, instance: Instance) -> tuple[list[str], Path]:
         return ops.process_command(instance)
@@ -220,7 +225,7 @@ class OdooPlugin(ServicePlugin):
                    tooltip="Load a backup of production (a new one or one already made) into the "
                            "test database, neutralized, then update the modules and start test",
                    title=lambda srv, params: f"Copy production to test {srv.name} "
-                                             f"({params['backup'] or 'new backup'})"),
+                                             f"({params['backup'] or 'new backup' + (' without filestore' if params['no_filestore'] else '')})"),
         ]
 
     def _copy_params(self, server: Server, params: dict) -> dict:
@@ -232,7 +237,9 @@ class OdooPlugin(ServicePlugin):
             path = self._host.backup_folder(server.production) / name
             if not _BACKUP_NAME.fullmatch(name) or not path.is_file():
                 raise ActionRefused(f"No backup {name} of {server.production.key}")
-        return {"backup": name}
+        # without filestore: of a new backup only
+        no_filestore = not name and params.get("no_filestore") not in (None, False, "", "0", "false", "off")
+        return {"backup": name, "no_filestore": no_filestore}
 
     async def _copy_production(self, job: Job, server: Server, params: dict) -> None:
         """Back up production (or take a backup of it), stop test, restore the
@@ -257,7 +264,7 @@ class OdooPlugin(ServicePlugin):
             job.log(f"--- backup of production: {backup_zip.name}")
         else:
             folder.mkdir(parents=True, exist_ok=True)
-            backup_zip = await self.backup(job, prod, folder)
+            backup_zip = await self.backup(job, prod, folder, {"no_filestore": params["no_filestore"]})
         await self.restore(job, test, backup_zip, {"neutralize": True})
 
     def restore_fields(self) -> list[Field]:

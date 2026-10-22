@@ -7,6 +7,9 @@
     <h2 id="from-link-title" style="margin-bottom: 4px"></h2>
     <p class="muted" id="from-link-sub" style="margin-top: 0"></p>
     <label><input type="radio" name="backup" value="" checked> A new backup there, now</label>
+    {% for f in backup_fields if f.kind == "checkbox" %}
+    <label style="display: block; margin-left: 22px" title="{{ f.help }}"><input type="checkbox" data-backup-option="{{ f.key }}" {{ "checked" if f.default }}> {{ f.label | lower }}</label>
+    {% endfor %}
     <div id="from-link-backups" class="scroll" style="max-height: 35vh; margin: 6px 0"></div>
     <div id="from-link-options">
       {% for f in restore_fields %}
@@ -35,6 +38,11 @@
   const errorBox = document.getElementById("from-link-error");
   const typed = document.getElementById("from-link-typed");
   let target = null, key = "";
+  const backupOptions = [...dialog.querySelectorAll("[data-backup-option]")];
+  // the choices of a new backup: not for one already there
+  dialog.addEventListener("change", (ev) => {
+    if (ev.target.name === "backup") for (const box of backupOptions) box.disabled = ev.target.value !== "";
+  });
   const sizeText = (b) => b >= 1073741824 ? (b / 1073741824).toFixed(2) + " GiB"
     : b >= 1048576 ? (b / 1048576).toFixed(1) + " MiB" : Math.max(1, Math.round(b / 1024)) + " KiB";
 
@@ -74,6 +82,7 @@
         `${target.label}: backed up there, downloaded into the backups of ${key}, then restored here `
         + "(its database and filestore are dropped first).";
       dialog.querySelector('input[name=backup][value=""]').checked = true;
+      for (const box of backupOptions) { box.disabled = false; box.checked = box.defaultChecked; }
       document.getElementById("from-link-confirm").hidden = !target.database;
       document.getElementById("from-link-db").textContent = target.database;
       typed.value = ""; errorBox.textContent = "";
@@ -89,6 +98,7 @@
     for (const input of dialog.querySelectorAll("[data-option]")) {
       body[input.dataset.option] = input.type === "checkbox" ? input.checked : input.value.trim();
     }
+    if (!backup) for (const box of backupOptions) body[box.dataset.backupOption] = box.checked;
     if (target.database) {
       if (typed.value.trim() !== target.database) { errorBox.textContent = `Type ${target.database} to go on.`; return; }
       body.confirm = typed.value.trim();

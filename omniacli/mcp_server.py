@@ -268,12 +268,29 @@ def create_mcp(settings: Settings, jobs: JobManager, updater: AutoUpdater, sampl
         await _wait(job, wait_seconds)
         return _job_dict(job, tail=50)
 
-    async def backup_job(inst: Instance, ctx: Context, wait_seconds: int) -> dict:
+    def backup_options(inst: Instance, options: dict | None) -> dict:
+        """options checked against the plugin's backup_fields: a checkbox
+        true or false, a text a string."""
+        fields = {f.key: f for f in inst.plugin.backup_fields()}
+        unknown = sorted(set(options or {}) - set(fields))
+        if unknown:
+            raise ToolError(f"unknown backup options {', '.join(unknown)}; "
+                            f"{inst.plugin.label} has: {', '.join(fields) or 'none'}")
+        for k, v in (options or {}).items():
+            if fields[k].kind == "checkbox" and not isinstance(v, bool):
+                raise ToolError(f"backup option {k}: true or false")
+        return {k: (v if fields[k].kind == "checkbox" else str(v)) for k, v in (options or {}).items()}
+
+    async def backup_job(inst: Instance, ctx: Context, wait_seconds: int, options: dict | None) -> dict:
+        chosen = backup_options(inst, options)
+
         async def action(job):
-            dest = await ops.backup(job, inst, settings.backup_dir)
+            dest = await ops.backup(job, inst, settings.backup_dir, chosen)
             job.result = {"file": dest.name, "size": dest.stat().st_size,
                           "download": f"/backups/{inst.server}/{inst.role}/{dest.name}"}
-        job = jobs.submit(f"Backup {inst.key}", [inst.key], f"mcp: {caller(ctx)}", action)
+        flags = [k for k, v in chosen.items() if v is True]
+        job = jobs.submit(f"Backup {inst.key}" + (f" ({', '.join(flags)})" if flags else ""), [inst.key],
+                          f"mcp: {caller(ctx)}", action)
         await _wait(job, wait_seconds)
         return _job_dict(job, tail=20)
 
@@ -286,21 +303,26 @@ def create_mcp(settings: Settings, jobs: JobManager, updater: AutoUpdater, sampl
                  "download": f"/backups/{inst.server}/{inst.role}/{p.name}"} for p in found[:limit]]
 
     @server.tool()
-    async def backup_test(server_name: str, ctx: Context, wait_seconds: int = 0) -> dict:
+    async def backup_test(server_name: str, ctx: Context, wait_seconds: int = 0,
+                          options: dict | None = None) -> dict:
         """Back up the database and filestore of a test instance; the result
-        gives the path to download the zip (GET with the same bearer token)."""
+        gives the path to download the zip (GET with the same bearer token).
+        options: the plugin's backup choices, Odoo {"no_filestore": true}
+        for the database only."""
         need(ctx, "backup_test")
-        return await backup_job(instance(server_name, "test"), ctx, wait_seconds)
+        return await backup_job(instance(server_name, "test"), ctx, wait_seconds, options)
 
     @server.tool()
-    async def backup(server_name: str, role: str, ctx: Context, wait_seconds: int = 0) -> dict:
+    async def backup(server_name: str, role: str, ctx: Context, wait_seconds: int = 0,
+                     options: dict | None = None) -> dict:
         """(admin token) Back up the database and filestore of an instance,
         production or test. Waits up to wait_seconds (max 600); the finished
         job's result gives the path to download the zip: an HTTP GET to the
         server's base URL + that path, with the same Authorization: Bearer
-        header."""
+        header. options: the plugin's backup choices, Odoo
+        {"no_filestore": true} for the database only."""
         need(ctx, "backup")
-        return await backup_job(instance(server_name, role, ctx), ctx, wait_seconds)
+        return await backup_job(instance(server_name, role, ctx), ctx, wait_seconds, options)
 
     @server.tool()
     def list_backups(server_name: str, role: str, ctx: Context, limit: int = 20) -> list[dict]:

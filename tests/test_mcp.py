@@ -160,6 +160,12 @@ async def test_admin_backs_up_production_and_downloads(client, env):
     assert job["status"] == "success", job
     listed = await call(client, "list_backups", headers=admin, server_name="srv", role="production")
     assert listed[0]["download"] == job["result"]["download"]
+    small = await call(client, "backup", headers=admin, server_name="srv", role="production", wait_seconds=30,
+                       options={"no_filestore": True})
+    assert small["status"] == "success" and small["result"]["file"].endswith("_nofilestore.zip"), small
+    for bad in ({"filestore": False}, {"no_filestore": "yes"}):
+        answer = await call(client, "backup", headers=admin, server_name="srv", role="production", options=bad)
+        assert "backup option" in str(answer.get("error")), (bad, answer)
     resp = await client.get(listed[0]["download"], headers={"Authorization": admin["Authorization"]})
     assert resp.status_code == 200 and resp.content == b"dump\n"
 

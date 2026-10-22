@@ -639,6 +639,22 @@ async def test_backup_and_download(client, env):
         assert (await client.get(bad, headers={"Authorization": AUTH})).status_code == 404, bad
 
 
+async def test_backup_without_filestore(client, env):
+    page = (await client.get("/servers/srv", headers={"Authorization": AUTH})).text
+    assert 'name="no_filestore"' in page and 'formaction="/servers/srv/production/backup?download=1"' in page
+    resp = await client.post("/servers/srv/production/backup", headers=POST, data={"no_filestore": "on"})
+    data = await wait_job(client, resp.headers["location"].split("/jobs/")[1])
+    assert data["status"] == "success" and data["title"] == "Backup srv/production (without filestore)", data
+    assert data["result"]["file"].endswith("_nofilestore.zip")
+    [call] = [c for c in env["calls"].read_text().splitlines() if c.startswith("backup")]
+    assert " --no-filestore DB_production " in call
+    # no choice posted: the filestore too, as before
+    resp = await client.post("/servers/srv/production/backup", headers=POST)
+    data = await wait_job(client, resp.headers["location"].split("/jobs/")[1])
+    assert data["title"] == "Backup srv/production" and not data["result"]["file"].endswith("_nofilestore.zip")
+    assert "--no-filestore" not in env["calls"].read_text().splitlines()[-1]
+
+
 async def test_breadcrumbs(client, env):
     import re
 

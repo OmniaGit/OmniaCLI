@@ -41,12 +41,15 @@ def _refused(link: LinkTarget, resp: httpx.Response, what: str) -> JobFailed:
 
 
 async def _remote_backup(job: Job, client: httpx.AsyncClient, link: LinkTarget, headers: dict,
-                         src: LinkSource) -> str:
-    """Back up src there, follow its job; the name of the zip made."""
+                         src: LinkSource, options: dict) -> str:
+    """Back up src there with the choices of options (posted as its Backup
+    form posts them: a checkbox off is left out), follow its job; the name of
+    the zip made."""
     where = f"{src.server}/{src.role}"
-    job.log(f"--- backup of {where} on {link.name}")
+    form = {k: "on" if v is True else str(v) for k, v in options.items() if v not in (False, None, "")}
+    job.log(f"--- backup of {where} on {link.name}" + (f" ({', '.join(form)})" if form else ""))
     try:
-        resp = await client.post(f"/servers/{where}/backup", headers=headers)
+        resp = await client.post(f"/servers/{where}/backup", headers=headers, data=form or None)
     except httpx.HTTPError as exc:
         raise JobFailed(f"{link.name}: {describe_error(exc)}") from exc
     if resp.status_code != 303:
@@ -112,13 +115,15 @@ async def _download(job: Job, client: httpx.AsyncClient, link: LinkTarget, heade
 
 
 async def fetch_backup(job: Job, client: httpx.AsyncClient, link: LinkTarget, headers: dict,
-                       src: LinkSource, backup: str, folder: Path, progress: dict | None = None) -> Path:
-    """A new backup of src there (backup empty) or its backup named backup,
-    downloaded into folder as <link>_<name>; the local file. progress, when
-    given, follows the steps: step "backup", then "download" with its bytes."""
+                       src: LinkSource, backup: str, folder: Path, progress: dict | None = None,
+                       options: dict | None = None) -> Path:
+    """A new backup of src there (backup empty), with the choices of options,
+    or its backup named backup, downloaded into folder as <link>_<name>; the
+    local file. progress, when given, follows the steps: step "backup", then
+    "download" with its bytes."""
     progress = {} if progress is None else progress
     progress["step"] = "backup"
-    name = backup or await _remote_backup(job, client, link, headers, src)
+    name = backup or await _remote_backup(job, client, link, headers, src, options or {})
     if not BACKUP_NAME.fullmatch(name):
         raise JobFailed(f"{name!r} is not the name of a backup zip")
     folder.mkdir(parents=True, exist_ok=True)

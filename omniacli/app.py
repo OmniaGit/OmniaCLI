@@ -556,6 +556,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             {
                 "from_link": from_link,
                 "restore_fields": [_field_dict(f) for f in plugin.restore_fields()] if plugin else [],
+                "backup_fields": [_field_dict(f) for f in plugin.backup_fields()] if plugin else [],
                 "server": srv,
                 "view": view if view in srv.instances else "both",
                 "instances": shown,
@@ -724,9 +725,15 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         user: Principal = Depends(developer),
     ):
         instance = get_instance(server, role)
+        raw, _ = await posted_params(request)
+        try:
+            options = {f.key: _field_value(f, raw.get(f.key)) for f in instance.plugin.backup_fields()}
+        except ActionRefused as exc:
+            return refuse(str(exc))
+        chosen = [f.label for f in instance.plugin.backup_fields() if f.kind == "checkbox" and options[f.key]]
 
         async def action(job):
-            dest = await ops.backup(job, instance, settings.backup_dir)
+            dest = await ops.backup(job, instance, settings.backup_dir, options)
             job.result = {
                 "file": dest.name,
                 "size": dest.stat().st_size,
@@ -734,7 +741,8 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             }
 
         job = jobs.submit(
-            f"Backup {instance.key}" + (" + download" if download else ""),
+            f"Backup {instance.key}" + (" + download" if download else "")
+            + (f" ({', '.join(chosen).lower()})" if chosen else ""),
             [instance.key],
             f"manual: {user}",
             action,
@@ -805,8 +813,14 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
                 return refuse(f"Type {expected} to replace the production database")
         try:
             options = {f.key: _field_value(f, raw.get(f.key)) for f in instance.plugin.restore_fields()}
+            # the choices of a new backup there, asked as this instance's
+            # plugin asks them (an OmniaCLI there without them backs up as usual)
+            backup_options = {} if backup else {
+                f.key: _field_value(f, raw.get(f.key)) for f in instance.plugin.backup_fields()}
         except ActionRefused as exc:
             return refuse(str(exc))
+        chosen = [f.label.lower() for f in instance.plugin.backup_fields()
+                  if f.kind == "checkbox" and backup_options.get(f.key)]
         headers = link_headers(link, user.name, user.role)
 
         async def action(job):
@@ -819,11 +833,12 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
                 "step": "backup", "done": 0, "total": 0,
             }
             dest = await linkcopy.fetch_backup(job, link_clients.client(link), link, headers, src,
-                                               backup, backup_folder(instance), progress)
+                                               backup, backup_folder(instance), progress, backup_options)
             progress["step"] = "restore"
             await instance.plugin.restore(job, instance, dest, options)
 
-        job = jobs.submit(f"Copy from {src.label} to {instance.key} ({backup or 'new backup'})",
+        what = backup or "new backup" + (f" {', '.join(chosen)}" if chosen else "")
+        job = jobs.submit(f"Copy from {src.label} to {instance.key} ({what})",
                           [instance.key], f"manual: {user}", action)
         return {"job": job.id}
 

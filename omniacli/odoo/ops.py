@@ -232,25 +232,31 @@ async def install_cli(job: Job, venv_bin: Path, run_as: str | None = None) -> No
     await pip_install(job, venv_bin, [CLI_PACKAGE], run_as)
 
 
-async def backup(job: Job, instance: Instance, dest_dir: Path) -> Path:
-    """click-odoo-backupdb of the database and filestore into a zip of dest_dir."""
+# the name of a backup made without the filestore ends so
+NO_FILESTORE = "_nofilestore"
+
+
+async def backup(job: Job, instance: Instance, dest_dir: Path, filestore: bool = True) -> Path:
+    """click-odoo-backupdb of the database, and of its filestore unless
+    filestore is false, into a zip of dest_dir."""
     opts = instance.options
     stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    dest = dest_dir / f"{opts.database}_{stamp}.zip"
-    job.log(f"--- backup database {opts.database} to {dest}")
+    dest = dest_dir / f"{opts.database}_{stamp}{'' if filestore else NO_FILESTORE}.zip"
+    job.log(f"--- backup database {opts.database}" + ("" if filestore else " without its filestore")
+            + f" to {dest}")
     env = odoo_env(instance)
+    cmd = [opts.venv_bin / "click-odoo-backupdb", "-c", opts.odoo_config]
+    if not filestore:
+        cmd.append("--no-filestore")
     if instance.run_as is None:
-        await run(job, [opts.venv_bin / "click-odoo-backupdb", "-c", opts.odoo_config,
-                        opts.database, dest], env=env)
+        await run(job, [*cmd, opts.database, dest], env=env)
         return dest
     # run_as may create the file here (write and search) but not list the folder
     staging = Path(tempfile.mkdtemp(prefix="omniacli-backup-", dir=BACKUP_STAGING))
     try:
         staging.chmod(0o733)
         staged = staging / dest.name
-        await run(job, as_user(instance.run_as, [
-            opts.venv_bin / "click-odoo-backupdb", "-c", opts.odoo_config,
-            opts.database, staged], env), env=env)
+        await run(job, as_user(instance.run_as, [*cmd, opts.database, staged], env), env=env)
         shutil.move(staged, dest)
     finally:
         shutil.rmtree(staging, ignore_errors=True)

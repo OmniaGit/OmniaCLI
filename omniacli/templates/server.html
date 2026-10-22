@@ -91,10 +91,13 @@
       {% if (can_act and inst.plugin.has_backup) or buttons[inst.key].backup or from_link[inst.key] %}
       <div class="action-group">
       {% if can_act and inst.plugin.has_backup %}
-      <form method="post" action="{{ base }}/backup">
-        <button {{ off }}>{{ icon("backup") }}Backup</button></form>
-      <form method="post" action="{{ base }}/backup?download=1">
-        <button {{ off }} title="Back up, then download the zip">{{ icon("download") }}Backup + download</button></form>
+      <form method="post" action="{{ base }}/backup" style="display: contents">
+        <button {{ off }}>{{ icon("backup") }}Backup</button>
+        <button {{ off }} formaction="{{ base }}/backup?download=1" title="Back up, then download the zip">{{ icon("download") }}Backup + download</button>
+        {% for f in backup_fields %}
+        <label class="muted" title="{{ f.help }}">{% if f.kind == "checkbox" %}<input type="checkbox" name="{{ f.key }}" {{ off }} {{ "checked" if f.default }}> {{ f.label }}{% else %}{{ f.label }} <input type="text" name="{{ f.key }}" value="{{ f.default or '' }}" {{ off }}>{% endif %}</label>
+        {% endfor %}
+      </form>
       {% endif %}
       {% if from_link[inst.key] %}
       <button type="button" {{ off }} data-from-link='{{ from_link[inst.key] | tojson }}' data-key="{{ inst.key }}"

@@ -103,6 +103,20 @@ async def test_a_new_backup_there_restored_here(here, env):
                for j in there)
 
 
+async def test_a_new_backup_there_without_filestore(here, env):
+    page = (await here.get("/servers/srv?view=both", headers=as_user("admin"))).text
+    assert 'data-backup-option="no_filestore"' in page
+    resp = await here.post(URL, headers=as_user("dev", post=True), json={"neutralize": True, "no_filestore": True})
+    job = await wait(here, resp.json()["job"])
+    assert job["status"] == "success", job
+    assert job["title"].endswith("(new backup without filestore)")
+    done = calls(env)
+    # asked there, as its Backup form asks it
+    assert " --no-filestore DB_production " in done[0]
+    [zip_path] = list((here.settings.backup_dir / "srv" / "test").iterdir())
+    assert zip_path.name.startswith("cliente_DB_production_") and zip_path.name.endswith("_nofilestore.zip")
+
+
 async def test_a_backup_already_there_and_its_version(here, env):
     a_backup(env, "DB_production_20261020_100000.zip", 18)
     odoo_version(env, "test", 18)

@@ -450,13 +450,14 @@ async def restart_process(job: Job, instance: Instance) -> None:
     await start_process(job, instance)
 
 
-async def backup(job: Job, instance: Instance, backup_dir: Path) -> Path:
-    """The plugin's backup, into <backup_dir>/<server>/<role>."""
+async def backup(job: Job, instance: Instance, backup_dir: Path, options: dict | None = None) -> Path:
+    """The plugin's backup, into <backup_dir>/<server>/<role>; options: the
+    values of its backup_fields (none: its defaults)."""
     if not instance.plugin.has_backup:
         raise JobFailed(f"{_label(instance)} has no backup")
     dest_dir = backup_dir / instance.server / instance.role
     dest_dir.mkdir(parents=True, exist_ok=True)
-    return await instance.plugin.backup(job, instance, dest_dir)
+    return await instance.plugin.backup(job, instance, dest_dir, options)
 
 
 async def pull_restart(job: Job, instance: Instance, only_if_changed: bool = False) -> None:

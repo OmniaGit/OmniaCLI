@@ -8,6 +8,8 @@
       backup of production, neutralized (Odoo 16 and later: no scheduled actions, no outgoing mail); then the
       changed modules are updated and test is started.</p>
     <label><input type="radio" name="backup" value="" checked> A new backup of production, now</label>
+    <label style="display: block; margin-left: 22px" title="Database only, no attachments: test gets no filestore">
+      <input type="checkbox" id="copy-no-filestore"> without filestore (test without attachments)</label>
     <div id="copy-backups" class="scroll" style="max-height: 40vh; margin: 6px 0"><span class="muted">Loading the backups…</span></div>
     <p id="copy-error" class="error"></p>
     <div class="actions">
@@ -21,7 +23,12 @@
   const dialog = document.getElementById("copy-dialog");
   const list = document.getElementById("copy-backups");
   const errorBox = document.getElementById("copy-error");
+  const noFilestore = document.getElementById("copy-no-filestore");
   let target = null;
+  // the choice applies to a new backup only
+  dialog.addEventListener("change", (ev) => {
+    if (ev.target.name === "backup") noFilestore.disabled = ev.target.value !== "";
+  });
   const sizeText = (b) => b >= 1073741824 ? (b / 1073741824).toFixed(2) + " GiB"
     : b >= 1048576 ? (b / 1048576).toFixed(1) + " MiB" : Math.max(1, Math.round(b / 1024)) + " KiB";
 
@@ -54,6 +61,7 @@
       target = {server: button.dataset.key, url: button.dataset.url};
       document.getElementById("copy-title").textContent = `Copy production to test ${target.server}`;
       dialog.querySelector('input[name=backup][value=""]').checked = true;
+      noFilestore.checked = false; noFilestore.disabled = false;
       errorBox.textContent = "";
       dialog.showModal(); load();
     };
@@ -61,10 +69,11 @@
   document.getElementById("copy-form").addEventListener("submit", async (ev) => {
     ev.preventDefault();
     const backup = dialog.querySelector("input[name=backup]:checked").value;
-    const what = backup ? `the backup ${backup}` : "a new backup of production";
+    const no_filestore = !backup && noFilestore.checked;
+    const what = backup ? `the backup ${backup}` : "a new backup of production" + (no_filestore ? " without filestore" : "");
     if (!confirm(`Drop the test database of ${target.server} and load ${what} into it?`)) return;
     const resp = await fetch(target.url, {
-      method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({backup}),
+      method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({backup, no_filestore}),
     });
     const data = await resp.json().catch(() => ({}));
     if (resp.ok) { location.href = "{{ prefix }}/jobs/" + data.job; return; }

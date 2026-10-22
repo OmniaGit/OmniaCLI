@@ -104,12 +104,12 @@ stopped with *Stop job*.
 | Update modules | ✓ | ✓ | a popup asks: the changed modules (`click-odoo-update`) or chosen ones (`odoo-bin -u … --stop-after-init --workers=0`), and whether to restart after. The last 5 choices of modules of each instance are offered again; they are kept in the browser (`localStorage`), so each browser has its own |
 | Restart | ✓ | ✓ | the instance's systemd or init.d restart, or OmniaCLI's own start of `odoo-bin` (see below) |
 | Start, Stop | ✓ | ✓ | `systemctl start`/`stop` of a systemd service (each needs its sudoers line, the **Start/Stop permission** check prints them), or OmniaCLI's own Odoo; a stopped Odoo stays stopped for the auto update |
-| Backup | ✓ | ✓ | `click-odoo-backupdb` → `<backup_dir>/<server>/<role>/<db>_<timestamp>.zip` |
+| Backup | ✓ | ✓ | `click-odoo-backupdb` → `<backup_dir>/<server>/<role>/<db>_<timestamp>.zip`, database and filestore; with **Without filestore** checked, the database only (`--no-filestore`), `<db>_<timestamp>_nofilestore.zip`. The backup before a merge always has the filestore |
 | pip requirements | ✓ | ✓ | `<venv_bin>/python -m pip install -r` the `requirements.txt` next to `odoo-bin` and that of every repository having one, in one call |
 | pip click-odoo | ✓ | ✓ | `<venv_bin>/python -m pip install click-odoo-contrib`, the scripts OmniaCLI runs in the venv |
 | Merge test to production | | ✓ | backup production, merge, push, update modules, restart production |
-| Copy production to test | ✓ → | ✓ | a popup asks which backup of production: a new one or one already made; then stop test, `click-odoo-restoredb --copy --force --neutralize` into the test database (drops it and its filestore first; `--neutralize` from Odoo 16: no scheduled actions, no outgoing mail), `click-odoo-update`, start test. Refused when production and test run different Odoo versions, and on Odoo 20+ (click-odoo-restoredb refuses it). A systemd test needs its Start/Stop sudoers lines; an init.d one is not stopped, it is restarted at the end |
-| Copy from link | ✓ (admin) | ✓ | for an instance with a **Database from link**: a popup asks which backup of that instance of the linked OmniaCLI: a new one, made there now, or one already there; whether to neutralize; and for a production its database name, typed. The zip is downloaded into this instance's backups as `<link>_<file>` (through `<file>.part`: a cut download leaves nothing), then restored as above: stop, `click-odoo-restoredb --copy --force [--neutralize]`, `click-odoo-update`, start. Refused, before anything is touched, when the backup's `manifest.json` names another Odoo version than the instance's |
+| Copy production to test | ✓ → | ✓ | a popup asks which backup of production: a new one (with or without the filestore: without, test has no attachments) or one already made; then stop test, `click-odoo-restoredb --copy --force --neutralize` into the test database (drops it and its filestore first; `--neutralize` from Odoo 16: no scheduled actions, no outgoing mail), `click-odoo-update`, start test. Refused when production and test run different Odoo versions, and on Odoo 20+ (click-odoo-restoredb refuses it). A systemd test needs its Start/Stop sudoers lines; an init.d one is not stopped, it is restarted at the end |
+| Copy from link | ✓ (admin) | ✓ | for an instance with a **Database from link**: a popup asks which backup of that instance of the linked OmniaCLI: a new one, made there now (with or without the filestore; an OmniaCLI there older than 2026.1.12 makes it with the filestore), or one already there; whether to neutralize; and for a production its database name, typed. The zip is downloaded into this instance's backups as `<link>_<file>` (through `<file>.part`: a cut download leaves nothing), then restored as above: stop, `click-odoo-restoredb --copy --force [--neutralize]`, `click-odoo-update`, start. Refused, before anything is touched, when the backup's `manifest.json` names another Odoo version than the instance's |
 | Log | ✓ | ✓ | `tail -F` of the Odoo log in the browser, with an "errors only" filter |
 
 The two pip buttons are also next to the **Venv bin** field of the server
@@ -625,8 +625,8 @@ provides: OmniaCLI installed by hand on Python 3.9 runs without it.
 | `read_log` | the last lines of an instance's log, optionally only ERROR/CRITICAL with their tracebacks |
 | `list_jobs`, `get_job` | the jobs, filtered by server and text, and a job's log |
 | `update_test` | **the only action on Odoo**: git pull + update of the changed modules + restart of the **test** instance |
-| `backup_test` | a backup (database and filestore) of the **test** instance |
-| `backup` | (admin token) a backup of any instance, **production** too |
+| `backup_test` | a backup (database and filestore) of the **test** instance; `options: {"no_filestore": true}` for the database only |
+| `backup` | (admin token) a backup of any instance, **production** too; the same `options` |
 | `list_backups` | (admin token) an instance's backups, each with its download path |
 | `read_server` | (admin token) a server's whole configuration, active or draft |
 | `add_draft_server` | (admin token) a new server, always a **draft**: it goes live only with Test & activate on the web |
@@ -740,6 +740,9 @@ A plugin may also give:
   (`static_dir`, at `/x/<plugin>/static/`);
 - **`dev_setup()`** and **`mcp_help`**: its part of the MCP tool `dev_setup`
   and of the MCP instructions;
+- **`backup_fields()`**: the choices of a backup (Odoo: without filestore),
+  given to **`backup()`** as options; a checkbox not posted is off, and off
+  is the backup made without any choice;
 - **`restore()`** and **`restore_fields()`**: load a backup zip into an
   instance, with the choices asked first (Odoo: neutralize). The core's
   *Copy from link* is offered only for a type that has it.
