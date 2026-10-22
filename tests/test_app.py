@@ -10,6 +10,7 @@ import httpx
 import pytest
 
 from omniacli.app import create_app
+from omniacli.odoo import ops as odoo_ops
 from omniacli.logtail import read_since
 
 from .conftest import BasicAsSession, LINK_TOKEN, LINK_VIEW_TOKEN, PASSWORD, TOKEN, clone, commit, sh
@@ -274,26 +275,24 @@ def make_addons(env):
         (base / name).mkdir(parents=True, exist_ok=True)
         if name != "not_a_module":
             (base / name / "__manifest__.py").write_text("{}")
-    test.odoo_config.write_text(
+    test.options.odoo_config.write_text(
         f"[options]\naddons_path = {odoo_repo / 'addons'},\n    {tmp / 'extra'}\n"
     )
-    (test.venv_bin / "python").symlink_to(sys.executable)
+    (test.options.venv_bin / "python").symlink_to(sys.executable)
     return test
 
 
 async def test_list_addons(env):
-    from omniacli import ops
-
     test = make_addons(env)
-    addons = ops.list_addons(test)
+    addons = odoo_ops.list_addons(test)
     assert [(a["name"], a["in_repository"]) for a in addons] == [("in_repo", True), ("outside", False)]
-    assert ops.odoo_major(ops.find_odoo_bin(test)) == 18
+    assert odoo_ops.odoo_major(odoo_ops.find_odoo_bin(test)) == 18
 
 
 async def test_update_popup_actions(client, env):
     make_addons(env)
     test = env["settings"].instance("srv", "test")
-    test.update_modules = False  # the explicit update runs anyway
+    test.options.update_modules = False  # the explicit update runs anyway
     data = (await client.get("/api/servers/srv/test/addons", headers={"Authorization": AUTH})).json()
     assert [a["name"] for a in data["addons"]] == ["in_repo", "outside"]
     assert data["odoo_bin"].endswith("odoo-bin")
@@ -542,7 +541,7 @@ async def test_session_ends(client, env, monkeypatch):
 
 
 def test_http_port(tmp_path):
-    from omniacli.odooconf import http_port
+    from omniacli.odoo.odooconf import http_port
 
     conf = tmp_path / "o.conf"
     conf.write_text("[options]\nhttp_port = 8123\n")
@@ -556,7 +555,7 @@ def test_http_port(tmp_path):
 
 async def test_dashboard_state_buttons_and_odoo_link(client, env):
     test = env["settings"].instance("srv", "test")
-    test.odoo_config.write_text("[options]\nhttp_port = 8123\n")
+    test.options.odoo_config.write_text("[options]\nhttp_port = 8123\n")
     page = (await client.get("/", headers={"Authorization": AUTH})).text
     # systemd units the test machine does not have: state unknown, every button
     assert 'class="run-state unknown"' in page
@@ -721,7 +720,7 @@ async def test_incomplete_draft(client, env):
     resp = await client.post("/api/servers/save", headers=POST,
                              json={"original": "V20", "name": "V20", "server": draft})
     srv = settings.servers["V20"]
-    assert resp.status_code == 200 and srv.error is None and srv.production.database == "DB"
+    assert resp.status_code == 200 and srv.error is None and srv.production.options.database == "DB"
 
 
 async def test_stop_button(client, env):
@@ -786,7 +785,8 @@ async def test_servers_filter(client, env):
     settings = client.app.state.settings
     srv = settings.servers["srv"]
     settings.servers["other"] = dataclasses.replace(srv, name="other", instances={
-        role: dataclasses.replace(inst, server="other", database=f"OTHER_{role}")
+        role: dataclasses.replace(inst, server="other",
+                                  options=dataclasses.replace(inst.options, database=f"OTHER_{role}"))
         for role, inst in srv.instances.items()
     })
 
@@ -1059,7 +1059,7 @@ async def test_pip_buttons(client, env):
     settings = client.app.state.settings
     inst = settings.instance("srv", "test")
     calls = env["tmp"] / "pip.log"
-    python = inst.venv_bin / "python"
+    python = inst.options.venv_bin / "python"
     python.write_text(f'#!/bin/sh\necho "python $*" >> {calls}\n')
     python.chmod(0o755)
     headers = {"Authorization": basic("dev"), "Origin": f"http://{HOST}"}

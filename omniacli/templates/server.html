@@ -79,7 +79,7 @@
             onsubmit="return confirm('Pull, update changed modules and restart {{ inst.key }}?')">
         <button {{ off }}>{{ icon("github") }}Git pull + restart</button></form>
       <button type="button" class="open-update" data-server="{{ server.name }}" data-role="{{ inst.role }}"
-              data-database="{{ inst.database }}" {{ off }}>{{ icon("github") }}Update modules</button>
+              data-database="{{ inst.options.database }}" {{ off }}>{{ icon("github") }}Update modules</button>
       </div>
       <div class="action-group">
       <form method="post" action="{{ base }}/backup">
@@ -89,10 +89,10 @@
       </div>
       <div class="action-group">
       <form method="post" action="{{ base }}/pip-requirements"
-            onsubmit="return confirm('pip install, in {{ inst.venv_bin }}{% if inst.run_as %} as {{ inst.run_as }}{% endif %}, the requirements.txt of Odoo and of every repository of {{ inst.key }}?')">
+            onsubmit="return confirm('pip install, in {{ inst.options.venv_bin }}{% if inst.run_as %} as {{ inst.run_as }}{% endif %}, the requirements.txt of Odoo and of every repository of {{ inst.key }}?')">
         <button {{ off }} title="pip install the requirements.txt of Odoo and of the repositories in the venv">{{ icon("python") }}pip requirements</button></form>
       <form method="post" action="{{ base }}/pip-cli"
-            onsubmit="return confirm('pip install click-odoo-contrib in {{ inst.venv_bin }}{% if inst.run_as %} as {{ inst.run_as }}{% endif %}?')">
+            onsubmit="return confirm('pip install click-odoo-contrib in {{ inst.options.venv_bin }}{% if inst.run_as %} as {{ inst.run_as }}{% endif %}?')">
         <button {{ off }} title="pip install click-odoo-contrib, the scripts OmniaCLI runs in the venv">{{ icon("python") }}pip click-odoo</button></form>
       </div>
       {% endif %}
@@ -123,12 +123,12 @@
     <details style="margin-top: 12px">
       <summary>Settings and repositories</summary>
       <dl>
-        <dt>Database</dt><dd class="mono">{{ inst.database }}</dd>
-        <dt>Odoo config</dt><dd class="mono">{{ inst.odoo_config }}</dd>
+        <dt>Database</dt><dd class="mono">{{ inst.options.database }}</dd>
+        <dt>Odoo config</dt><dd class="mono">{{ inst.options.odoo_config }}</dd>
         <dt>Log file</dt><dd class="mono">{{ inst.log_file }}</dd>
         {% if inst.restart.type == "process" %}
         <dt>Odoo</dt><dd>started by OmniaCLI: {% if running.get(inst.key) %}running, pid <span class="mono">{{ running[inst.key] }}</span>{% else %}<span class="muted">stopped</span>{% endif %}</dd>
-        <dt>HTTP port</dt><dd class="mono">{{ inst.http_port or "of the Odoo config" }}</dd>
+        <dt>HTTP port</dt><dd class="mono">{{ inst.options.http_port or "of the Odoo config" }}</dd>
         {% else %}
         <dt>Service</dt><dd class="mono">{{ inst.restart.type }}: {{ inst.restart.service }}</dd>
         {% endif %}

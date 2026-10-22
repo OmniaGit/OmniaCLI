@@ -509,6 +509,31 @@ pytest
 The tests use real git repositories in a temporary folder, and fake
 `click-odoo-*` scripts and restart commands.
 
+### Plugins
+
+A type of server (Odoo, and later others) is a plugin: a subclass of
+`omniacli.plugin_api.ServicePlugin`, declared by its package as an entry point
+of the group `omniacli.plugins`:
+
+```toml
+[project.entry-points."omniacli.plugins"]
+odoo = "omniacli_odoo:OdooPlugin"
+```
+
+`omniacli/plugin_api.py` is the contract and the only module a plugin
+imports. The core does what every type shares (the git repositories, the
+service, the jobs, the auto update, users and links); the plugin reads its own
+settings of an instance, checks it for Test & activate, does what follows a
+pull, the backup and the command of a process OmniaCLI starts. A server names
+its type in the servers file (`type: odoo`; none is `odoo`). At start every
+plugin is checked against the contract (plugin API version, the methods it
+must have, its name, its own `self_test`): one that fails is disabled, and
+the **Plugins** page (admins) says why. The servers of a type without its
+plugin are kept as written, without actions, until it is back.
+
+The Odoo plugin is built in for now (`omniacli/odoo`, which imports only
+`plugin_api`).
+
 ## Acknowledgements
 
 OmniaCLI's work on the Odoo instances rests on

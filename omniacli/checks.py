@@ -10,50 +10,18 @@ operated by OmniaCLI.
 from __future__ import annotations
 
 import asyncio
-import configparser
 import os
 import shutil
 import tempfile
-from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from . import ops
 from .config import Instance, Server
+from .plugin_api import ERROR, WARNING, Check, system_user
 
-ERROR, WARNING = "error", "warning"
 GIT_TIMEOUT = 30
-PYTHON_TIMEOUT = 60
 
-# Connects to the instance's database with the settings of its Odoo config,
-# run by the instance's own python (which has psycopg2, an Odoo requirement).
-_DB_PROBE = r"""
-import configparser, sys
-conf, dbname = sys.argv[1], sys.argv[2]
-parser = configparser.ConfigParser(interpolation=None)
-parser.read(conf)
-opt = lambda key: (parser.get("options", key, fallback="") or "").strip()
-value = lambda key: None if opt(key) in ("", "False", "None") else opt(key)
-import psycopg2
-cn = psycopg2.connect(dbname=dbname, host=value("db_host"), port=value("db_port"),
-                      user=value("db_user"), password=value("db_password"),
-                      connect_timeout=10)
-cr = cn.cursor()
-cr.execute("SELECT latest_version FROM ir_module_module WHERE name = 'base'")
-row = cr.fetchone()
-print("base module %s" % (row[0] if row else "missing"))
-"""
-
-
-@dataclass
-class Check:
-    target: str
-    name: str
-    ok: bool
-    detail: str
-    level: str = ERROR
-
-    def to_dict(self) -> dict:
-        return asdict(self)
+__all__ = ["ERROR", "WARNING", "Check", "passed", "check_server"]
 
 
 def passed(checks: list[Check]) -> bool:
@@ -62,26 +30,20 @@ def passed(checks: list[Check]) -> bool:
 
 
 async def _instance_checks(instance: Instance) -> list[Check]:
+    """The plugin's checks of the instance, then the core's: the log, the
+    repositories, the service and the right to restart it."""
     target = instance.role
-    checks: list[Check] = []
+    try:
+        checks: list[Check] = list(await instance.plugin.checks(instance))
+    except Exception as exc:  # noqa: BLE001 - a plugin's bug is a failed check, not a crash
+        checks = [Check(target, f"{instance.plugin.label} checks", False,
+                        f"the plugin {instance.type} failed: {type(exc).__name__}: {exc}")]
 
     def add(name, ok, detail, level=ERROR):
         checks.append(Check(target, name, ok, detail, level))
 
-    # Odoo config and addons path
-    parser = configparser.ConfigParser(interpolation=None)
-    try:
-        with open(instance.odoo_config, encoding="utf-8") as fh:
-            parser.read_file(fh)
-        add("Odoo config", True, f"{instance.odoo_config} readable")
-    except (OSError, configparser.Error, UnicodeDecodeError) as exc:
-        add("Odoo config", False, f"{instance.odoo_config}: {exc}")
-    raw = parser.get("options", "addons_path", fallback="") if parser.has_section("options") else ""
-    missing = [p.strip() for p in raw.replace("\n", ",").split(",") if p.strip() and not Path(p.strip()).is_dir()]
-    if raw:
-        add("Addons path", not missing,
-            "every folder exists" if not missing else f"missing: {', '.join(missing)}", WARNING)
-
+    label = instance.plugin.label
+    config = instance.plugin.process_config(instance)
     # log file
     process = instance.restart.type == "process"
     if process:
@@ -90,7 +52,7 @@ async def _instance_checks(instance: Instance) -> list[Check]:
             folder.mkdir(parents=True, exist_ok=True)
             with tempfile.NamedTemporaryFile(dir=folder):
                 pass
-            add("Log folder", True, f"{folder} writable: Odoo's output goes to {instance.log_file}")
+            add("Log folder", True, f"{folder} writable: {label}'s output goes to {instance.log_file}")
         except OSError as exc:
             add("Log folder", False, f"{folder}: {exc}")
     else:
@@ -98,45 +60,6 @@ async def _instance_checks(instance: Instance) -> list[Check]:
         add("Log file", readable,
             f"{instance.log_file} readable" if readable
             else f"{instance.log_file} is not readable: the log page cannot show it", WARNING)
-
-    # click-odoo scripts and the instance's python
-    for script in ("click-odoo-update", "click-odoo-backupdb"):
-        path = instance.venv_bin / script
-        ok = os.access(path, os.X_OK)
-        add(script, ok, str(path) if ok else
-            f"{path} not found: pip install click-odoo-contrib in that venv")
-    if instance.run_as is not None:
-        checks.extend(await _run_as_checks(instance))
-    env = ops.odoo_env(instance)
-    code, out = await ops.capture(
-        ops.as_user(instance.run_as, [instance.venv_bin / "python", "-c",
-                                      "import click_odoo, odoo; print('Odoo', odoo.release.version)"], env),
-        timeout=PYTHON_TIMEOUT,
-        env=env,
-    )
-    add("Odoo importable by click-odoo", code == 0,
-        out.splitlines()[-1] if out else f"exit code {code}")
-
-    # database
-    code, out = await ops.capture(
-        ops.as_user(instance.run_as,
-                    [instance.venv_bin / "python", "-c", _DB_PROBE, instance.odoo_config, instance.database]),
-        timeout=PYTHON_TIMEOUT,
-    )
-    add("Database", code == 0,
-        f"{instance.database}: {out.splitlines()[-1] if out else ''}" if code == 0
-        else f"{instance.database}: {out.splitlines()[-1] if out else f'exit code {code}'}")
-
-    # odoo-bin, only needed to update chosen modules
-    odoo_bin = ops.find_odoo_bin(instance)
-    if odoo_bin is not None and odoo_bin.is_file():
-        major = ops.odoo_major(odoo_bin)
-        add("odoo-bin", True, f"{odoo_bin}" + (f" (Odoo {major})" if major else ""), WARNING)
-    elif process:
-        add("odoo-bin", False, "not found: OmniaCLI cannot start Odoo; set odoo_bin")
-    else:
-        add("odoo-bin", False,
-            "not found: the update of chosen modules will not work; set odoo_bin", WARNING)
 
     # repositories
     for repo in instance.repositories:
@@ -178,13 +101,13 @@ async def _instance_checks(instance: Instance) -> list[Check]:
         own = ops.managed_pid(instance)
         others = ops.foreign_pids(instance, own)
         if others:
-            add("Odoo process", False,
-                f"running with {instance.odoo_config} but not started by OmniaCLI "
+            add(f"{label} process", False,
+                f"running with {config} but not started by OmniaCLI "
                 f"(pid {', '.join(map(str, others))}): Restart refuses to start a second one")
         elif own is not None:
-            add("Odoo process", True, f"started by OmniaCLI, pid {own}")
+            add(f"{label} process", True, f"started by OmniaCLI, pid {own}")
         else:
-            add("Odoo process", False, "not running: Restart starts it", WARNING)
+            add(f"{label} process", False, "not running: Restart starts it", WARNING)
         return checks
     if restart.type == "systemd":
         code, state = await ops.capture(
@@ -204,7 +127,7 @@ async def _instance_checks(instance: Instance) -> list[Check]:
         add("Restart permission", code == 0,
             "sudo allows it without a password" if code == 0 else
             "sudo refuses it or asks a password; add to /etc/sudoers.d/omniacli: "
-            f"{_user()} ALL=(root) NOPASSWD: {' '.join([executable, *command[3:]])}")
+            f"{system_user()} ALL=(root) NOPASSWD: {' '.join([executable, *command[3:]])}")
         if restart.type == "systemd":
             # Start and Stop buttons: not needed to deploy, so a warning
             missing = []
@@ -212,7 +135,7 @@ async def _instance_checks(instance: Instance) -> list[Check]:
                 other = restart.command(action)
                 code, _ = await ops.capture(["sudo", "-n", "-l", *other[2:]])
                 if code:
-                    missing.append(f"{_user()} ALL=(root) NOPASSWD: {' '.join([executable, *other[3:]])}")
+                    missing.append(f"{system_user()} ALL=(root) NOPASSWD: {' '.join([executable, *other[3:]])}")
             add("Start/Stop permission", not missing,
                 "sudo allows them without a password" if not missing else
                 "Start and Stop will fail; add to /etc/sudoers.d/omniacli: " + " and ".join(missing),
@@ -224,34 +147,9 @@ async def _instance_checks(instance: Instance) -> list[Check]:
     return checks
 
 
-async def _run_as_checks(instance: Instance) -> list[Check]:
-    """The user exists, and sudo lets this one run the venv's programs as it,
-    setting PYTHONPATH (SETENV), without a password."""
-    import pwd
-
-    try:
-        pwd.getpwnam(instance.run_as)
-    except KeyError:
-        return [Check(instance.role, "Run as", False, f"no system user {instance.run_as}")]
-    python = instance.venv_bin / "python"
-    code, _ = await ops.capture(["sudo", "-n", "-l", "-u", instance.run_as, python])
-    line = f"{_user()} ALL=({instance.run_as}) NOPASSWD:SETENV: {instance.venv_bin}/"
-    return [Check(instance.role, "Run as", code == 0,
-                  f"sudo runs the venv's programs as {instance.run_as}" if code == 0 else
-                  f"sudo refuses to run {python} as {instance.run_as} or asks a password; "
-                  f"add to /etc/sudoers.d/omniacli: {line}")]
-
-
-def _user() -> str:
-    try:
-        import pwd
-
-        return pwd.getpwuid(os.getuid()).pw_name
-    except (ImportError, KeyError):
-        return os.environ.get("USER", "omniacli")
-
-
 async def check_server(server: Server, backup_dir: Path) -> list[Check]:
+    if server.missing_plugin:
+        return [Check("server", "Plugin", False, server.error or f"no plugin {server.type}")]
     if server.error:
         # a draft saved incomplete: nothing to check until it is completed
         return [Check("server", "Settings", False, f"incomplete: {server.error}")]
@@ -262,10 +160,7 @@ async def check_server(server: Server, backup_dir: Path) -> list[Check]:
         checks.append(Check("server", "Separate working copies", not shared,
                             "production and test use different folders" if not shared
                             else f"production and test share {', '.join(sorted(shared))}"))
-        same_db = prod.database == test.database
-        checks.append(Check("server", "Separate databases", not same_db,
-                            f"production {prod.database}, test {test.database}" if not same_db
-                            else f"production and test both use {prod.database}"))
+        checks.extend(prod.plugin.server_checks(prod, test))
     try:
         backup_dir.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(dir=backup_dir):

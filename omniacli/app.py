@@ -23,9 +23,12 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from fastapi.templating import Jinja2Templates
 from starlette.background import BackgroundTask
 
-from . import checks, disks, ops
+from . import checks, disks, ops, plugins
 from .accesslog import AccessLog
-from .odooconf import http_port, read_odoo_config
+# Odoo's own routes below (modules, pip, its config file) call the Odoo plugin
+# directly: the other routes reach any type through instance.plugin
+from .odoo import ops as odoo_ops
+from .odoo.odooconf import read_odoo_config
 from .auth import ROLES as ACCESS_ROLES
 from .auth import Authenticator, Principal, hash_password, hash_token, new_token, verify_password
 from .config import (
@@ -52,6 +55,7 @@ from .config import (
     server_to_dict,
 )
 from .jobs import JobManager, filter_jobs
+from .plugin_api import ENTRY_POINT_GROUP, PLUGIN_API
 from .links import LIST_TIMEOUT, LinkClients, describe_error, link_headers
 from .logtail import read_since
 from .metrics import Sampler
@@ -322,6 +326,13 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             raise HTTPException(status.HTTP_404_NOT_FOUND, f"No instance {server}/{role}")
         return instance
 
+    def odoo_instance(server: str, role: str) -> Instance:
+        """An instance of an Odoo server, for Odoo's own routes."""
+        instance = get_instance(server, role)
+        if instance.type != "odoo":
+            raise HTTPException(status.HTTP_404_NOT_FOUND, f"{server} is not an Odoo server")
+        return instance
+
     def started(request: Request, job, query: str = "") -> RedirectResponse:
         return RedirectResponse(f"{prefix_of(request)}/jobs/{job.id}{query}", status.HTTP_303_SEE_OTHER)
 
@@ -411,7 +422,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
                 "busy": {r: jobs.is_busy(i.key) for r, i in srv.instances.items()},
                 "state": {r: states[i.key] for r, i in srv.instances.items()},
                 "restart": {r: i.restart.type for r, i in srv.instances.items()},
-                "web": {r: port for r, i in srv.instances.items() if (port := i.http_port or http_port(i.odoo_config))},
+                "web": {r: port for r, i in srv.instances.items() if (port := i.plugin.web_port(i))},
                 "text": server_text(srv),
             }
             for srv in live
@@ -501,15 +512,17 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         return [
             {
                 "name": srv.name,
+                "type": srv.type,
                 "instances": {
                     role: {
-                        "database": inst.database,
+                        # the plugin's fields (Odoo: database)
+                        **inst.plugin.describe(inst),
                         "service": inst.restart.service,
                         "repositories": [{"name": r.name, "branch": r.branch} for r in inst.repositories],
                         "busy": jobs.is_busy(inst.key),
                         "state": states[inst.key],
                         "restart": inst.restart.type,
-                        "port": inst.http_port or http_port(inst.odoo_config),
+                        "port": inst.plugin.web_port(inst),
                     }
                     for role, inst in srv.instances.items()
                 },
@@ -565,30 +578,30 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
     @app.post("/servers/{server}/{role}/pip-requirements")
     async def action_pip_requirements(request: Request, server: str, role: str,
                                       user: Principal = Depends(developer)):
-        instance = get_instance(server, role)
+        instance = odoo_instance(server, role)
         return started(
             request,
             jobs.submit(
                 f"pip install requirements {instance.key}",
                 [instance.key],
                 f"manual: {user}",
-                lambda job: ops.install_requirements(
-                    job, instance.venv_bin, instance.odoo_bin, [r.path for r in instance.repositories],
-                    instance.run_as),
+                lambda job: odoo_ops.install_requirements(
+                    job, instance.options.venv_bin, instance.options.odoo_bin,
+                    [r.path for r in instance.repositories], instance.run_as),
             )
         )
 
     @app.post("/servers/{server}/{role}/pip-cli")
     async def action_pip_cli(request: Request, server: str, role: str,
                              user: Principal = Depends(developer)):
-        instance = get_instance(server, role)
+        instance = odoo_instance(server, role)
         return started(
             request,
             jobs.submit(
-                f"pip install {ops.CLI_PACKAGE} {instance.key}",
+                f"pip install {odoo_ops.CLI_PACKAGE} {instance.key}",
                 [instance.key],
                 f"manual: {user}",
-                lambda job: ops.install_cli(job, instance.venv_bin, instance.run_as),
+                lambda job: odoo_ops.install_cli(job, instance.options.venv_bin, instance.run_as),
             )
         )
 
@@ -615,18 +628,18 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         key = f"{name if SERVER_NAME.fullmatch(name) else 'form'}/{role if role in ROLES else 'venv'}"
         if kind == "requirements":
             job = jobs.submit(f"pip install requirements {key}", [key], f"manual: {user}",
-                              lambda job: ops.install_requirements(job, venv_bin, odoo_bin, folders, run_as))
+                              lambda job: odoo_ops.install_requirements(job, venv_bin, odoo_bin, folders, run_as))
         else:
-            job = jobs.submit(f"pip install {ops.CLI_PACKAGE} {key}", [key], f"manual: {user}",
-                              lambda job: ops.install_cli(job, venv_bin, run_as))
+            job = jobs.submit(f"pip install {odoo_ops.CLI_PACKAGE} {key}", [key], f"manual: {user}",
+                              lambda job: odoo_ops.install_cli(job, venv_bin, run_as))
         return {"job": job.id}
 
     @app.get("/api/servers/{server}/{role}/addons")
     async def addons(server: str, role: str):
-        instance = get_instance(server, role)
-        odoo_bin = ops.find_odoo_bin(instance)
+        instance = odoo_instance(server, role)
+        odoo_bin = odoo_ops.find_odoo_bin(instance)
         return {
-            "addons": await asyncio.to_thread(ops.list_addons, instance),
+            "addons": await asyncio.to_thread(odoo_ops.list_addons, instance),
             "odoo_bin": str(odoo_bin) if odoo_bin else None,
         }
 
@@ -634,12 +647,12 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
     async def action_update(
         server: str, role: str, payload: dict = Body(...), user: Principal = Depends(developer)
     ):
-        instance = get_instance(server, role)
+        instance = odoo_instance(server, role)
         mode = payload.get("mode")
         modules = [str(m).strip() for m in payload.get("modules") or [] if str(m).strip()]
         restart_after = bool(payload.get("restart"))
         if mode == "chosen":
-            bad = [m for m in modules if not ops.ADDON_NAME.fullmatch(m)]
+            bad = [m for m in modules if not odoo_ops.ADDON_NAME.fullmatch(m)]
             if not modules or bad:
                 return JSONResponse(
                     {"error": f"Invalid modules: {', '.join(bad)}" if bad else "Choose at least one module"},
@@ -653,9 +666,9 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
 
         async def action(job):
             if mode == "chosen":
-                await ops.update_chosen_modules(job, instance, modules)
+                await odoo_ops.update_chosen_modules(job, instance, modules)
             else:
-                await ops.update_modules(job, instance, force=True)
+                await odoo_ops.update_modules(job, instance, force=True)
             if restart_after:
                 await ops.restart(job, instance)
 
@@ -682,7 +695,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         instance = get_instance(server, role)
         if instance.restart.type not in ("systemd", "process"):
             raise HTTPException(status.HTTP_400_BAD_REQUEST,
-                                "Start is for a systemd service or an Odoo OmniaCLI starts itself")
+                                f"Start is for a systemd service or an {instance.plugin.label} OmniaCLI starts itself")
         return await started_or_back(
             request,
             jobs.submit(
@@ -698,7 +711,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         instance = get_instance(server, role)
         if instance.restart.type not in ("systemd", "process"):
             raise HTTPException(status.HTTP_400_BAD_REQUEST,
-                                "Stop is for a systemd service or an Odoo OmniaCLI starts itself")
+                                f"Stop is for a systemd service or an {instance.plugin.label} OmniaCLI starts itself")
         return await started_or_back(
             request,
             jobs.submit(
@@ -870,6 +883,17 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             raise HTTPException(status.HTTP_404_NOT_FOUND, f"No server {name}")
         return srv
 
+    def editable(name: str):
+        """A server the form edits: the form is Odoo's, so an Odoo server
+        (one whose plugin is missing is left as written)."""
+        srv = configured(name)
+        if srv.missing_plugin:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"{name} cannot be edited: {srv.error}")
+        if srv.type != "odoo":
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"{name} is of type {srv.type}: "
+                                "the form edits Odoo servers only")
+        return srv
+
     @app.get("/config", dependencies=[Depends(admin)])
     async def config_page(request: Request):
         return _TEMPLATES.TemplateResponse(
@@ -888,12 +912,12 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
 
     @app.get("/config/{name}/edit", dependencies=[Depends(admin)])
     async def config_edit(request: Request, name: str):
-        srv = configured(name)
+        srv = editable(name)
         return server_form(request, f"Edit {name}", name, name, server_to_dict(srv))
 
     @app.get("/config/{name}/clone", dependencies=[Depends(admin)])
     async def config_clone(request: Request, name: str):
-        srv = configured(name)
+        srv = editable(name)
         new_name = f"{name}_copy"
         while new_name in settings.servers:
             new_name += "_copy"
@@ -1099,6 +1123,21 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         # seen through a link, the address the browser knows is the other instance's
         base = "https://<address of this OmniaCLI>" if prefix_of(request) else str(request.base_url).rstrip("/")
         return _TEMPLATES.TemplateResponse(request, "help.html", {"base_url": base})
+
+    @app.get("/plugins", dependencies=[Depends(admin)])
+    async def plugins_page(request: Request):
+        """The plugins found, those disabled with the reason, and the servers
+        whose plugin is missing."""
+        found = plugins.registry().found
+        count = {}
+        for srv in settings.servers.values():
+            count[srv.type] = count.get(srv.type, 0) + 1
+        missing = [srv for srv in settings.servers.values() if srv.missing_plugin]
+        return _TEMPLATES.TemplateResponse(
+            request, "plugins.html",
+            {"found": found, "count": count, "missing": missing, "api_version": PLUGIN_API,
+             "group": ENTRY_POINT_GROUP},
+        )
 
     @app.get("/access", dependencies=[Depends(admin)])
     async def access_page(request: Request, q: str = ""):

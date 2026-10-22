@@ -1,6 +1,6 @@
 # Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Sample the CPU and memory used by every instance's Odoo processes.
+"""Sample the CPU and memory used by every instance's processes.
 
 A systemd instance is measured on its unit's cgroup (cgroup v2): CPU from
 cpu.stat, which covers the main process and every worker, memory as the
@@ -8,7 +8,7 @@ resident size of the processes in cgroup.procs. memory.current is not used:
 it counts the kernel's file cache too (checked 2026-10-20 on postgresql:
 3544 MiB against 298 MiB resident). An init.d instance, or a systemd one whose
 cgroup cannot be read, is measured on the processes whose command line names
-its Odoo config file (-c / --config).
+its config file (-c / --config), the one its plugin gives (Odoo: the Odoo config).
 
 The machine as a whole is sampled too: its CPU from /proc/stat (percent of all
 cores, iowait counted as idle) and its network traffic from /proc/net/dev,
@@ -57,7 +57,7 @@ def _config_args(argv: list[str]) -> list[str]:
 
 
 def processes_by_config(proc: Path = Path("/proc")) -> dict[str, list[int]]:
-    """{real path of an Odoo config: pids started with -c that config}."""
+    """{real path of a config file: pids started with -c that config}."""
     found: dict[str, list[int]] = {}
     for entry in proc.iterdir():
         if not entry.name.isdigit():
@@ -189,10 +189,12 @@ class Sampler:
             if point is None:
                 if by_config is None:
                     by_config = await asyncio.to_thread(processes_by_config)
-                pids = by_config.get(os.path.realpath(inst.odoo_config), [])
+                config = inst.plugin.process_config(inst)
+                pids = by_config.get(os.path.realpath(config), []) if config is not None else []
                 cpu, rss = await asyncio.to_thread(_proc_usage, pids)
                 point = self._point(inst.key, now, cpu, rss, len(cpu))
-                self.source[inst.key] = f"processes started with -c {inst.odoo_config}"
+                self.source[inst.key] = (f"processes started with -c {config}" if config is not None
+                                         else f"{inst.plugin.label} gives no way to find its processes")
             self.history.setdefault(inst.key, deque(maxlen=HISTORY)).append(point)
         for key in list(self.history):
             if key not in keys:  # the server was removed or set to draft

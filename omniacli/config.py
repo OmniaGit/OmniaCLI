@@ -10,6 +10,7 @@ import re
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlsplit
 
 import yaml
@@ -20,7 +21,8 @@ ROLES = ("production", "test")
 # an MCP token saved without a role, as before tokens had one: what such a
 # token could do then (read, update_test, backup_test, download backups)
 TOKEN_DEFAULT_ROLE = "developer"
-# process: OmniaCLI starts odoo-bin itself, its output going to a log of its own
+# process: OmniaCLI starts the service itself (odoo-bin...), its output going
+# to a log of its own
 RESTART_TYPES = ("systemd", "initd", "process")
 # a server name is part of URLs and of the job keys
 SERVER_STATUSES = ("active", "draft")
@@ -84,24 +86,21 @@ class Instance:
     server: str
     role: str
     repositories: list[Repository]
-    database: str
-    odoo_config: Path
     log_file: Path
-    # bin directory of the venv that runs this Odoo, where click-odoo-contrib
-    # is installed (its scripts must import the instance's own odoo package)
-    venv_bin: Path
     restart: Restart
-    update_modules: bool = True
+    # the plugin of the server's type (plugin_api.ServicePlugin), and its
+    # settings of this instance (what its parse_options returned)
+    plugin: Any = field(repr=False, compare=False)
+    options: Any
     auto_update: AutoUpdate = field(default_factory=AutoUpdate)
-    # odoo-bin for the update of chosen modules; None: look in the repositories
-    odoo_bin: Path | None = None
-    # the system user the venv's commands run as, through sudo -n -u (the
-    # user of the Odoo service: its database login, filestore and venv);
+    # the system user the type's programs run as, through sudo -n -u (for
+    # Odoo the user of its service: its database login, filestore and venv);
     # None: as the user running OmniaCLI. git always runs as that user.
     run_as: str | None = None
-    # the port Odoo listens on, passed to the odoo-bin OmniaCLI starts (restart
-    # type process only); None: the port of the Odoo config
-    http_port: int | None = None
+
+    @property
+    def type(self) -> str:
+        return self.plugin.name
 
     @property
     def keeps_local_changes(self) -> bool:
@@ -129,14 +128,21 @@ class Server:
     # a draft is saved but not live: no dashboard, no actions, no auto update
     # until "Test & activate" passes its checks
     status: str = "active"
-    # a draft may be saved incomplete: then it has no instances, data holds
-    # the roles as entered and error says what is missing
+    # a draft may be saved incomplete, and a server's plugin may be missing:
+    # then it has no instances, data holds the roles as written and error
+    # says what is wrong
     data: dict | None = None
     error: str | None = None
+    # the plugin that serves it (plugins.DEFAULT_TYPE when the file names none)
+    type: str = "odoo"
+    # its plugin is not installed or is disabled (error says which)
+    missing_plugin: bool = False
 
     @property
     def active(self) -> bool:
-        return self.status == "active"
+        """Live: active, and its plugin is there (a server whose plugin is
+        missing keeps its status, and is live again with the plugin)."""
+        return self.status == "active" and not self.missing_plugin
 
     @property
     def production(self) -> Instance | None:
@@ -149,10 +155,11 @@ class Server:
 
 def server_text(server: Server) -> str:
     """What the Dashboard filters on: the name, and of each instance the
-    database, service, repository names and branches."""
+    service, repository names and branches, and the words its plugin gives
+    (Odoo: the database)."""
     parts = [server.name]
     for inst in server.instances.values():
-        parts += [inst.database, inst.restart.service]
+        parts += [*inst.plugin.search_text(inst), inst.restart.service]
         parts += [f"{r.name} {r.branch}" for r in inst.repositories]
     return " ".join(parts)
 
@@ -279,7 +286,7 @@ def _parse_auto_update(data: dict | None, where: str) -> AutoUpdate:
     return auto
 
 
-def _parse_instance(server: str, role: str, data: dict, logs_dir: Path | None) -> Instance:
+def _parse_instance(server: str, role: str, data: dict, logs_dir: Path | None, plugin) -> Instance:
     where = f"servers.{server}.{role}"
     repositories = []
     for idx, repo in enumerate(_require(data, "repositories", where)):
@@ -302,6 +309,9 @@ def _parse_instance(server: str, role: str, data: dict, logs_dir: Path | None) -
             f"{where}.restart: type must be one of {', '.join(RESTART_TYPES)}"
         )
     if restart_type == "process":
+        if not plugin.has_process:
+            raise ConfigError(f"{where}.restart: {plugin.label} cannot be started by OmniaCLI "
+                              "(type process)")
         if logs_dir is None:
             raise ConfigError(f"{where}.restart: type process needs the logs folder")
         # the output of the process OmniaCLI starts
@@ -315,38 +325,24 @@ def _parse_instance(server: str, role: str, data: dict, logs_dir: Path | None) -
         if not USER_NAME.fullmatch(run_as):
             raise ConfigError(f"{where}.run_as: {run_as!r} is not a user name")
         if restart_type == "process":
-            # OmniaCLI stops its own Odoo with a signal, which it may not send
-            # to another user's process
+            # OmniaCLI stops its own process with a signal, which it may not
+            # send to another user's process
             raise ConfigError(f"{where}.run_as: not available with restart type process")
-    http_port = data.get("http_port")
-    if http_port in (None, "", 0):
-        http_port = None
-    else:
-        if isinstance(http_port, bool) or not str(http_port).isdigit() or not 1 <= int(http_port) <= 65535:
-            raise ConfigError(f"{where}.http_port: {http_port!r} is not a port (1-65535)")
-        http_port = int(http_port)
-        if restart_type != "process":
-            # with a service, its unit or script starts odoo-bin, not OmniaCLI
-            raise ConfigError(f"{where}.http_port: only with restart type process; "
-                              "for a service set it in the Odoo config")
+    options = plugin.parse_options(data, where, restart_type)
     return Instance(
         server=server,
         role=role,
         repositories=repositories,
-        database=str(_require(data, "database", where)),
-        odoo_config=Path(_require(data, "odoo_config", where)),
         log_file=log_file,
-        venv_bin=Path(_require(data, "venv_bin", where)),
         restart=Restart(
             type=restart_type,
             service=service,
             sudo=bool(restart.get("sudo", True)),
         ),
-        update_modules=bool(data.get("update_modules", True)),
+        plugin=plugin,
+        options=options,
         auto_update=_parse_auto_update(data.get("auto_update"), f"{where}.auto_update"),
-        odoo_bin=Path(data["odoo_bin"]) if data.get("odoo_bin") else None,
         run_as=run_as,
-        http_port=http_port,
     )
 
 
@@ -366,19 +362,29 @@ def parse_servers(data: dict, logs_dir: Path | None = None) -> dict[str, Server]
         status = str(srv.get("status") or "active")
         if status not in SERVER_STATUSES:
             raise ConfigError(f"servers.{name}.status must be one of {', '.join(SERVER_STATUSES)}")
+        from .plugins import DEFAULT_TYPE, registry  # the plugins import this module
+
+        kind = str(srv.get("type") or DEFAULT_TYPE)
+        written = {role: srv[role] for role in ROLES if srv.get(role)}
+        plugin = registry().get(kind)
+        if plugin is None:
+            # kept as written, without actions, until its plugin is there
+            servers[name] = Server(name=name, instances={}, status=status, data=written,
+                                   error=registry().why_missing(kind), type=kind, missing_plugin=True)
+            continue
         try:
-            servers[name] = _parse_server(name, srv, status, logs_dir)
+            servers[name] = _parse_server(name, srv, status, logs_dir, plugin)
         except (ConfigError, TypeError, ValueError, AttributeError) as exc:
             if status != "draft":
                 raise
-            data = {role: srv[role] for role in ROLES if srv.get(role)}
-            servers[name] = Server(name=name, instances={}, status=status, data=data, error=str(exc))
+            servers[name] = Server(name=name, instances={}, status=status, data=written,
+                                   error=str(exc), type=kind)
     return servers
 
 
-def _parse_server(name: str, srv: dict, status: str, logs_dir: Path | None) -> Server:
+def _parse_server(name: str, srv: dict, status: str, logs_dir: Path | None, plugin) -> Server:
     instances = {
-        role: _parse_instance(name, role, srv[role], logs_dir) for role in ROLES if srv.get(role)
+        role: _parse_instance(name, role, srv[role], logs_dir, plugin) for role in ROLES if srv.get(role)
     }
     if not instances:
         raise ConfigError(f"servers.{name}: define 'production' and/or 'test'")
@@ -391,22 +397,19 @@ def _parse_server(name: str, srv: dict, status: str, logs_dir: Path | None) -> S
                 f"servers.{name}: test repositories without a production "
                 f"repository of the same name: {', '.join(missing)}"
             )
-    return Server(name=name, instances=instances, status=status)
+    return Server(name=name, instances=instances, status=status, type=plugin.name)
 
 
 def instance_to_dict(instance: Instance) -> dict:
     auto = instance.auto_update
     data = {
-        "database": instance.database,
-        "odoo_config": str(instance.odoo_config),
+        **instance.plugin.options_to_dict(instance.options),
         "log_file": str(instance.log_file),
-        "venv_bin": str(instance.venv_bin),
         "restart": {
             "type": instance.restart.type,
             "service": instance.restart.service,
             "sudo": instance.restart.sudo,
         },
-        "update_modules": instance.update_modules,
         "auto_update": {"enabled": auto.enabled, "interval_minutes": auto.interval_minutes},
         "repositories": [
             {"name": r.name, "path": str(r.path), "remote": r.remote, "branch": r.branch}
@@ -415,12 +418,8 @@ def instance_to_dict(instance: Instance) -> dict:
     }
     if auto.window_start is not None and auto.window_end is not None:
         data["auto_update"]["window"] = auto.window_label()
-    if instance.odoo_bin is not None:
-        data["odoo_bin"] = str(instance.odoo_bin)
     if instance.run_as is not None:
         data["run_as"] = instance.run_as
-    if instance.http_port is not None:
-        data["http_port"] = instance.http_port
     if instance.restart.type == "process":
         # both follow from the type: the log is OmniaCLI's, there is no service
         del data["log_file"], data["restart"]["service"], data["restart"]["sudo"]
@@ -428,7 +427,7 @@ def instance_to_dict(instance: Instance) -> dict:
 
 
 def server_to_dict(server: Server) -> dict:
-    data = {"status": server.status}
+    data = {"status": server.status, "type": server.type}
     if server.data is not None:
         data.update(server.data)
     data.update({role: instance_to_dict(i) for role, i in server.instances.items()})

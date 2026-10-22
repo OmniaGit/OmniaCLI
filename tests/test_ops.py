@@ -5,6 +5,7 @@ import os
 import pytest
 
 from omniacli import ops
+from omniacli.odoo import ops as odoo_ops
 from omniacli.jobs import Job, JobFailed
 
 from .conftest import clone, commit, sh
@@ -164,19 +165,19 @@ async def test_run_as_update(env, fake_sudo):
     odoo_bin.parent.mkdir()
     odoo_bin.write_text("")
     test = run_as(test)
-    test.odoo_bin = odoo_bin
-    await ops.update_modules(job(), test)
+    test.options.odoo_bin = odoo_bin
+    await odoo_ops.update_modules(job(), test)
     sudo = fake_sudo.read_text()
     # PYTHONPATH reaches the command through sudo's command line
     assert f"sudo -n -u odoo PYTHONPATH={odoo_bin.parent}" in sudo
-    assert f"{test.venv_bin}/click-odoo-update -c" in sudo
+    assert f"{test.options.venv_bin}/click-odoo-update -c" in sudo
     assert "update -c" in env["calls"].read_text()
 
 
 async def test_run_as_backup_is_staged(env, fake_sudo, monkeypatch):
     staging = env["tmp"] / "staging"
     staging.mkdir()
-    monkeypatch.setattr(ops, "BACKUP_STAGING", staging)
+    monkeypatch.setattr(odoo_ops, "BACKUP_STAGING", staging)
     prod = run_as(env["settings"].instance("srv", "production"))
     dest = await ops.backup(job(), prod, env["settings"].backup_dir)
     assert dest.parent == env["settings"].backup_dir / "srv" / "production" and dest.read_text() == "dump\n"
@@ -186,11 +187,11 @@ async def test_run_as_backup_is_staged(env, fake_sudo, monkeypatch):
 
 
 async def test_run_as_pip(env, fake_sudo):
-    venv_bin = env["settings"].instance("srv", "test").venv_bin
+    venv_bin = env["settings"].instance("srv", "test").options.venv_bin
     (venv_bin / "python").write_text('#!/bin/sh\necho "python $*"\n')
     (venv_bin / "python").chmod(0o755)
     j = job()
-    await ops.install_cli(j, venv_bin, "odoo")
+    await odoo_ops.install_cli(j, venv_bin, "odoo")
     assert f"sudo -n -u odoo {venv_bin}/python -m pip install --disable-pip-version-check click-odoo-contrib" \
         in fake_sudo.read_text()
     assert any(line.endswith(" python -m pip install --disable-pip-version-check click-odoo-contrib")
@@ -273,7 +274,7 @@ async def test_process_start_restart_stop(tmp_path):
     assert second and second != first and not group_alive(instance, first)
     log = instance.log_file.read_text()
     assert log.count("started by OmniaCLI") == 2 and log.count("worker up") == 2
-    assert f"-c {instance.odoo_config}" in log
+    assert f"-c {instance.options.odoo_config}" in log
 
     # found again from the pid file, as after a restart of OmniaCLI
     ops._children.clear()
@@ -281,7 +282,7 @@ async def test_process_start_restart_stop(tmp_path):
 
     # an Odoo with the same config that OmniaCLI did not start is never touched
     other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)",
-                              "-c", str(instance.odoo_config)])
+                              "-c", str(instance.options.odoo_config)])
     try:
         await asyncio.sleep(0.2)
         with pytest.raises(JobFailed, match=f"did not start it \\(pid {other.pid}\\)"):
@@ -299,7 +300,8 @@ async def test_process_start_restart_stop(tmp_path):
 async def test_process_http_port(tmp_path):
     import dataclasses
 
-    instance = dataclasses.replace(process_instance(tmp_path), http_port=8123)
+    instance = process_instance(tmp_path)
+    instance = dataclasses.replace(instance, options=dataclasses.replace(instance.options, http_port=8123))
     await ops.restart(job(), instance)
     pid = ops.managed_pid(instance)
     try:
@@ -307,7 +309,7 @@ async def test_process_http_port(tmp_path):
         assert "--http-port=8123" in instance.log_file.read_text()
     finally:
         await ops.stop_process(job(), instance, pid)
-    odoo = instance.odoo_bin.parent
+    odoo = instance.options.odoo_bin.parent
     (odoo / "odoo").mkdir()
     (odoo / "odoo" / "release.py").write_text("version_info = (10, 0, 0, 'final', 0, '')\n")
     await ops.restart(job(), instance)
@@ -320,7 +322,7 @@ async def test_process_http_port(tmp_path):
 
 async def test_process_exits_at_once(tmp_path):
     instance = process_instance(tmp_path)
-    instance.odoo_bin.write_text("import sys; print('bad config'); sys.exit(3)\n")
+    instance.options.odoo_bin.write_text("import sys; print('bad config'); sys.exit(3)\n")
     with pytest.raises(JobFailed, match="exited with code 3"):
         await ops.restart(job(), instance)
     assert "bad config" in instance.log_file.read_text() and not instance.pid_file.exists()
@@ -341,9 +343,9 @@ def test_process_type_config(tmp_path):
 
 def test_odoo_env(tmp_path):
     instance = process_instance(tmp_path)
-    assert ops.odoo_env(instance)["PYTHONPATH"].split(os.pathsep)[0] == str(instance.odoo_bin.parent)
-    instance.odoo_bin.unlink()
-    assert ops.odoo_env(instance) is ops._ENV
+    assert odoo_ops.odoo_env(instance)["PYTHONPATH"].split(os.pathsep)[0] == str(instance.options.odoo_bin.parent)
+    instance.options.odoo_bin.unlink()
+    assert odoo_ops.odoo_env(instance) is ops._ENV
 
 
 async def test_process_stop(tmp_path, monkeypatch):
@@ -363,7 +365,7 @@ async def test_process_stop(tmp_path, monkeypatch):
     async def no_update(job, instance, force=False):
         pass
     monkeypatch.setattr(ops, "pull", pulled)
-    monkeypatch.setattr(ops, "update_modules", no_update)
+    monkeypatch.setattr(odoo_ops, "update_modules", no_update)
     j = job()
     await ops.pull_restart(j, instance, only_if_changed=True)
     assert "not started again" in j.lines[-1] and ops.managed_pid(instance) is None
@@ -435,12 +437,12 @@ def test_programs_never_get_omniacli_python(tmp_path):
                               "VIRTUAL_ENV": "/omniacli/venv", "PYTHONHOME": sys.base_prefix})
     assert out.stdout.strip() == "[]", out.stderr
     instance = process_instance(tmp_path)
-    assert ops.odoo_env(instance)["PYTHONPATH"] == str(instance.odoo_bin.parent)
+    assert odoo_ops.odoo_env(instance)["PYTHONPATH"] == str(instance.options.odoo_bin.parent)
 
 
 async def test_started_odoo_does_not_inherit_pythonpath(tmp_path, monkeypatch):
     instance = process_instance(tmp_path)
-    instance.odoo_bin.write_text("import os, time\nprint('PYTHONPATH=' + str(os.environ.get('PYTHONPATH')), flush=True)\n"
+    instance.options.odoo_bin.write_text("import os, time\nprint('PYTHONPATH=' + str(os.environ.get('PYTHONPATH')), flush=True)\n"
                                  "time.sleep(120)\n")
     monkeypatch.setenv("PYTHONPATH", "/omniacli/venv/site-packages")
     await ops.restart(job(), instance)

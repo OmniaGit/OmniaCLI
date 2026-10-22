@@ -13,7 +13,6 @@ on the path, and it does not need to exist yet.
 from __future__ import annotations
 
 import asyncio
-import configparser
 import os
 from pathlib import Path
 
@@ -49,25 +48,12 @@ def mounts(path: Path = Path("/proc/self/mounts")) -> list[tuple[str, str, str]]
     return sorted(found.values(), key=lambda m: m[1])
 
 
-def _data_dir(odoo_config: Path) -> str | None:
-    """The data_dir option of an Odoo config, None when it is not set or not readable."""
-    parser = configparser.ConfigParser(interpolation=None)
-    try:
-        with open(odoo_config, encoding="utf-8") as fh:
-            parser.read_file(fh)
-    except (OSError, configparser.Error, UnicodeDecodeError):
-        return None
-    value = (parser.get("options", "data_dir", fallback="") or "").strip()
-    return None if value in ("", "False", "None") else os.path.expanduser(value)
-
-
 def known_paths(settings: Settings) -> list[tuple[str, str]]:
     """[(what, path)] that OmniaCLI and the live instances write to."""
     paths = [("backups", str(settings.backup_dir)), ("OmniaCLI jobs", str(settings.jobs_dir))]
     for inst in settings.all_instances():
-        data_dir = _data_dir(inst.odoo_config)
-        if data_dir:
-            paths.append((f"{inst.key} filestore", data_dir))
+        # what the instance's type writes to (Odoo: the filestore)
+        paths += [(f"{inst.key} {what}", path) for what, path in inst.plugin.disk_paths(inst)]
         paths.append((f"{inst.key} log", str(inst.log_file)))
     return paths
 

@@ -220,7 +220,8 @@ document.getElementById("form").addEventListener("submit", async (ev) => {
   const activate = ev.submitter ? ev.submitter.dataset.activate === "1" : false;
   if (!activate && MODEL.active && !confirm("Save as draft? The server goes offline: no actions and no auto update until Test & activate.")) return;
   for (const b of document.querySelectorAll("button[type=submit]")) b.disabled = true;
-  const server = {};
+  // this form is the Odoo plugin's: it saves servers of type odoo
+  const server = {type: "odoo"};
   for (const role of ROLES) {
     const box = boxes[role];
     if (!box.querySelector(".enabled").checked) continue;

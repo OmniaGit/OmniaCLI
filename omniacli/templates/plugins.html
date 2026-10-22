@@ -1,0 +1,42 @@
+{# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C · SPDX-License-Identifier: AGPL-3.0-or-later -#}
+{% extends "base.html" %}
+{% block title %}Plugins · OmniaCLI{% endblock %}
+{% block crumbs %}{% from "_crumbs.html" import crumbs with context %}
+{{ crumbs([("Dashboard", "/"), ("Plugins", None)]) }}
+{% endblock %}
+{% block content %}
+<h1>Plugins</h1>
+<p class="muted">A plugin adds a type of server. Those of the installed Python packages are found by their entry
+point of the group <span class="mono">{{ group }}</span>; this OmniaCLI has plugin API <span class="mono">{{ api_version }}</span>.
+A plugin that does not pass its checks is disabled: OmniaCLI works without it, and the servers of its type are kept
+as they are, without actions, until it is back.</p>
+<div class="panel">
+  <div class="scroll">
+  <table>
+    <tr><th>Type</th><th>Name</th><th>State</th><th>From</th><th>Servers</th></tr>
+    {% for info in found %}
+    <tr>
+      <td class="mono">{{ info.name }}</td>
+      <td>{{ info.plugin.label if info.plugin else "" }}</td>
+      <td>{% if info.plugin %}<span class="badge active">Loaded</span>{% else %}<span class="badge draft">Disabled</span><br><span class="error">{{ info.error }}</span>{% endif %}</td>
+      <td>{{ info.source }}{% if info.version %} <span class="mono">{{ info.version }}</span>{% endif %}<br><span class="muted mono">{{ info.target }}</span></td>
+      <td>{{ count.get(info.name, 0) }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="5" class="muted">No plugins.</td></tr>
+    {% endfor %}
+  </table>
+  </div>
+</div>
+{% if missing %}
+<h2>Servers without their plugin</h2>
+<div class="panel">
+  <table>
+    <tr><th>Server</th><th>Type</th><th>Why</th></tr>
+    {% for srv in missing %}
+    <tr><td><strong>{{ srv.name }}</strong></td><td class="mono">{{ srv.type }}</td><td class="error">{{ srv.error }}</td></tr>
+    {% endfor %}
+  </table>
+</div>
+{% endif %}
+{% endblock %}

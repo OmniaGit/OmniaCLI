@@ -26,6 +26,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from . import ops
+from .odoo import ops as odoo_ops
 from .accesslog import AccessLog
 from .auth import ROLES as ACCESS_ROLES
 from .auth import Authenticator
@@ -175,13 +176,14 @@ def create_mcp(settings: Settings, jobs: JobManager, updater: AutoUpdater, sampl
 
     @server.tool()
     def list_servers() -> list[dict]:
-        """Every configured server: status (active or draft), its instances
-        with database and how Odoo is restarted, and the drafts' problems."""
+        """Every configured server: type (odoo...), status (active or draft),
+        its instances with what its plugin tells (Odoo: database) and how the
+        service is restarted, and the drafts' problems (or a missing plugin)."""
         return [
             {
-                "name": srv.name, "status": srv.status, "incomplete": srv.error,
+                "name": srv.name, "type": srv.type, "status": srv.status, "incomplete": srv.error,
                 "instances": {
-                    role: {"database": i.database, "restart": i.restart.type,
+                    role: {**i.plugin.describe(i), "restart": i.restart.type,
                            "service": i.restart.service or None,
                            "repositories": [r.name for r in i.repositories]}
                     for role, i in srv.instances.items()
@@ -207,7 +209,7 @@ def create_mcp(settings: Settings, jobs: JobManager, updater: AutoUpdater, sampl
                 pid = ops.managed_pid(inst)
                 odoo = {"started_by": "OmniaCLI", "running": pid is not None, "pid": pid}
             result[role] = {
-                "database": inst.database,
+                **inst.plugin.describe(inst),
                 "repositories": {r.name: s for r, s in zip(inst.repositories, repos)},
                 "odoo": odoo or {"started_by": f"{inst.restart.type} {inst.restart.service}"},
                 "load": series[-1] if series else None,
@@ -316,7 +318,7 @@ def create_mcp(settings: Settings, jobs: JobManager, updater: AutoUpdater, sampl
     @server.tool()
     def read_server(server_name: str, ctx: Context) -> dict:
         """(admin token) The whole configuration of a server, active or
-        draft, as the web form saves it: status, and per instance (production,
+        draft, as the web form saves it: status, type, and per instance (production,
         test) database, odoo_config, log_file, venv_bin, restart, repositories,
         auto_update, update_modules, odoo_bin, run_as, http_port. A draft saved
         incomplete has error, which says what is missing."""
@@ -358,6 +360,8 @@ def create_mcp(settings: Settings, jobs: JobManager, updater: AutoUpdater, sampl
         secrets nor server paths, and the backups (database + filestore).
         Of an active server; with an admin token, of a draft too."""
         inst = instance(server_name, role, ctx)
+        if inst.type != "odoo":
+            raise ToolError(f"{server_name} is of type {inst.type}: dev_setup is for Odoo servers")
         repos = []
         for repo in inst.repositories:
             _, url = await ops.capture(["git", "remote", "get-url", repo.remote], cwd=repo.path)
@@ -370,7 +374,7 @@ def create_mcp(settings: Settings, jobs: JobManager, updater: AutoUpdater, sampl
             })
         parser = configparser.ConfigParser(interpolation=None)
         try:
-            parser.read(inst.odoo_config, encoding="utf-8")
+            parser.read(inst.options.odoo_config, encoding="utf-8")
         except (configparser.Error, UnicodeDecodeError):
             pass
         options = dict(parser.items("options")) if parser.has_section("options") else {}
@@ -383,12 +387,12 @@ def create_mcp(settings: Settings, jobs: JobManager, updater: AutoUpdater, sampl
                           if folder == r.path.resolve() or r.path.resolve() in folder.parents), None)
             addons.append({"repository": owner.name, "subpath": str(folder.relative_to(owner.path.resolve()))}
                           if owner else {"outside_repositories": str(folder)})
-        odoo_bin = ops.find_odoo_bin(inst)
-        _, python = await ops.capture([inst.venv_bin / "python", "-c",
+        odoo_bin = odoo_ops.find_odoo_bin(inst)
+        _, python = await ops.capture([inst.options.venv_bin / "python", "-c",
                                        "import sys; print('%d.%d.%d' % sys.version_info[:3])"])
         return {
-            "server": inst.server, "role": role, "database": inst.database,
-            "odoo_version": ops.odoo_major(odoo_bin) if odoo_bin else None,
+            "server": inst.server, "role": role, "database": inst.options.database,
+            "odoo_version": odoo_ops.odoo_major(odoo_bin) if odoo_bin else None,
             "python": python or None,
             "repositories": repos,
             "addons_path": addons,

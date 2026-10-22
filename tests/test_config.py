@@ -68,7 +68,7 @@ def test_http_port():
         parse_servers(data)
     data["s"]["test"]["restart"] = {"type": "process"}
     servers = parse_servers(data, Path("/logs"))
-    assert servers["s"].test.http_port == 8123 and servers["s"].production.http_port is None
+    assert servers["s"].test.options.http_port == 8123 and servers["s"].production.options.http_port is None
     saved = server_to_dict(servers["s"])
     assert saved["test"]["http_port"] == 8123 and "http_port" not in saved["production"]
     for bad in (0.5, "80a", 70000, True):
@@ -128,8 +128,8 @@ def test_servers_file_round_trip(tmp_path):
     data = _settings(["odoo", "plm"], ["plm"])
     data["s"]["production"]["odoo_bin"] = "/opt/odoo/odoo-bin"
     servers = parse_servers(data)
-    assert str(servers["s"].production.odoo_bin) == "/opt/odoo/odoo-bin"
-    assert servers["s"].test.odoo_bin is None
+    assert str(servers["s"].production.options.odoo_bin) == "/opt/odoo/odoo-bin"
+    assert servers["s"].test.options.odoo_bin is None
     path = tmp_path / "servers.yaml"
     save_servers(path, servers)
     assert load_servers(path) == servers

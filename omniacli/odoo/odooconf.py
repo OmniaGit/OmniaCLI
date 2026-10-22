@@ -14,8 +14,7 @@ import os
 import re
 from pathlib import Path
 
-from . import ops
-from .config import ConfigError
+from ..plugin_api import ConfigError, capture
 
 _EXACT_DBFILTER = re.compile(r"\^([A-Za-z0-9_.\-]+)\$")
 
@@ -27,15 +26,15 @@ def _option(parser: configparser.ConfigParser, key: str) -> str:
 
 
 async def _repository(top: Path, notes: list[str]) -> dict:
-    _, branch = await ops.capture(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=top)
+    _, branch = await capture(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=top)
     if branch == "HEAD":
         notes.append(f"{top}: detached HEAD, set the branch by hand")
         branch = ""
     remote = ""
     if branch:
-        _, remote = await ops.capture(["git", "config", "--get", f"branch.{branch}.remote"], cwd=top)
+        _, remote = await capture(["git", "config", "--get", f"branch.{branch}.remote"], cwd=top)
     if not remote:
-        _, remotes = await ops.capture(["git", "remote"], cwd=top)
+        _, remotes = await capture(["git", "remote"], cwd=top)
         names = remotes.split()
         remote = "origin" if "origin" in names else (names[0] if names else "")
         if not remote:
@@ -91,7 +90,7 @@ async def read_odoo_config(path: str | Path) -> dict:
         if not os.path.isdir(folder):
             notes.append(f"addons_path {folder}: no such folder")
             continue
-        code, top = await ops.capture(["git", "rev-parse", "--show-toplevel"], cwd=Path(folder))
+        code, top = await capture(["git", "rev-parse", "--show-toplevel"], cwd=Path(folder))
         if code:
             notes.append(f"addons_path {folder}: not inside a git repository")
             continue

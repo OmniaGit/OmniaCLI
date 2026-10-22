@@ -15,9 +15,9 @@ async def test_real_checks_on_the_test_env(env):
     settings = env["settings"]
     server = settings.servers["srv"]
     for inst in server.instances.values():
-        (inst.venv_bin / "python").unlink(missing_ok=True)
-        (inst.venv_bin / "python").symlink_to(sys.executable)
-        inst.odoo_config.write_text("[options]\ndb_name = x\n")
+        (inst.options.venv_bin / "python").unlink(missing_ok=True)
+        (inst.options.venv_bin / "python").symlink_to(sys.executable)
+        inst.options.odoo_config.write_text("[options]\ndb_name = x\n")
     report = await checks.check_server(server, settings.backup_dir)
 
     assert by_name(report, "server", "Separate working copies").ok
@@ -43,15 +43,15 @@ async def test_run_as_checks(env, fake_sudo):
 
     settings = env["settings"]
     test = settings.instance("srv", "test")
-    (test.venv_bin / "python").unlink(missing_ok=True)
-    (test.venv_bin / "python").symlink_to(sys.executable)
-    test.odoo_config.write_text("[options]\ndb_name = x\n")
+    (test.options.venv_bin / "python").unlink(missing_ok=True)
+    (test.options.venv_bin / "python").symlink_to(sys.executable)
+    test.options.odoo_config.write_text("[options]\ndb_name = x\n")
     report = await checks._instance_checks(dataclasses.replace(test, run_as=getpass.getuser()))
     assert by_name(report, "test", "Run as").ok
     sudo = fake_sudo.read_text()
-    assert f"sudo -n -l -u {getpass.getuser()} {test.venv_bin}/python" in sudo
+    assert f"sudo -n -l -u {getpass.getuser()} {test.options.venv_bin}/python" in sudo
     # the probes run as that user too
-    assert f"sudo -n -u {getpass.getuser()} {test.venv_bin}/python -c import click_odoo" in sudo
+    assert f"sudo -n -u {getpass.getuser()} {test.options.venv_bin}/python -c import click_odoo" in sudo
     report = await checks._instance_checks(dataclasses.replace(test, run_as="no-such-user-x"))
     assert by_name(report, "test", "Run as").detail == "no system user no-such-user-x"
 
@@ -99,6 +99,6 @@ async def test_process_type_checks(tmp_path):
     assert result["Log folder"].ok and result["odoo-bin"].ok
     assert not result["Odoo process"].ok and result["Odoo process"].level == checks.WARNING
     assert "Service" not in result and "Restart permission" not in result and "Log file" not in result
-    instance.odoo_bin.unlink()
+    instance.options.odoo_bin.unlink()
     result = {c.name: c for c in await checks._instance_checks(instance)}
     assert not result["odoo-bin"].ok and result["odoo-bin"].level == checks.ERROR

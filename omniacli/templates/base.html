@@ -320,7 +320,8 @@ summary { cursor: pointer; color: var(--muted); }
   <a href="{{ prefix }}/jobs">Jobs</a>
   {% if is_admin %}<a href="{{ prefix }}/config">Servers</a>
   <a href="{{ prefix }}/users">Users</a>
-  <a href="{{ prefix }}/links">Links</a>{% endif %}
+  <a href="{{ prefix }}/links">Links</a>
+  <a href="{{ prefix }}/plugins">Plugins</a>{% endif %}
   {% if can_act %}<a href="{{ prefix }}/help">Help</a>{% endif %}
   <span class="head-end">
     {% if account %}<a href="{{ prefix }}/account" title="Your account and password">{{ account }}</a>

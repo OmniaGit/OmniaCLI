@@ -70,7 +70,7 @@ async def test_dev_setup_and_backup(client, env):
     test = env["settings"].instance("srv", "test")
     odoo = test.repository("odoo").path
     (odoo / "sub").mkdir()
-    test.odoo_config.write_text(
+    test.options.odoo_config.write_text(
         f"[options]\naddons_path = {odoo}/sub,{test.repository('addons').path}, {tmp}/elsewhere\n"
         "admin_passwd = SECRET\ndb_password = SECRET\ndb_host = db.local\nworkers = 4\n")
     sh("git", "remote", "set-url", "origin", "https://user:SECRET@git.example.com/odoo.git", cwd=odoo)
