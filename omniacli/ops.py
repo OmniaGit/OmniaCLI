@@ -50,6 +50,20 @@ def as_user(run_as: str | None, cmd: list, env: dict | None = None) -> list:
     return ["sudo", "-n", "-u", run_as, *extra, *cmd]
 
 
+# where a command of another user runs when its caller names no folder: that
+# user may not enter OmniaCLI's own (/var/lib/omniacli, mode 750), and a
+# program that looks in its cwd (ezdxf for ./ezdxf.ini) then fails; "/" is
+# what systemd gives a service without WorkingDirectory
+OTHER_USER_CWD = Path("/")
+
+
+def _cwd(cmd: list, cwd: Path | None) -> Path | None:
+    """cwd, or OTHER_USER_CWD for a command of as_user without one."""
+    if cwd is None and len(cmd) > 2 and Path(str(cmd[0])).name == "sudo" and "-u" in [str(c) for c in cmd[1:3]]:
+        return OTHER_USER_CWD
+    return cwd
+
+
 def _program(cmd: list) -> str:
     """The name of the program a command runs, past sudo and its options."""
     args = [str(c) for c in cmd]
@@ -78,7 +92,8 @@ async def run(
     env: dict | None = None,
 ) -> int:
     """Run a command, streaming its output into the job log."""
-    job.log(f"$ {shlex.join(str(c) for c in cmd)}" + (f"   (in {cwd})" if cwd else ""))
+    shown, cwd = cwd, _cwd(cmd, cwd)
+    job.log(f"$ {shlex.join(str(c) for c in cmd)}" + (f"   (in {shown})" if shown else ""))
     try:
         proc = await asyncio.create_subprocess_exec(
             *[str(c) for c in cmd],
@@ -114,6 +129,7 @@ async def capture(
     env: dict | None = None,
 ) -> tuple[int, str]:
     """Run a command quietly and return (exit code, stripped output)."""
+    cwd = _cwd(cmd, cwd)
     try:
         proc = await asyncio.create_subprocess_exec(
             *[str(c) for c in cmd],

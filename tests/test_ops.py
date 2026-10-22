@@ -451,3 +451,17 @@ async def test_started_odoo_does_not_inherit_pythonpath(tmp_path, monkeypatch):
         assert "PYTHONPATH=None" in instance.log_file.read_text()
     finally:
         await ops.stop_process(job(), instance, pid)
+
+
+async def test_another_users_command_runs_in_root(fake_sudo, monkeypatch, tmp_path):
+    """OmniaCLI's own folder may be closed to the run_as user: a command of
+    as_user without a folder runs in /, as a service without WorkingDirectory."""
+    monkeypatch.chdir(tmp_path)
+    pwd = ops.as_user("odoo", ["sh", "-c", "pwd"])
+    assert await ops.capture(pwd) == (0, "/")
+    j = Job(id="t", title="t", instances=[], source="test")
+    await ops.run(j, pwd)
+    assert j.lines[-1].endswith(" /")
+    # a folder given is kept; OmniaCLI's own commands keep its cwd
+    assert await ops.capture(pwd, cwd=tmp_path / "..") == (0, str(tmp_path.parent))
+    assert await ops.capture(ops.as_user(None, ["sh", "-c", "pwd"])) == (0, str(tmp_path))

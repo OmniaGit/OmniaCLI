@@ -212,7 +212,7 @@ SITE="$(sudo -u odoo /srv/runas-venv/bin/python -c 'import sysconfig; print(sysc
 echo 'print("click_odoo stub")' | sudo -u odoo tee "$SITE/click_odoo.py" >/dev/null
 sudo -u odoo tee /srv/runas-venv/bin/click-odoo-update >/dev/null <<'EOF'
 #!/bin/sh
-echo "update as $(id -un), PYTHONPATH=$PYTHONPATH, HOME=$HOME"
+echo "update as $(id -un), PYTHONPATH=$PYTHONPATH, HOME=$HOME, cwd=$(pwd)"
 EOF
 sudo -u odoo tee /srv/runas-venv/bin/click-odoo-backupdb >/dev/null <<'EOF'
 #!/bin/sh
@@ -263,6 +263,8 @@ wait_job() {
 JOB="$(curl "${API[@]}" localhost:8090/api/servers/runas/test/update -d '{"mode": "changed"}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["job"])')"
 wait_job "$JOB" || fail "update as odoo"
 grep -q "update as odoo, PYTHONPATH=/srv/odoo-src" /tmp/job.log || { cat /tmp/job.log; fail "update not run as odoo with PYTHONPATH"; }
+# /var/lib/omniacli (mode 750) is closed to odoo: its programs run in /
+grep -q "update as odoo, .*, cwd=/$" /tmp/job.log || { cat /tmp/job.log; fail "update as odoo not run in /"; }
 grep -o 'update as .*' /tmp/job.log
 LOCATION="$(curl "${API[@]}" -o /dev/null -w '%{redirect_url}' -X POST localhost:8090/servers/runas/test/backup)"
 wait_job "${LOCATION##*/}" || fail "backup as odoo"
