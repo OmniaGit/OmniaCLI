@@ -64,7 +64,7 @@ activated.
 
 | Action | Production | Test | What runs |
 |---|---|---|---|
-| Git pull | ✓ | ✓ | `git pull --ff-only <remote> <branch>` in every repository |
+| Git pull | ✓ | ✓ | `git pull --ff-only <remote> <branch>` in every repository, then `git submodule update --init --recursive` in those with submodules |
 | Git pull + restart | ✓ | ✓ | pull, `click-odoo-update` (only the changed modules), restart |
 | Update modules | ✓ | ✓ | a popup asks: the changed modules (`click-odoo-update`) or chosen ones (`odoo-bin -u … --stop-after-init --workers=0`), and whether to restart after |
 | Restart | ✓ | ✓ | the instance's systemd or init.d restart, or OmniaCLI's own start of `odoo-bin` (see below) |
@@ -117,6 +117,12 @@ prepared before Test & activate. The job's log opens in a new tab.
   error), and a pull goes on unless git would have to overwrite them.
   **Merge test to production** still refuses them: what runs on test must be
   a commit.
+- The **submodules** of a repository follow it: after a pull, a merge or the
+  rollback of a merge, `git submodule update --init --recursive` checks them
+  out at the commits the repository records (a submodule left behind counts
+  as an uncommitted change). Local changes inside a submodule make git
+  refuse: the job stops, the repository itself already pulled, the changes
+  kept. Their remotes must be readable by OmniaCLI's user without a prompt.
 - **Merge test to production** merges the commit **checked out on the test
   server**, not the tip of the test branch, so production gets exactly what
   was tested. That commit must already be on the remote. Test and production

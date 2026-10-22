@@ -215,14 +215,31 @@ async def ensure_ready(job: Job, repo: Repository, keep_changes: bool = False) -
         raise JobFailed(f"[{repo.name}] {repo.path} has uncommitted changes")
 
 
+async def update_submodules(job: Job, repo: Repository, check: bool = True) -> None:
+    """Check out the submodules at the commits the repository records: a pull,
+    a merge or a reset moves only their pointers, and a submodule left behind
+    counts as an uncommitted change. Local changes in a submodule make git
+    refuse, and they are kept."""
+    if not (repo.path / ".gitmodules").is_file():
+        return
+    try:
+        await run(job, ["git", "submodule", "update", "--init", "--recursive"],
+                  cwd=repo.path, check=check)
+    except JobFailed as exc:
+        raise JobFailed(f"[{repo.name}] {exc}: its submodules are not on the commits "
+                        "it records") from exc
+
+
 async def pull(job: Job, instance: Instance) -> bool:
-    """Fast-forward every repository of the instance. Return True if any moved."""
+    """Fast-forward every repository of the instance and its submodules.
+    Return True if any repository moved."""
     changed = False
     for repo in instance.repositories:
         job.log(f"--- [{repo.name}] pull {repo.remote}/{repo.branch}")
         await ensure_ready(job, repo, keep_changes=instance.keeps_local_changes)
         before = await git(repo, "rev-parse", "HEAD")
         await run(job, ["git", "pull", "--ff-only", repo.remote, repo.branch], cwd=repo.path)
+        await update_submodules(job, repo)
         after = await git(repo, "rev-parse", "HEAD")
         if before != after:
             changed = True
@@ -518,11 +535,13 @@ async def merge_to_production(job: Job, server: Server, backup_dir: Path) -> Non
                 raise JobFailed(
                     f"[{repo.name}] merge conflict: resolve it by hand, nothing was pushed"
                 )
+            await update_submodules(job, repo)
     except JobFailed:
         for repo, before in reversed(merged):
             job.log(f"--- [{repo.name}] roll back to {before[:10]}")
             # the working copy was clean (ensure_ready), so nothing local is lost
             await run(job, ["git", "reset", "--hard", before], cwd=repo.path, check=False)
+            await update_submodules(job, repo, check=False)
         raise
 
     pushed = []

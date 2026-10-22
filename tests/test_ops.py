@@ -8,7 +8,7 @@ from omniacli import ops
 from omniacli.odoo import ops as odoo_ops
 from omniacli.jobs import Job, JobFailed
 
-from .conftest import clone, commit, sh
+from .conftest import clone, commit, make_remote, sh
 
 
 def job():
@@ -143,6 +143,69 @@ async def test_merge_conflict_rolls_back_everything(env):
     prod_addons = server.production.repository("addons").path
     assert sh("git", "status", "--porcelain", cwd=prod_addons) == ""
     assert "restart" not in env["calls"].read_text()
+
+
+@pytest.fixture
+def file_submodules(monkeypatch):
+    """git refuses submodules from a local path unless told (2.38.1, and
+    backported); GIT_ALLOW_PROTOCOL overrides the config on every version."""
+    allowed = "file:git:http:https:ssh"
+    monkeypatch.setenv("GIT_ALLOW_PROTOCOL", allowed)
+    monkeypatch.setattr(ops, "_ENV", {**ops._ENV, "GIT_ALLOW_PROTOCOL": allowed})
+
+
+def push_submodule(env, branch, lib, lib_sha=None):
+    """Simulate a developer adding the submodule lib to "odoo" (or moving it
+    to lib_sha) and pushing."""
+    work = clone(env["remotes"]["odoo"], env["tmp"] / f"dev_sub_{branch}_{lib_sha}", branch)
+    if lib_sha is None:
+        sh("git", "submodule", "add", "-q", str(lib), "lib", cwd=work)
+    else:
+        sh("git", "submodule", "update", "-q", "--init", cwd=work)
+        sh("git", "fetch", "-q", "origin", cwd=work / "lib")
+        sh("git", "checkout", "-q", lib_sha, cwd=work / "lib")
+        sh("git", "add", "lib", cwd=work)
+    sh("git", "commit", "-q", "-m", "submodule lib", cwd=work)
+    sh("git", "push", "-q", "origin", f"HEAD:{branch}", cwd=work)
+
+
+async def test_pull_checks_out_the_submodules(env, file_submodules):
+    lib = make_remote(env["tmp"], "lib")
+    test = env["settings"].instance("srv", "test")
+    path = test.repository("odoo").path
+    push_submodule(env, "test", lib)
+    await ops.pull(job(), test)
+    assert (path / "lib" / "base.txt").read_text() == "base\n"
+    # the submodule moved: the pull follows it, nothing is left as a change
+    lib_dev = clone(lib, env["tmp"] / "dev_lib", "main")
+    lib_sha = commit(lib_dev, "base.txt", "new\n", "lib change")
+    sh("git", "push", "-q", "origin", "HEAD:main", cwd=lib_dev)
+    push_submodule(env, "test", lib, lib_sha)
+    await ops.pull(job(), test)
+    assert head(path / "lib") == lib_sha
+    assert sh("git", "status", "--porcelain", "--untracked-files=no", cwd=path) == ""
+    # merged into production, its submodule is checked out there too
+    server = env["settings"].servers["srv"]
+    await ops.merge_to_production(job(), server, env["settings"].backup_dir)
+    prod = server.production.repository("odoo").path
+    assert head(prod / "lib") == lib_sha
+    assert sh("git", "status", "--porcelain", "--untracked-files=no", cwd=prod) == ""
+
+
+async def test_pull_keeps_local_changes_in_a_submodule(env, file_submodules):
+    lib = make_remote(env["tmp"], "lib")
+    test = env["settings"].instance("srv", "test")
+    path = test.repository("odoo").path
+    push_submodule(env, "test", lib)
+    await ops.pull(job(), test)
+    (path / "lib" / "base.txt").write_text("local edit\n")
+    lib_dev = clone(lib, env["tmp"] / "dev_lib", "main")
+    lib_sha = commit(lib_dev, "base.txt", "new\n", "lib change")
+    sh("git", "push", "-q", "origin", "HEAD:main", cwd=lib_dev)
+    push_submodule(env, "test", lib, lib_sha)
+    with pytest.raises(JobFailed, match=r"\[odoo\] .*its submodules are not on the commits"):
+        await ops.pull(job(), test)
+    assert (path / "lib" / "base.txt").read_text() == "local edit\n"
 
 
 async def test_merge_refuses_unpushed_tested_commit(env):
