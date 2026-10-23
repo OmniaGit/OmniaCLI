@@ -103,6 +103,12 @@
       {% for b in buttons[inst.key].backup %}{{ action_button(b, off) }}{% endfor %}
       </div>
       {% endif %}
+      {% if can_act %}
+      {# a login shell on the server, in a new tab #}
+      <div class="action-group">
+      <a class="button" href="{{ base }}/shell" target="_blank" rel="noopener" title="A shell of the user running OmniaCLI, in {{ inst.repositories[0].path if inst.repositories else 'its home' }}">{{ icon("terminal") }}Shell</a>
+      </div>
+      {% endif %}
       {# the plugin's own groups #}
       {% for group, found in buttons[inst.key].items() if group not in core_groups and found %}
       <div class="action-group">

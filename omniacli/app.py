@@ -10,7 +10,9 @@ import importlib.metadata
 import importlib.util
 import logging
 import os
+import pwd
 import re
+import time
 from dataclasses import asdict
 from pathlib import Path
 from typing import Optional
@@ -18,14 +20,15 @@ from urllib.parse import parse_qs, quote, urlsplit
 
 import httpx
 import jinja2
-from fastapi import Body, Depends, FastAPI, HTTPException, Request, status
+from fastapi import Body, Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketException, status
 from fastapi.exception_handlers import http_exception_handler
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from fastapi.templating import Jinja2Templates
 from starlette.background import BackgroundTask
+from starlette.requests import HTTPConnection
 
-from . import checks, disks, linkcopy, ops, plugins
+from . import checks, disks, linkcopy, ops, plugins, shell
 from .accesslog import AccessLog
 from .diskhistory import DiskHistory, DiskRecorder
 from .auth import ROLES as ACCESS_ROLES
@@ -53,7 +56,7 @@ from .config import (
 )
 from .jobs import JobManager, filter_jobs
 from .plugin_api import ENTRY_POINT_GROUP, PLUGIN_API, ActionRefused, Host
-from .links import LIST_TIMEOUT, LinkClients, describe_error, link_headers
+from .links import LIST_TIMEOUT, LinkClients, describe_error, link_headers, proxy_websocket
 from .logtail import read_since
 from .metrics import Sampler
 from .scheduler import AutoUpdater
@@ -99,6 +102,9 @@ _TEMPLATES = Jinja2Templates(
 # centred on a transparent square); served without login, like any favicon.
 _STATIC = Path(__file__).parent / "static"
 _BACKUP_NAME = re.compile(r"[A-Za-z0-9._-]+\.zip")
+# the terminal of the shell page: xterm.js 6.0.0 and its fit addon 0.11.0
+# (npm @xterm/xterm and @xterm/addon-fit, MIT), served after the login
+_STATIC_FILES = {"xterm.js": "text/javascript", "xterm.css": "text/css", "addon-fit.js": "text/javascript"}
 # served without login: the icons, and the background of the login page
 _PUBLIC_FILES = {"/favicon.ico": ("favicon.ico", "image/x-icon"),
                  "/icon-180.png": ("icon-180.png", "image/png"),
@@ -201,7 +207,9 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
     sessions = SessionStore(settings.jobs_dir.parent / "sessions.json")
     limiter = LoginLimiter()
 
-    def identify(request: Request) -> Principal:
+    def identify(request: HTTPConnection) -> Principal:
+        # a WebSocket has no method: it is checked as a post (no token, same origin)
+        method = request.scope.get("method", "WEBSOCKET")
         scheme, _, token = request.headers.get("authorization", "").partition(" ")
         if scheme.lower() == "bearer":
             token = token.strip()
@@ -209,7 +217,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             if name is not None:
                 # an MCP client's token: it may read what its role allows (and
                 # download backups); its actions go through the MCP tools only
-                if request.method not in ("GET", "HEAD"):
+                if method not in ("GET", "HEAD"):
                     raise HTTPException(status.HTTP_403_FORBIDDEN, "A token may only read")
                 return Principal(name, settings.token_role(name), "token")
             name = authenticator.link_name(token)
@@ -230,18 +238,22 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         name = sessions.user(request.cookies.get(COOKIE), settings.users)
         if name is None:
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Login required")
-        if request.method not in ("GET", "HEAD") and not _same_origin(request):
+        if method not in ("GET", "HEAD") and not _same_origin(request):
             raise HTTPException(status.HTTP_403_FORBIDDEN, "Cross-site request refused")
         return Principal(name, settings.user_role(name))
 
-    def current_user(request: Request) -> Principal:
+    def current_user(request: HTTPConnection) -> Principal:
         ip = request.client.host if request.client else ""
         try:
             user = identify(request)
         except HTTPException as exc:
             # a wrong token; a missing session is no failure (the login form counts those)
             if exc.status_code == 401 and "bearer" in (exc.headers or {}).get("WWW-Authenticate", "").lower():
-                access_log.record("failed", "token", "", ip, f"{request.method} {request.url.path}"[:200])
+                method = request.scope.get("method", "WEBSOCKET")
+                access_log.record("failed", "token", "", ip, f"{method} {request.url.path}"[:200])
+            if isinstance(request, WebSocket):
+                # refused before the handshake: the browser sees 403
+                raise WebSocketException(1008, exc.detail) from None
             raise
         if user.kind != "user":
             # a link (with who acts there through it) or a token: a login is
@@ -398,7 +410,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             return RedirectResponse(_next_path(back), status.HTTP_303_SEE_OTHER)
         return started(request, job)
 
-    def prefix_of(request: Request) -> str:
+    def prefix_of(request: HTTPConnection) -> str:
         return getattr(request.state, "prefix", "")
 
     def active_server(name: str):
@@ -1562,6 +1574,70 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         kept = {k: resp.headers[k] for k in _LINK_RESPONSE_HEADERS if k in resp.headers}
         return StreamingResponse(resp.aiter_raw(), status_code=resp.status_code, headers=kept,
                                  background=BackgroundTask(resp.aclose))
+
+    # --- the shell of an instance ---------------------------------------
+
+    @app.get("/static/{name}")
+    async def static_file(name: str):
+        if name not in _STATIC_FILES:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "No such file")
+        return FileResponse(_STATIC / name, media_type=_STATIC_FILES[name],
+                            headers={"Cache-Control": "private, max-age=86400"})
+
+    def shell_folder(instance: Instance) -> Path | None:
+        """Where the shell of an instance starts: its first repository."""
+        return instance.repositories[0].path if instance.repositories else None
+
+    @app.get("/servers/{server}/{role}/shell")
+    async def shell_page(request: Request, server: str, role: str, me: Principal = Depends(developer)):
+        active_server(server)
+        instance = get_instance(server, role)
+        return _TEMPLATES.TemplateResponse(request, "shell.html", {
+            "instance": instance, "folder": shell_folder(instance),
+            "system_user": pwd.getpwuid(os.getuid()).pw_name, "shell": shell.login_shell()[0]})
+
+    @app.websocket("/servers/{server}/{role}/shell/ws")
+    async def shell_socket(websocket: WebSocket, server: str, role: str, me: Principal = Depends(current_user)):
+        """A login shell of the user running OmniaCLI, in the instance's first
+        repository (developer: a user here, or a link acting for one)."""
+        await websocket.accept()
+        srv = settings.servers.get(server)
+        instance = srv.instances.get(role) if srv is not None and srv.active else None
+        if not me.can("developer"):
+            await websocket.close(1008, "The developer role is required")
+            return
+        if instance is None:
+            await websocket.close(1008, f"No instance {server}/{role}")
+            return
+        ip = websocket.client.host if websocket.client else ""
+        who = f", acting for {me.on_behalf}" if me.on_behalf else ""
+        access_log.record("shell", me.kind, me.name, ip, f"{instance.key} opened{who}")
+        opened = time.monotonic()
+        try:
+            await shell.serve(websocket, shell_folder(instance))
+        except OSError as exc:
+            _logger.warning("shell of %s: %s", instance.key, exc)
+            with contextlib.suppress(RuntimeError):
+                await websocket.close(1011, f"The shell did not start: {exc}"[:120])
+        finally:
+            minutes = round((time.monotonic() - opened) / 60)
+            access_log.record("shell", me.kind, me.name, ip, f"{instance.key} closed after {minutes} min{who}")
+
+    @app.websocket("/links/{name}/servers/{server}/{role}/shell/ws")
+    async def link_shell_socket(websocket: WebSocket, name: str, server: str, role: str,
+                                me: Principal = Depends(current_user)):
+        """The shell of a linked instance's server, as the link, with at most our role."""
+        await websocket.accept()
+        link = settings.link_targets.get(name)
+        if me.kind != "user" or link is None:
+            await websocket.close(1008, "Only a user who logs in here may use a link" if link else f"No link {name}")
+            return
+        try:
+            await proxy_websocket(websocket, link, f"servers/{server}/{role}/shell/ws",
+                                  link_headers(link, me.name, me.role))
+        except Exception as exc:  # refused, unreachable, closed: said to the page
+            with contextlib.suppress(RuntimeError):
+                await websocket.close(1011, f"link {name}: {describe_error(exc)}"[:120])
 
     # --- groups of the Dashboard ----------------------------------------
 

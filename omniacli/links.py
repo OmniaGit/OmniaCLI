@@ -63,6 +63,57 @@ def link_headers(link: LinkTarget, user: str, role: str) -> dict[str, str]:
     }
 
 
+def websocket_url(link: LinkTarget, path: str) -> str:
+    """The other instance's ws(s):// URL of path."""
+    scheme, rest = link.url.split("://", 1)
+    return ("wss" if scheme == "https" else "ws") + "://" + rest + "/" + path.lstrip("/")
+
+
+async def proxy_websocket(websocket, link: LinkTarget, path: str, headers: dict[str, str]) -> None:
+    """Join an accepted WebSocket of a browser to the other instance's
+    WebSocket at path, frame by frame, until one side closes. Raises
+    OSError or websockets' InvalidHandshake when the other side refuses."""
+    from websockets.asyncio.client import connect
+    from websockets.exceptions import ConnectionClosed
+
+    ssl_context = None
+    if link.url.startswith("https://"):
+        ssl_context = ssl.create_default_context(cafile=link.ca_file or None)
+    async with connect(websocket_url(link, path), additional_headers=headers, ssl=ssl_context,
+                       open_timeout=CONNECT_TIMEOUT, max_size=None) as remote:
+
+        async def to_remote():
+            while True:
+                message = await websocket.receive()
+                if message["type"] == "websocket.disconnect":
+                    return
+                if message.get("bytes") is not None:
+                    await remote.send(message["bytes"])
+                elif message.get("text") is not None:
+                    await remote.send(message["text"])
+
+        async def to_browser():
+            try:
+                async for message in remote:
+                    if isinstance(message, bytes):
+                        await websocket.send_bytes(message)
+                    else:
+                        await websocket.send_text(message)
+            except ConnectionClosed:
+                pass
+            # the other side closed: the same code and reason to the browser
+            code, reason = remote.close_code or 1000, remote.close_reason or ""
+            await websocket.close(code if code not in (1005, 1006) else 1011, reason)
+
+        tasks = [asyncio.ensure_future(to_remote()), asyncio.ensure_future(to_browser())]
+        try:
+            await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+
 def describe_error(exc: Exception) -> str:
     if isinstance(exc, httpx.TimeoutException):
         return "no answer in time"

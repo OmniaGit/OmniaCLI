@@ -32,7 +32,7 @@ class AccessLog:
         self._seen: dict[tuple, float] = {}
 
     def record(self, event: str, kind: str, name: str, ip: str = "", detail: str = "") -> None:
-        """event: login, logout, failed or mcp; kind: user, link, token or mcp."""
+        """event: login, logout, failed, mcp or shell; kind: user, link, token or mcp."""
         entry = {
             "time": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
             "event": event, "kind": kind, "name": name, "ip": ip, "detail": detail,

@@ -1,0 +1,61 @@
+{# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C · SPDX-License-Identifier: AGPL-3.0-or-later -#}
+{% extends "base.html" %}
+{% block title %}Shell {{ instance.key }} · OmniaCLI{% endblock %}
+{% block crumbs %}{% from "_crumbs.html" import crumbs with context %}
+{{ crumbs([("Dashboard", "/"), (instance.server, "/servers/" ~ instance.server),
+           (instance.role | capitalize, "/servers/" ~ instance.server ~ "?view=" ~ instance.role),
+           ("Shell", None)]) }}
+{% endblock %}
+{% block content %}
+<link rel="stylesheet" href="{{ prefix }}/static/xterm.css">
+<h1>Shell {{ instance.key }} <span class="muted mono" style="font-size: 14px">{{ system_user }}@{{ folder or "~" }}</span></h1>
+<div class="panel">
+  <div class="actions" style="margin: 0 0 10px">
+    <span id="shell-state" class="muted">Connecting…</span>
+    <button type="button" id="shell-again" hidden>Open a new shell</button>
+  </div>
+  <div id="terminal" style="height: 70vh; background: var(--code-bg); padding: 6px"></div>
+  <p class="muted" style="margin: 8px 0 0">A login shell ({{ shell }}) of the user running OmniaCLI, on this server: it ends when this page closes.</p>
+</div>
+<script src="{{ prefix }}/static/xterm.js"></script>
+<script src="{{ prefix }}/static/addon-fit.js"></script>
+<script>
+(function () {
+  const state = document.getElementById("shell-state");
+  const again = document.getElementById("shell-again");
+  const term = new Terminal({cursorBlink: true, fontSize: 14, scrollback: 5000,
+                             fontFamily: getComputedStyle(document.body).getPropertyValue("--mono")});
+  const fit = new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  term.open(document.getElementById("terminal"));
+  fit.fit();
+  const url = (location.protocol === "https:" ? "wss://" : "ws://") + location.host
+    + "{{ prefix }}/servers/{{ instance.server }}/{{ instance.role }}/shell/ws";
+  let socket = null;
+  const send = (event) => { if (socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(event)); };
+  const resize = () => send({type: "resize", cols: term.cols, rows: term.rows});
+  term.onData((data) => send({type: "input", data}));
+  term.onResize(resize);
+  window.addEventListener("resize", () => fit.fit());
+
+  function connect() {
+    again.hidden = true;
+    state.textContent = "Connecting…";
+    socket = new WebSocket(url);
+    socket.binaryType = "arraybuffer";
+    socket.onopen = () => { state.textContent = "Connected"; resize(); term.focus(); };
+    socket.onmessage = (ev) => term.write(typeof ev.data === "string" ? ev.data : new Uint8Array(ev.data));
+    socket.onclose = (ev) => {
+      // 1006 without a reason: refused at the handshake (login expired, or
+      // a proxy that does not pass WebSockets on) or the connection lost
+      state.textContent = ev.reason ? `Closed: ${ev.reason}`
+        : ev.code === 1006 ? "Closed: refused or connection lost (login expired? a proxy without WebSocket?)"
+        : `Closed (${ev.code})`;
+      again.hidden = false;
+    };
+  }
+  again.onclick = () => { term.reset(); connect(); };
+  connect();
+})();
+</script>
+{% endblock %}

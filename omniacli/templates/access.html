@@ -22,11 +22,11 @@ Saved in <span class="mono">{{ log_file }}</span>.</p>
     {% for e in entries %}
     <tr>
       <td class="mono">{{ e.time | replace("T", " ") }}</td>
-      <td class="{{ 'error' if e.event == 'failed' }}">{{ {"login": "Login", "logout": "Logout", "failed": "Failed login", "mcp": "MCP call"}.get(e.event, e.event) }}</td>
+      <td class="{{ 'error' if e.event == 'failed' }}">{{ {"login": "Login", "logout": "Logout", "failed": "Failed login", "mcp": "MCP call", "shell": "Shell"}.get(e.event, e.event) }}</td>
       <td>{{ e.name or "—" }}</td>
       <td>{{ {"user": "login page", "link": "link", "token": "MCP token (API)", "mcp": "MCP"}.get(e.kind, e.kind) }}</td>
       <td class="mono">{{ e.ip }}</td>
-      <td class="mono">{% if e.kind == "link" and e.detail and e.event != "failed" %}acting for {{ e.detail }}{% else %}{{ e.detail }}{% endif %}</td>
+      <td class="mono">{% if e.kind == "link" and e.detail and e.event not in ("failed", "shell") %}acting for {{ e.detail }}{% else %}{{ e.detail }}{% endif %}</td>
     </tr>
     {% else %}
     <tr><td colspan="6" class="muted">{{ "No entries match." if q else "No accesses logged yet." }}</td></tr>

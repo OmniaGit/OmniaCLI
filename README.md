@@ -139,6 +139,16 @@ prepared before Test & activate. The job's log opens in a new tab.
   folders and databases for production and test, the backup folder. Saving
   a live server runs the same checks: if they fail nothing is saved and it
   stays live. `omniacli check-config` runs them from the command line.
+- **Shell** (developers and admins, a button on each instance): a page with
+  a terminal (xterm.js) running a login shell of the user OmniaCLI runs as
+  (`omniacli`, or the one of `OMNIACLI_USER`; bash when its own shell is
+  `nologin`), in the instance's first repository. It runs on a
+  pseudo-terminal joined to the page by a WebSocket, and ends when the page
+  closes: its whole session is hung up (SIGHUP, SIGKILL after 3 seconds).
+  The shell of a linked instance's server opens through the link, with the
+  lower of the link's role and the user's. Every shell opened and closed is
+  in the access log, with who and for how long. It is the access of that
+  system user, as SSH would give it: give the developer role accordingly.
 - **Auto update**: per instance, every `interval_minutes` within `window`,
   OmniaCLI fetches every repository. When there are new commits it runs
   *git pull + restart* as an `auto` job.
@@ -338,7 +348,7 @@ Every user has a role:
 | Role | May |
 |---|---|
 | `user` | watch: servers, load, logs, jobs, the backup list; and restart, start and stop Odoo |
-| `developer` | also act on the servers: pull, update, backup and the download of a backup, pip |
+| `developer` | also act on the servers: pull, update, backup and the download of a backup, pip, the shell |
 | `admin` | everything: also the configuration pages and the merge of test into production |
 
 ```yaml
@@ -369,7 +379,8 @@ address: a user's login is the login form; a link or an MCP token, which send
 their token with every request, log in with their first request after 30
 minutes without requests from the same address. Logouts, every wrong password
 or token, and the logins refused for too many failures are listed, and so is
-every call to `/mcp`, with its JSON-RPC method and tool. It is kept in
+every call to `/mcp`, with its JSON-RPC method and tool, and every shell
+opened and closed. It is kept in
 `access.jsonl` in the logs folder next to `jobs_dir` (`/var/lib/omniacli/logs`
 for the package); past 5 MiB it moves to `access.jsonl.1`.
 
@@ -693,7 +704,18 @@ nosniff`, `Referrer-Policy: same-origin`, and over HTTPS
 `Strict-Transport-Security`. Expose OmniaCLI only through an HTTPS reverse
 proxy that keeps the `Host` header: POSTs are accepted only when their
 `Origin` matches `Host`, which blocks cross-site requests, and the password
-must never travel in clear.
+must never travel in clear. The same holds for the WebSocket of the shell,
+which the proxy must pass on; for nginx, in the `location` of OmniaCLI:
+
+```nginx
+proxy_http_version 1.1;
+proxy_set_header Upgrade $http_upgrade;
+proxy_set_header Connection "upgrade";
+proxy_set_header Host $host;
+proxy_read_timeout 1h;   # an idle shell stays open up to this
+```
+
+Without them the shell page says "refused or connection lost".
 
 ## Develop
 
@@ -765,7 +787,9 @@ backs up the databases. Without their work this interface would not have
 been possible: thank you.
 
 OmniaCLI also builds on [Odoo](https://www.odoo.com), and on FastAPI,
-Starlette, Uvicorn, Jinja, HTTPX, PyYAML and the MCP Python SDK.
+Starlette, Uvicorn, websockets, Jinja, HTTPX, PyYAML and the MCP Python SDK.
+The terminal of the shell page is [xterm.js](https://github.com/xtermjs/xterm.js)
+with its fit addon (MIT, shipped in `omniacli/static`).
 
 ## License
 
