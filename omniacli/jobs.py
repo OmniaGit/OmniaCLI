@@ -120,6 +120,10 @@ class JobManager:
     def is_busy(self, key: str) -> bool:
         return self.lock(key).locked()
 
+    def running_on(self, key: str) -> Job | None:
+        """The job running on the instance key, None when none is."""
+        return next((j for j in reversed(self.jobs.values()) if j.status == RUNNING and key in j.instances), None)
+
     def get(self, job_id: str) -> Job | None:
         return self.jobs.get(job_id)
 

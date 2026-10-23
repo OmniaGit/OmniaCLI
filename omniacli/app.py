@@ -583,6 +583,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
                 "repo_status": {i.key: s for i, s in zip(shown, statuses)},
                 "auto_state": updater.state,
                 "busy": {i.key: jobs.is_busy(i.key) for i in srv.instances.values()},
+                "busy_job": {i.key: jobs.running_on(i.key) for i in shown},
                 # Odoo started by OmniaCLI: its pid, None when stopped
                 "running": {i.key: ops.managed_pid(i) for i in shown if i.restart.type == "process"},
                 # a systemd service: its ActiveState, None when unknown

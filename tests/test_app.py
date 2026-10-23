@@ -1200,3 +1200,28 @@ async def test_servers_page_groups(client, env):
     resp = await client.post("/api/groups/save", json=body,
                              headers={"Authorization": basic("dev"), "Origin": f"http://{HOST}"})
     assert resp.status_code == 403
+
+
+async def test_job_running_links_to_the_job(client, env):
+    import asyncio
+
+    jobs = client.app.state.jobs
+    release = asyncio.Event()
+
+    async def action(job):
+        await release.wait()
+
+    job = jobs.submit("held", ["srv/test"], "test", action)
+    try:
+        for _ in range(50):
+            if job.status == "running":
+                break
+            await asyncio.sleep(0.01)
+        page = (await client.get("/servers/srv", headers={"Authorization": AUTH})).text
+        assert f'<a href="/jobs/{job.id}"' in page and "Open the job: held" in page
+        assert page.count("job running</a>") == 1  # test only, production is idle
+    finally:
+        release.set()
+    await wait_job(client, job.id)
+    page = (await client.get("/servers/srv", headers={"Authorization": AUTH})).text
+    assert "job running" not in page.split('class="instance-grid"', 1)[1].split("<script", 1)[0]

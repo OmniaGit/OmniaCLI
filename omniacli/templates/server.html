@@ -30,7 +30,7 @@
     <div class="server-head" style="padding: 0 0 8px; border: 0">
       <h2><span class="role {{ inst.role }}">{{ inst.role }}</span>
         {% if inst.web_url %}<a class="web-link mono" href="{{ inst.web_url }}" target="_blank" rel="noopener" title="Open {{ inst.web_url }} in a new tab">{{ inst.web_url }} ↗</a>{% endif %}
-        {% if busy[inst.key] %}<span class="status running" style="font-size: 13px"> · job running</span>{% endif %}</h2>
+        {% if busy[inst.key] %}{% set running_job = busy_job[inst.key] %}<span class="status running" style="font-size: 13px"> · {% if running_job %}<a href="{{ prefix }}/jobs/{{ running_job.id }}" style="color: inherit; text-decoration: underline" title="Open the job: {{ running_job.title }}">job running</a>{% else %}job running{% endif %}</span>{% endif %}</h2>
     {% if can_restart %}
     {% set off = "disabled" if busy[inst.key] else "" %}
     {% set base = prefix ~ "/servers/" ~ server.name ~ "/" ~ inst.role %}
