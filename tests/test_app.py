@@ -658,7 +658,9 @@ async def test_backup_and_download(client, env):
 
 async def test_backup_without_filestore(client, env):
     page = (await client.get("/servers/srv", headers={"Authorization": AUTH})).text
-    assert 'name="no_filestore"' in page and 'formaction="/servers/srv/production/backup?download=1"' in page
+    # the choice is in the dialog the Backup buttons open
+    assert '<dialog id="backup-dialog">' in page and 'name="no_filestore"' in page
+    assert 'data-backup="/servers/srv/production/backup" data-download="1"' in page
     resp = await client.post("/servers/srv/production/backup", headers=POST, data={"no_filestore": "on"})
     data = await wait_job(client, resp.headers["location"].split("/jobs/")[1])
     assert data["status"] == "success" and data["title"] == "Backup srv/production (without filestore)", data

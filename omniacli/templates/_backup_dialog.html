@@ -1,0 +1,41 @@
+{# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C · SPDX-License-Identifier: AGPL-3.0-or-later -#}
+{# Backup: drawn once on the server page, it opens for the buttons
+   data-backup (the backup's URL, ?download=1 to download it after) with
+   the type's choices of a backup, and posts them. -#}
+{% from "_icons.html" import icon %}
+<dialog id="backup-dialog">
+  <form method="post" id="backup-form">
+    <h2 id="backup-title" style="margin-bottom: 4px"></h2>
+    <p class="muted" id="backup-sub" style="margin-top: 0"></p>
+    {% for f in backup_fields %}
+    {% if f.kind == "checkbox" %}
+    <label style="display: block; margin-top: 6px"><input type="checkbox" name="{{ f.key }}" {{ "checked" if f.default }}> {{ f.label }}</label>
+    {% else %}
+    <label style="display: block; margin-top: 6px">{{ f.label }} <input type="text" name="{{ f.key }}" value="{{ f.default or '' }}" placeholder="{{ f.placeholder }}"></label>
+    {% endif %}
+    {% if f.help %}<p class="muted" style="margin: 2px 0 0 22px; font-size: 13px">{{ f.help }}</p>{% endif %}
+    {% endfor %}
+    <div class="actions">
+      <button type="submit">{{ icon("backup") }}Back up</button>
+      <button type="button" id="backup-cancel">Cancel</button>
+    </div>
+  </form>
+</dialog>
+<script>
+(function () {
+  const dialog = document.getElementById("backup-dialog");
+  const form = document.getElementById("backup-form");
+  document.getElementById("backup-cancel").onclick = () => dialog.close();
+  for (const button of document.querySelectorAll("[data-backup]")) {
+    button.onclick = () => {
+      const download = button.dataset.download === "1";
+      form.action = button.dataset.backup + (download ? "?download=1" : "");
+      form.reset();
+      document.getElementById("backup-title").textContent = `Backup ${button.dataset.key}` + (download ? " + download" : "");
+      document.getElementById("backup-sub").textContent = download
+        ? "The zip is downloaded when the backup is ready." : "The zip stays in the instance's backups.";
+      dialog.showModal();
+    };
+  }
+})();
+</script>

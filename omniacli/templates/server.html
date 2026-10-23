@@ -92,13 +92,9 @@
       {% if (can_act and inst.plugin.has_backup) or buttons[inst.key].backup or from_link[inst.key] %}
       <div class="action-group">
       {% if can_act and inst.plugin.has_backup %}
-      <form method="post" action="{{ base }}/backup" style="display: contents">
-        <button {{ off }}>{{ icon("backup") }}Backup</button>
-        <button {{ off }} formaction="{{ base }}/backup?download=1" title="Back up, then download the zip">{{ icon("download") }}Backup + download</button>
-        {% for f in backup_fields %}
-        <label class="muted" title="{{ f.help }}">{% if f.kind == "checkbox" %}<input type="checkbox" name="{{ f.key }}" {{ off }} {{ "checked" if f.default }}> {{ f.label }}{% else %}{{ f.label }} <input type="text" name="{{ f.key }}" value="{{ f.default or '' }}" {{ off }}>{% endif %}</label>
-        {% endfor %}
-      </form>
+      {# the choices of the backup (Odoo: without filestore) in its dialog #}
+      <button type="button" {{ off }} data-backup="{{ base }}/backup" data-download="0" data-key="{{ inst.key }}">{{ icon("backup") }}Backup</button>
+      <button type="button" {{ off }} data-backup="{{ base }}/backup" data-download="1" data-key="{{ inst.key }}" title="Back up, then download the zip">{{ icon("download") }}Backup + download</button>
       {% endif %}
       {% if from_link[inst.key] %}
       <button type="button" {{ off }} data-from-link='{{ from_link[inst.key] | tojson }}' data-key="{{ inst.key }}"
@@ -201,6 +197,7 @@
 
 {% for dialog in dialogs %}{% include dialog %}{% endfor %}
 {% if from_link %}{% include "_from_link_dialog.html" %}{% endif %}
+{% if can_act %}{% include "_backup_dialog.html" %}{% endif %}
 {% include "_charts.html" %}
 {% include "_logview.html" %}
 <script>
