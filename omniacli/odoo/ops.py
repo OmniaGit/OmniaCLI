@@ -22,6 +22,8 @@ PIP_TIMEOUT = 1800
 BACKUP_STAGING = Path("/var/tmp")
 # what OmniaCLI runs in an instance's venv: click-odoo-update, click-odoo-backupdb
 CLI_PACKAGE = "click-odoo-contrib"
+# what the venv's python runs to share a filestore through hard links
+LINK_SCRIPT = Path(__file__).with_name("link_filestore.py")
 
 
 async def update_modules(job: Job, instance: Instance, force: bool = False) -> None:
@@ -302,5 +304,24 @@ async def restore(job: Job, instance: Instance, backup_zip: Path, neutralize: bo
         shutil.copyfile(backup_zip, staged)
         staged.chmod(0o644)
         await run(job, as_user(instance.run_as, [*cmd, opts.database, staged], env), env=env)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
+
+async def share_filestore(job: Job, instance: Instance, src: Path, dst: Path, check: bool = False) -> None:
+    """Hard link the filestore src (production's) into dst, the filestore of
+    instance (test), with the venv's python and as the user instance runs as
+    (see link_filestore.py); with check, only prove it can be done."""
+    job.log(f"--- {'check: ' if check else ''}filestore {dst} shared with {src} (hard links)")
+    # a copy of the script any user may read, in a folder only OmniaCLI writes to
+    staging = Path(tempfile.mkdtemp(prefix="omniacli-link-", dir=BACKUP_STAGING))
+    try:
+        staging.chmod(0o755)
+        script = staging / LINK_SCRIPT.name
+        shutil.copyfile(LINK_SCRIPT, script)
+        script.chmod(0o644)
+        cmd = [instance.options.venv_bin / "python", script, "check" if check else "link", src, dst]
+        await run(job, as_user(instance.run_as, cmd))
     finally:
         shutil.rmtree(staging, ignore_errors=True)

@@ -8,8 +8,14 @@
       backup of production, neutralized (Odoo 16 and later: no scheduled actions, no outgoing mail); then the
       changed modules are updated and test is started.</p>
     <label><input type="radio" name="backup" value="" checked> A new backup of production, now</label>
-    <label style="display: block; margin-left: 22px" title="Database only, no attachments: test gets no filestore">
-      <input type="checkbox" id="copy-no-filestore"> without filestore (test without attachments)</label>
+    <div id="copy-filestore" style="margin-left: 22px">
+      <label style="display: block" title="The filestore is in the backup and copied into test">
+        <input type="radio" name="filestore" value="copy" checked> with filestore (a copy of production's)</label>
+      <label style="display: block" title="Database only, no attachments: test gets no filestore">
+        <input type="radio" name="filestore" value="none"> without filestore (test without attachments)</label>
+      <label style="display: block" title="The backup without filestore; test's filestore is made of hard links to production's files: no extra disk space, test reads every attachment, its new and deleted files do not touch production's. Production and test filestores on the same filesystem">
+        <input type="radio" name="filestore" value="share"> filestore shared with production (hard links, no extra disk space)</label>
+    </div>
     <div id="copy-backups" class="scroll" style="max-height: 40vh; margin: 6px 0"><span class="muted">Loading the backups…</span></div>
     <p id="copy-error" class="error"></p>
     <div class="actions">
@@ -23,11 +29,11 @@
   const dialog = document.getElementById("copy-dialog");
   const list = document.getElementById("copy-backups");
   const errorBox = document.getElementById("copy-error");
-  const noFilestore = document.getElementById("copy-no-filestore");
+  const filestoreChoices = document.querySelectorAll("#copy-filestore input");
   let target = null;
   // the choice applies to a new backup only
   dialog.addEventListener("change", (ev) => {
-    if (ev.target.name === "backup") noFilestore.disabled = ev.target.value !== "";
+    if (ev.target.name === "backup") for (const c of filestoreChoices) c.disabled = ev.target.value !== "";
   });
   const sizeText = (b) => b >= 1073741824 ? (b / 1073741824).toFixed(2) + " GiB"
     : b >= 1048576 ? (b / 1048576).toFixed(1) + " MiB" : Math.max(1, Math.round(b / 1024)) + " KiB";
@@ -61,7 +67,7 @@
       target = {server: button.dataset.key, url: button.dataset.url};
       document.getElementById("copy-title").textContent = `Copy production to test ${target.server}`;
       dialog.querySelector('input[name=backup][value=""]').checked = true;
-      noFilestore.checked = false; noFilestore.disabled = false;
+      for (const c of filestoreChoices) { c.checked = c.value === "copy"; c.disabled = false; }
       errorBox.textContent = "";
       dialog.showModal(); load();
     };
@@ -69,11 +75,14 @@
   document.getElementById("copy-form").addEventListener("submit", async (ev) => {
     ev.preventDefault();
     const backup = dialog.querySelector("input[name=backup]:checked").value;
-    const no_filestore = !backup && noFilestore.checked;
-    const what = backup ? `the backup ${backup}` : "a new backup of production" + (no_filestore ? " without filestore" : "");
+    const filestore = dialog.querySelector("input[name=filestore]:checked").value;
+    const no_filestore = !backup && filestore === "none";
+    const share_filestore = !backup && filestore === "share";
+    const what = backup ? `the backup ${backup}` : "a new backup of production"
+      + (no_filestore ? " without filestore" : share_filestore ? ", sharing production's filestore through hard links," : "");
     if (!confirm(`Drop the test database of ${target.server} and load ${what} into it?`)) return;
     const resp = await fetch(target.url, {
-      method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({backup, no_filestore}),
+      method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({backup, no_filestore, share_filestore}),
     });
     const data = await resp.json().catch(() => ({}));
     if (resp.ok) { location.href = "{{ prefix }}/jobs/" + data.job; return; }

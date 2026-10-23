@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """The Odoo plugin's copy of production into the test database."""
 import dataclasses
+from pathlib import Path
 
 from omniacli.config import Server
 from omniacli.odoo import ops as odoo_ops
@@ -129,3 +130,92 @@ async def test_run_as_restore_is_staged(env, fake_sudo, monkeypatch):
     sudo = fake_sudo.read_text()
     assert "sudo -n -u odoo " in sudo and f"{staging}/omniacli-restore-" in sudo and "prod.zip" in sudo
     assert list(staging.iterdir()) == []  # the staging folder is removed
+
+
+def shared_setup(env, monkeypatch, data_dir=True):
+    """The venv's python, a staging folder, a data_dir in the Odoo config and
+    a production filestore with a file and a checklist entry."""
+    import sys
+
+    (env["tmp"] / "venv" / "bin" / "python").symlink_to(sys.executable)
+    staging = env["tmp"] / "staging"
+    staging.mkdir()
+    monkeypatch.setattr(odoo_ops, "BACKUP_STAGING", staging)
+    data = env["tmp"] / "data"
+    conf = env["settings"].instance("srv", "test").options.odoo_config
+    conf.write_text(f"[options]\ndata_dir = {data}\n" if data_dir else "[options]\n")
+    prod = data / "filestore" / "DB_production"
+    (prod / "ab").mkdir(parents=True)
+    (prod / "ab" / "abcdef").write_text("attachment")
+    (prod / "checklist" / "ab").mkdir(parents=True)
+    (prod / "checklist" / "ab" / "abcdef").write_text("")
+    return data / "filestore"
+
+
+async def test_copy_sharing_the_filestore(client, env, monkeypatch):
+    filestore = shared_setup(env, monkeypatch)
+    resp = await client.post(URL, headers=POST, json={"backup": "", "share_filestore": True, "no_filestore": True})
+    job = await wait_job(client, resp.json()["job"])
+    assert job["status"] == "success", job
+    assert job["title"].endswith("(new backup, filestore shared with production)")
+    done = calls(env)
+    # the backup without filestore, the restore, then the links before the update
+    assert " --no-filestore DB_production " in done[0] and done[2].endswith("_nofilestore.zip")
+    assert done[3].startswith("update ")
+    prod, test = filestore / "DB_production", filestore / "DB_test"
+    assert (test / "ab" / "abcdef").stat().st_ino == (prod / "ab" / "abcdef").stat().st_ino
+    assert (test / "ab").stat().st_ino != (prod / "ab").stat().st_ino  # its own folders
+    assert not (test / "checklist").exists()
+    assert any("1 files linked" in line for line in job["lines"])
+    assert sorted(filestore.iterdir()) == [prod, test]
+    assert list((env["tmp"] / "staging").iterdir()) == []
+
+    # test deletes its file: production keeps it
+    (test / "ab" / "abcdef").unlink()
+    assert (prod / "ab" / "abcdef").read_text() == "attachment"
+
+    # with a backup already made, the choice does not apply
+    folder = env["settings"].backup_dir / "srv" / "production"
+    name = sorted(p.name for p in folder.iterdir())[0]
+    resp = await client.post(URL, headers=POST, json={"backup": name, "share_filestore": True})
+    job = await wait_job(client, resp.json()["job"])
+    assert job["title"].endswith(f"({name})") and not any("hard links" in line for line in job["lines"])
+
+
+async def test_sharing_refused(client, env, monkeypatch):
+    # no data_dir: refused before anything is touched
+    shared_setup(env, monkeypatch, data_dir=False)
+    job = await wait_job(client, (await client.post(URL, headers=POST, json={"share_filestore": True})).json()["job"])
+    assert job["status"] == "failed" and "sets no data_dir" in job["error"] and calls(env) == []
+
+    # a filestore of test still there after the restore: test is left stopped
+    conf = env["settings"].instance("srv", "test").options.odoo_config
+    conf.write_text(f"[options]\ndata_dir = {env['tmp'] / 'data'}\n")
+    (env["tmp"] / "data" / "filestore" / "DB_test").mkdir()
+    job = await wait_job(client, (await client.post(URL, headers=POST, json={"share_filestore": True})).json()["job"])
+    assert job["status"] == "failed" and any("already exists" in line for line in job["lines"])
+    assert any("is left stopped" in line for line in job["lines"])
+    assert not any(c.startswith("update") for c in calls(env))
+
+
+def test_link_script_refuses_another_filesystem(tmp_path):
+    import os
+    import subprocess
+    import sys
+    import tempfile
+
+    shm = Path("/dev/shm")
+    if not shm.is_dir() or os.stat(shm).st_dev == os.stat(tmp_path).st_dev:
+        import pytest
+        pytest.skip("no second filesystem")
+    src = tmp_path / "src"
+    (src / "ab").mkdir(parents=True)
+    (src / "ab" / "x").write_text("x")
+    with tempfile.TemporaryDirectory(dir=shm) as other:
+        out = subprocess.run([sys.executable, odoo_ops.LINK_SCRIPT, "check", src, Path(other) / "fs" / "DB"],
+                             capture_output=True, text=True)
+        assert out.returncode == 1 and "not on the same filesystem" in out.stderr
+        out = subprocess.run([sys.executable, odoo_ops.LINK_SCRIPT, "check", src, tmp_path / "fs" / "DB"],
+                             capture_output=True, text=True)
+        assert out.returncode == 0, out.stderr
+        assert list((tmp_path / "fs").iterdir()) == []  # the probe link is removed

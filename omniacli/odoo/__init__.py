@@ -79,6 +79,34 @@ def _require(data: dict, key: str, where: str):
     return data[key]
 
 
+def _on(value) -> bool:
+    """A posted checkbox or JSON flag: off when missing or false-like."""
+    return value not in (None, False, "", "0", "false", "off")
+
+
+def _copy_what(params: dict) -> str:
+    """What a copy of production loads, for the job title."""
+    if params["backup"]:
+        return params["backup"]
+    if params.get("share_filestore"):
+        return "new backup, filestore shared with production"
+    return "new backup" + (" without filestore" if params["no_filestore"] else "")
+
+
+def _filestores(production: Instance, test: Instance) -> tuple[Path, Path]:
+    """The filestore folders of production and test, <data_dir>/filestore/<database>
+    as Odoo makes them; refused when an Odoo config sets no data_dir (Odoo's
+    default depends on the home of the user running it)."""
+    found = []
+    for inst in (production, test):
+        data_dir = _data_dir(inst.options.odoo_config)
+        if not data_dir:
+            raise JobFailed(f"{inst.options.odoo_config} of {inst.key} sets no data_dir: "
+                            "its filestore cannot be found to share it")
+        found.append(Path(data_dir) / "filestore" / inst.options.database)
+    return found[0], found[1]
+
+
 def _data_dir(odoo_config: Path) -> str | None:
     """The data_dir option of an Odoo config, None when it is not set or not readable."""
     parser = configparser.ConfigParser(interpolation=None)
@@ -224,8 +252,7 @@ class OdooPlugin(ServicePlugin):
                    available=lambda srv: srv.production is not None and srv.test is not None,
                    tooltip="Load a backup of production (a new one or one already made) into the "
                            "test database, neutralized, then update the modules and start test",
-                   title=lambda srv, params: f"Copy production to test {srv.name} "
-                                             f"({params['backup'] or 'new backup' + (' without filestore' if params['no_filestore'] else '')})"),
+                   title=lambda srv, params: f"Copy production to test {srv.name} ({_copy_what(params)})"),
         ]
 
     def _copy_params(self, server: Server, params: dict) -> dict:
@@ -237,9 +264,10 @@ class OdooPlugin(ServicePlugin):
             path = self._host.backup_folder(server.production) / name
             if not _BACKUP_NAME.fullmatch(name) or not path.is_file():
                 raise ActionRefused(f"No backup {name} of {server.production.key}")
-        # without filestore: of a new backup only
-        no_filestore = not name and params.get("no_filestore") not in (None, False, "", "0", "false", "off")
-        return {"backup": name, "no_filestore": no_filestore}
+        # without filestore, or sharing production's: of a new backup only
+        share = not name and _on(params.get("share_filestore"))
+        no_filestore = not name and not share and _on(params.get("no_filestore"))
+        return {"backup": name, "no_filestore": no_filestore, "share_filestore": share}
 
     async def _copy_production(self, job: Job, server: Server, params: dict) -> None:
         """Back up production (or take a backup of it), stop test, restore the
@@ -256,6 +284,10 @@ class OdooPlugin(ServicePlugin):
                             "a database is not loaded into another version")
         if majors["test"] is not None and majors["test"] >= 20:
             raise JobFailed("click-odoo-restoredb does not restore Odoo 20 and later")
+        shared = None
+        if params.get("share_filestore"):
+            shared = _filestores(prod, test)
+            await ops.share_filestore(job, test, *shared, check=True)
         folder = self._host.backup_folder(prod)
         if params["backup"]:
             backup_zip = folder / params["backup"]
@@ -264,8 +296,9 @@ class OdooPlugin(ServicePlugin):
             job.log(f"--- backup of production: {backup_zip.name}")
         else:
             folder.mkdir(parents=True, exist_ok=True)
-            backup_zip = await self.backup(job, prod, folder, {"no_filestore": params["no_filestore"]})
-        await self.restore(job, test, backup_zip, {"neutralize": True})
+            backup_zip = await self.backup(job, prod, folder,
+                                           {"no_filestore": params["no_filestore"] or shared is not None})
+        await self._restore(job, test, backup_zip, True, shared)
 
     def restore_fields(self) -> list[Field]:
         return [Field("neutralize", "Neutralize (Odoo 16 and later): no scheduled actions, no outgoing mail",
@@ -275,6 +308,13 @@ class OdooPlugin(ServicePlugin):
         """Stop the instance, restore the backup into its database, update the
         changed modules, start it. Refused, before anything is touched, for a
         backup of another Odoo version and for Odoo 20 and later."""
+        await self._restore(job, instance, backup_zip, bool(options.get("neutralize", True)))
+
+    async def _restore(self, job: Job, instance: Instance, backup_zip: Path, neutralize: bool,
+                       shared: tuple[Path, Path] | None = None) -> None:
+        """restore(); with shared (production's filestore, the instance's), the
+        instance's filestore is made of hard links to production's files after
+        the restore of a backup without filestore."""
         odoo_bin = ops.find_odoo_bin(instance)
         major = ops.odoo_major(odoo_bin) if odoo_bin else None
         found = ops.backup_major(backup_zip)
@@ -287,7 +327,6 @@ class OdooPlugin(ServicePlugin):
         major = major if major is not None else found
         if major is not None and major >= 20:
             raise JobFailed("click-odoo-restoredb does not restore Odoo 20 and later")
-        neutralize = bool(options.get("neutralize", True))
         if neutralize and major is not None and major < 16:
             neutralize = False
             job.log(f"WARNING: Odoo {major} cannot be neutralized (Odoo 16 and later): the copy keeps "
@@ -304,6 +343,8 @@ class OdooPlugin(ServicePlugin):
             job.log(f"--- {instance.key} is an init.d service: not stopped, restarted at the end")
         try:
             await ops.restore(job, instance, backup_zip, neutralize)
+            if shared:
+                await ops.share_filestore(job, instance, *shared)
         except JobFailed:
             job.log(f"{instance.key}" + (" is left stopped" if stoppable else " is not restarted")
                     + ": its database may be missing or half restored")
