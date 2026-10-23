@@ -29,6 +29,7 @@
   <section class="panel instance-panel" data-key="{{ inst.key }}">
     <div class="server-head" style="padding: 0 0 8px; border: 0">
       <h2><span class="role {{ inst.role }}">{{ inst.role }}</span>
+        {% if inst.web_url %}<a class="web-link mono" href="{{ inst.web_url }}" target="_blank" rel="noopener" title="Open {{ inst.web_url }} in a new tab">{{ inst.web_url }} ↗</a>{% endif %}
         {% if busy[inst.key] %}<span class="status running" style="font-size: 13px"> · job running</span>{% endif %}</h2>
     {% if can_restart %}
     {% set off = "disabled" if busy[inst.key] else "" %}

@@ -17,6 +17,10 @@ servers:
       # the Odoo service, for its database login, filestore and venv;
       # omitted: the user running OmniaCLI. See README, Permissions
       run_as: odoo
+      # where users open this instance: the link of the server page and of
+      # the Dashboard. A domain name (opened with https) or an http(s) URL;
+      # omitted: http://localhost:<the port of the Odoo config>
+      domain: erp.customer-a.example.com
       restart:
         type: systemd          # systemd -> systemctl restart <service>
         service: odoo-customer-a

@@ -15,9 +15,12 @@
     <tr>
       <td><div class="server-name"><a href="{{ row.base }}/servers/{{ row.name }}"><strong>{{ row.label }}</strong></a>
         <span class="view-buttons">
-          {% if "production" in row.roles %}<a class="button view-production" href="{{ row.base }}/servers/{{ row.name }}?view=production" title="Production of {{ row.label }}">{{ icon("production") }}Production</a>{% endif %}
-          {% if "test" in row.roles %}<a class="button view-test" href="{{ row.base }}/servers/{{ row.name }}?view=test" title="Test of {{ row.label }}">{{ icon("test") }}Test</a>{% endif %}
-          {% if row.roles | length == 2 %}<a class="button" href="{{ row.base }}/servers/{{ row.name }}?view=both" title="Production and test of {{ row.label }}">Both</a>{% endif %}
+          {# the instance itself, at its domain or on localhost, in a new tab;
+             its page here when its address is not known #}
+          {% for role in ("production", "test") if role in row.roles %}
+          {% if row.web.get(role) %}<a class="button view-{{ role }}" href="{{ row.web[role] }}" target="_blank" rel="noopener" title="Open {{ row.web[role] }} in a new tab">{{ icon(role) }}{{ role | capitalize }}</a>
+          {% else %}<a class="button view-{{ role }}" href="{{ row.base }}/servers/{{ row.name }}?view={{ role }}" title="{{ role | capitalize }} of {{ row.label }}">{{ icon(role) }}{{ role | capitalize }}</a>{% endif %}
+          {% endfor %}
         </span></div>
         {% if row.link %}<br><span class="muted">linked instance {{ row.link }}</span>{% endif %}
         {# shown and hidden by the Dashboard as jobs start and end #}
@@ -28,12 +31,6 @@
           <span class="role {{ role }}">{{ "Prod" if role == "production" else "Test" }}</span>
           <svg class="spark" role="img" aria-label="CPU of {{ row.label }} {{ role }}"></svg>
           <span class="spark-value mono">–</span>
-          {% if row.web.get(role) %}
-          {# Odoo itself, on this computer's localhost: a new tab #}
-          {% set port = row.web[role] %}
-          {% set web = "http://localhost:" ~ port %}
-          <a class="odoo-link mono" href="{{ web }}" target="_blank" rel="noopener" title="Open {{ web }} in a new tab">:{{ port }} ↗</a>
-          {% endif %}
           {% set st = row.state.get(role) %}
           {% if st %}
           {# the same buttons as on the server page, as icons #}

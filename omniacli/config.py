@@ -111,10 +111,22 @@ class Instance:
     # None: as the user running OmniaCLI. git always runs as that user.
     run_as: str | None = None
     from_link: LinkSource | None = None
+    # the base URL users open the instance at (its domain name); None: this
+    # computer's localhost at the port the plugin knows
+    domain: str | None = None
 
     @property
     def type(self) -> str:
         return self.plugin.name
+
+    @property
+    def web_url(self) -> str | None:
+        """Where the instance's web interface is opened: its domain, else
+        http://localhost:<port>; None when neither is known."""
+        if self.domain:
+            return self.domain
+        port = self.plugin.web_port(self)
+        return f"http://localhost:{port}" if port else None
 
     @property
     def keeps_local_changes(self) -> bool:
@@ -173,7 +185,7 @@ def server_text(server: Server) -> str:
     (Odoo: the database)."""
     parts = [server.name]
     for inst in server.instances.values():
-        parts += [*inst.plugin.search_text(inst), inst.restart.service]
+        parts += [*inst.plugin.search_text(inst), inst.restart.service, inst.domain or ""]
         parts += [f"{r.name} {r.branch}" for r in inst.repositories]
     return " ".join(parts)
 
@@ -343,6 +355,7 @@ def _parse_instance(server: str, role: str, data: dict, logs_dir: Path | None, p
             # send to another user's process
             raise ConfigError(f"{where}.run_as: not available with restart type process")
     from_link = _parse_from_link(data.get("from_link"), f"{where}.from_link")
+    domain = _parse_domain(data.get("domain"), f"{where}.domain")
     options = plugin.parse_options(data, where, restart_type)
     return Instance(
         server=server,
@@ -359,7 +372,27 @@ def _parse_instance(server: str, role: str, data: dict, logs_dir: Path | None, p
         auto_update=_parse_auto_update(data.get("auto_update"), f"{where}.auto_update"),
         run_as=run_as,
         from_link=from_link,
+        domain=domain,
     )
+
+
+def _parse_domain(value, where: str) -> str | None:
+    """A domain name (erp.example.com[:port], opened with https) or a whole
+    http(s) URL, as the base URL without the trailing /; empty: none."""
+    value = str(value or "").strip().rstrip("/")
+    if not value:
+        return None
+    url = value if "://" in value else f"https://{value}"
+    parts = urlsplit(url)
+    try:
+        parts.port
+    except ValueError:
+        raise ConfigError(f"{where}: {value!r} has no valid port") from None
+    if (parts.scheme not in ("http", "https") or not parts.hostname or parts.query or parts.fragment
+            or parts.username or parts.password or any(c.isspace() for c in url)):
+        raise ConfigError(f"{where}: {value!r} is not a domain name (erp.example.com) "
+                          "or an http(s)://host[:port][/path] URL")
+    return url
 
 
 def _parse_from_link(data, where: str) -> LinkSource | None:
@@ -455,6 +488,8 @@ def instance_to_dict(instance: Instance) -> dict:
         data["auto_update"]["window"] = auto.window_label()
     if instance.run_as is not None:
         data["run_as"] = instance.run_as
+    if instance.domain is not None:
+        data["domain"] = instance.domain
     if instance.from_link is not None:
         src = instance.from_link
         data["from_link"] = {"link": src.link, "server": src.server, "role": src.role}

@@ -337,7 +337,7 @@ def create_mcp(settings: Settings, jobs: JobManager, updater: AutoUpdater, sampl
         """(admin token) The whole configuration of a server, active or
         draft, as the web form saves it: status, type, and per instance (production,
         test) database, odoo_config, log_file, venv_bin, restart, repositories,
-        auto_update, update_modules, odoo_bin, run_as, http_port. A draft saved
+        auto_update, update_modules, odoo_bin, run_as, http_port, domain. A draft saved
         incomplete has error, which says what is missing."""
         need(ctx, "read_server")
         srv = settings.servers.get(server_name)

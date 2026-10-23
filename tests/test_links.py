@@ -94,7 +94,7 @@ async def test_servers_page_lists_the_links_servers(mine):
     assert "cliente › srv" not in page and 'data-lazy="/dashboard/servers?q="' in page
     assert "Loading the servers of the linked instances" in page
     page = (await mine.get("/dashboard/servers", headers=as_user("admin"))).text
-    assert "cliente › srv" in page and 'href="/links/cliente/servers/srv?view=both"' in page
+    assert "cliente › srv" in page and 'href="/links/cliente/servers/srv"><strong>cliente › srv</strong>' in page
     assert 'data-link="cliente" data-key="srv/test"' in page
     assert "Link <strong>down</strong>: cannot connect" in page
     # the filter knows the link, the database and the branch of a remote server

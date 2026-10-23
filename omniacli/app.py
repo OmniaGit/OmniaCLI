@@ -453,7 +453,9 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
                     # a linked OmniaCLI older than the state: no buttons
                     "state": {r: i["state"] for r, i in instances.items() if i.get("state")},
                     "restart": {r: i.get("restart", "") for r, i in instances.items()},
-                    "web": {r: i["port"] for r, i in instances.items() if i.get("port")},
+                    # its domain; an older OmniaCLI, or none set: localhost at its port
+                    "web": {r: i.get("url") or f"http://localhost:{i['port']}"
+                            for r, i in instances.items() if i.get("url") or i.get("port")},
                     "text": " ".join(text),
                 })
             return rows
@@ -474,7 +476,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
                 "busy": {r: jobs.is_busy(i.key) for r, i in srv.instances.items()},
                 "state": {r: states[i.key] for r, i in srv.instances.items()},
                 "restart": {r: i.restart.type for r, i in srv.instances.items()},
-                "web": {r: port for r, i in srv.instances.items() if (port := i.plugin.web_port(i))},
+                "web": {r: url for r, i in srv.instances.items() if (url := i.web_url)},
                 "text": server_text(srv),
             }
             for srv in live
@@ -608,6 +610,8 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
                         "state": states[inst.key],
                         "restart": inst.restart.type,
                         "port": inst.plugin.web_port(inst),
+                        # the domain set for it, None: none
+                        "url": inst.domain,
                     }
                     for role, inst in srv.instances.items()
                 },

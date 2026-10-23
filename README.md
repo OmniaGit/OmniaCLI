@@ -118,10 +118,12 @@ repository folders typed there, saved or not, so a draft's venv can be
 prepared before Test & activate. The job's log opens in a new tab.
 
 - **Dashboard**: one row per live server, with the CPU of production and
-  test over the last 15 minutes and the buttons **Test**, **Production** and
-  **Both**, which open the server's page on that instance or on both side by
-  side: CPU and memory charts of the last hour, the actions, the settings and
-  the live log. *Merge test to production* is on that page.
+  test over the last 15 minutes. The server's name opens its page, for the
+  maintenance: CPU and memory charts of the last hour, the actions, the
+  settings and the live log. *Merge test to production* is on that page. The
+  buttons **Production** and **Test** open the instance itself in a new tab,
+  at its **Domain name** (server form) or at `http://localhost:<its port>`;
+  the same link is next to the instance's name on the server's page.
 - **Load**: every 5 seconds OmniaCLI samples each live instance. A systemd
   instance is measured on its unit's cgroup (cgroup v2): CPU of the main
   process and every worker, memory as the resident size of its processes. An

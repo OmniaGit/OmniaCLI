@@ -60,7 +60,7 @@ async def test_requires_auth(client):
     bad = "Basic " + base64.b64encode(b"admin:wrong").decode()
     assert (await client.get("/", headers={"Authorization": bad})).status_code == 401
     resp = await client.get("/", headers={"Authorization": AUTH})
-    assert resp.status_code == 200 and 'href="/servers/srv?view=both"' in resp.text
+    assert resp.status_code == 200 and 'href="/servers/srv"><strong>srv</strong>' in resp.text
     resp = await client.get("/servers/srv?view=both", headers={"Authorization": AUTH})
     assert resp.status_code == 200 and "DB_production" in resp.text and "DB_test" in resp.text
 
@@ -567,6 +567,23 @@ async def test_dashboard_state_buttons_and_odoo_link(client, env):
     assert servers[0]["instances"]["test"]["state"] == "unknown"
     assert servers[0]["instances"]["test"]["port"] == 8123
 
+
+
+async def test_web_link_follows_the_domain(client, env):
+    test = env["settings"].instance("srv", "test")
+    test.options.odoo_config.write_text("[options]\nhttp_port = 8123\n")
+    page = (await client.get("/servers/srv", headers={"Authorization": AUTH})).text
+    assert 'class="web-link mono" href="http://localhost:8123"' in page
+    assert 'class="button view-test" href="http://localhost:8123" target="_blank"' in (
+        await client.get("/", headers={"Authorization": AUTH})).text
+    test.domain = "https://test.example.com"
+    page = (await client.get("/servers/srv", headers={"Authorization": AUTH})).text
+    assert 'class="web-link mono" href="https://test.example.com"' in page
+    page = (await client.get("/", headers={"Authorization": AUTH})).text
+    # the button of the server's row opens the instance
+    assert 'class="button view-test" href="https://test.example.com" target="_blank"' in page
+    servers = (await client.get("/api/servers", headers={"Authorization": AUTH})).json()
+    assert servers[0]["instances"]["test"]["url"] == "https://test.example.com"
 
 async def test_help_for_developers_and_admins(client):
     for user in ("admin", "dev"):

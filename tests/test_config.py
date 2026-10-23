@@ -82,6 +82,24 @@ def test_test_repository_needs_production_pair():
         parse_servers(_settings(["odoo"], ["odoo", "plm"]))
 
 
+def test_domain():
+    data = _settings(["odoo"], ["odoo"])
+    data["s"]["test"]["domain"] = "test.example.com/"
+    data["s"]["production"]["domain"] = "http://erp.example.com:8080/odoo"
+    servers = parse_servers(data)
+    # a bare name is opened with https; a URL stays as written
+    assert servers["s"].test.domain == "https://test.example.com"
+    assert servers["s"].test.web_url == "https://test.example.com"
+    assert servers["s"].production.web_url == "http://erp.example.com:8080/odoo"
+    saved = server_to_dict(servers["s"])
+    assert saved["test"]["domain"] == "https://test.example.com"
+    del data["s"]["production"]["domain"]
+    assert "domain" not in server_to_dict(parse_servers(data)["s"])["production"]
+    for bad in ("ftp://x.it", "erp.example.com:99999", "a b.it", "https://u:p@x.it", "x.it?a=1"):
+        data["s"]["test"]["domain"] = bad
+        with pytest.raises(ConfigError, match="domain"):
+            parse_servers(data)
+
 def test_run_as():
     data = _settings(["odoo"], ["odoo"])
     data["s"]["test"]["run_as"] = "odoo"
