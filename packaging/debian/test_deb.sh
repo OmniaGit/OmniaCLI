@@ -277,8 +277,7 @@ LOCATION="$(curl "${API[@]}" -o /dev/null -w '%{redirect_url}' -X POST localhost
 wait_job "${LOCATION##*/}" || fail "pip requirements as odoo"
 [ "$(stat -c %U "$SITE/six.py")" = odoo ] || fail "six not installed by odoo"
 echo "update, backup ($(stat -c '%U %a' "/var/lib/omniacli/backups/runas/test/$BACKUP")) and pip ran as odoo"
-# purge keeps the backups: this one goes, so the purge below removes everything
-rm -rf /var/lib/omniacli/backups/runas
+# purge keeps the backups, and only them: this one stays for the purge below
 
 step "OMNIACLI_USER: the service as a workstation user, kept by an upgrade, then omniacli again"
 wait_up() { for i in $(seq 30); do curl -s -o /dev/null localhost:8090 && return 0; sleep 1; done; return 1; }
@@ -345,9 +344,12 @@ systemctl is-active --quiet omniacli && fail "service still running after remove
 [ ! -e /opt/omniacli/venv ] || fail "venv left after remove"
 [ ! -e /opt/omniacli/python ] || fail "bundled Python left after remove"
 [ -e /etc/omniacli/omniacli.yaml ] || fail "config removed by remove"
+# what the service and the steps above wrote besides the backups
+echo "before purge: $(ls -A /var/lib/omniacli | tr '\n' ' ')"
 apt-get purge -y -qq omniacli >/dev/null 2>&1 || fail "purge"
 [ ! -e /etc/omniacli ] || fail "/etc/omniacli left after purge"
-[ ! -e /var/lib/omniacli ] || fail "/var/lib/omniacli left after purge"
+[ "$(ls -A /var/lib/omniacli)" = backups ] || fail "left after purge besides the backups: $(ls -A /var/lib/omniacli | tr '\n' ' ')"
+[ "$(cat "/var/lib/omniacli/backups/runas/test/$BACKUP")" = dump ] || fail "backup lost by purge"
 echo "ALL CHECKS PASSED"
 EOS
 

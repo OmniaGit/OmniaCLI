@@ -13,14 +13,19 @@ case "$1" in
         rm -f /etc/systemd/system/omniacli.service.d/omniacli-user.conf
         rmdir /etc/systemd/system/omniacli.service.d 2>/dev/null || true
         rmdir /etc/omniacli 2>/dev/null || true
-        # the configuration and the job history go; the backups stay
-        rm -rf /var/lib/omniacli/jobs
+        # the configuration, the histories, the logs and the scripts go; the
+        # backups stay
+        rm -rf /var/lib/omniacli/jobs /var/lib/omniacli/logs /var/lib/omniacli/scripts
         rm -f /var/lib/omniacli/servers.yaml /var/lib/omniacli/servers.yaml.bak \
             /var/lib/omniacli/servers.yaml.tmp \
             /var/lib/omniacli/users.yaml /var/lib/omniacli/users.yaml.tmp \
             /var/lib/omniacli/links.yaml /var/lib/omniacli/links.yaml.tmp \
             /var/lib/omniacli/groups.yaml /var/lib/omniacli/groups.yaml.tmp \
-            /var/lib/omniacli/options.yaml /var/lib/omniacli/options.yaml.tmp
+            /var/lib/omniacli/options.yaml /var/lib/omniacli/options.yaml.tmp \
+            /var/lib/omniacli/schedules.yaml /var/lib/omniacli/schedules.yaml.tmp \
+            /var/lib/omniacli/schedule_history.json /var/lib/omniacli/schedule_history.json.tmp \
+            /var/lib/omniacli/disk_history.json /var/lib/omniacli/disk_history.tmp \
+            /var/lib/omniacli/sessions.json /var/lib/omniacli/sessions.json.tmp
         if [ -d /var/lib/omniacli/backups ] && [ -n "$(ls -A /var/lib/omniacli/backups)" ]; then
             echo "omniacli: the database backups are kept in /var/lib/omniacli/backups"
         else
