@@ -249,6 +249,9 @@ class Settings:
     # the scheduled actions (schedules.py) and the scripts they may run
     schedules_file: Path | None = None
     scripts_dir: Path | None = None
+    # the options of the system (Options page)
+    options_file: Path | None = None
+    options: Options = field(default_factory=lambda: Options())
     token_roles: dict[str, str] = field(default_factory=dict)
     fixed: Access = field(default_factory=Access)
     web: Access = field(default_factory=Access)
@@ -737,6 +740,52 @@ def save_groups(path: Path, groups: list[ServerGroup]) -> None:
     os.replace(tmp, path)
 
 
+# the text size of the shell pages, in pixels
+SHELL_FONT_SIZE = 14
+SHELL_FONT_SIZES = (8, 40)
+
+
+@dataclass
+class Options:
+    """The options of the system, set on the Options page (admin)."""
+
+    shell_font_size: int = SHELL_FONT_SIZE
+
+
+def parse_options(data) -> Options:
+    data = data if isinstance(data, dict) else {}
+    shell = data.get("shell") or {}
+    if not isinstance(shell, dict):
+        raise ConfigError("shell must be a mapping")
+    size = shell.get("font_size", SHELL_FONT_SIZE)
+    low, high = SHELL_FONT_SIZES
+    if isinstance(size, bool) or not isinstance(size, int) or not low <= size <= high:
+        raise ConfigError(f"shell.font_size must be a whole number from {low} to {high}")
+    return Options(shell_font_size=size)
+
+
+def load_options(path: Path) -> Options:
+    """The options file; none yet is the defaults."""
+    if not path.exists():
+        return Options()
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        raise ConfigError(f"cannot read {path}: {exc}") from exc
+    try:
+        return parse_options(data)
+    except ConfigError as exc:
+        raise ConfigError(f"{path}: {exc}") from exc
+
+
+def save_options(path: Path, options: Options) -> None:
+    text = yaml.safe_dump({"shell": {"font_size": options.shell_font_size}}, sort_keys=False)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
+
 def parse_settings(data: dict, base_dir: Path = Path(".")) -> Settings:
     fixed = parse_auth(data.get("auth") or {})
     servers_file = Path(data.get("servers_file") or "servers.yaml")
@@ -755,6 +804,9 @@ def parse_settings(data: dict, base_dir: Path = Path(".")) -> Settings:
     schedules_file = Path(data.get("schedules_file") or servers_file.parent / "schedules.yaml")
     if not schedules_file.is_absolute():
         schedules_file = base_dir / schedules_file
+    options_file = Path(data.get("options_file") or servers_file.parent / "options.yaml")
+    if not options_file.is_absolute():
+        options_file = base_dir / options_file
     scripts_dir = Path(data.get("scripts_dir") or servers_file.parent / "scripts")
     if not scripts_dir.is_absolute():
         scripts_dir = base_dir / scripts_dir
@@ -772,6 +824,8 @@ def parse_settings(data: dict, base_dir: Path = Path(".")) -> Settings:
         groups=load_groups(groups_file),
         schedules_file=schedules_file,
         scripts_dir=scripts_dir,
+        options_file=options_file,
+        options=load_options(options_file),
         fixed=fixed,
     )
     settings.set_web_access(load_access(users_file))

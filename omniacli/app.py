@@ -35,6 +35,7 @@ from .auth import ROLES as ACCESS_ROLES
 from .auth import Authenticator, Principal, hash_password, hash_token, new_token, verify_password
 from .config import (
     ROLES,
+    SHELL_FONT_SIZES,
     Access,
     ConfigError,
     Instance,
@@ -46,10 +47,12 @@ from .config import (
     matches,
     parse_groups,
     parse_link,
+    parse_options,
     parse_servers,
     save_access,
     save_groups,
     save_links,
+    save_options,
     save_servers,
     server_text,
     server_to_dict,
@@ -1659,7 +1662,8 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         folder, command = shell_kinds[kind]
         return _TEMPLATES.TemplateResponse(request, "shell.html", {
             "instance": instance, "folder": folder(instance), "kind": kind, "command": command(),
-            "system_user": pwd.getpwuid(os.getuid()).pw_name, "shell": shell.login_shell()[0]})
+            "system_user": pwd.getpwuid(os.getuid()).pw_name, "shell": shell.login_shell()[0],
+            "font_size": settings.options.shell_font_size, "font_sizes": SHELL_FONT_SIZES})
 
     async def shell_socket(websocket: WebSocket, server: str, role: str, kind: str, me: Principal):
         """A login shell of the user running OmniaCLI, in the instance's first
@@ -1752,6 +1756,27 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         except OSError as exc:
             return refuse(f"Cannot write {settings.groups_file}: {exc}", 500)
         settings.groups = groups
+        return {"ok": True}
+
+    # --- options of the system ------------------------------------------
+
+    @app.get("/options", dependencies=[Depends(admin)])
+    async def options_page(request: Request):
+        return _TEMPLATES.TemplateResponse(request, "options.html", {
+            "options": settings.options, "options_file": settings.options_file,
+            "font_sizes": SHELL_FONT_SIZES})
+
+    @app.post("/api/options/save", dependencies=[Depends(admin)])
+    async def options_save(payload: dict = Body(...)):
+        try:
+            options = parse_options(payload)
+        except ConfigError as exc:
+            return refuse(str(exc))
+        try:
+            await asyncio.to_thread(save_options, settings.options_file, options)
+        except OSError as exc:
+            return refuse(f"Cannot write {settings.options_file}: {exc}", 500)
+        settings.options = options
         return {"ok": True}
 
     # --- scheduled actions ----------------------------------------------

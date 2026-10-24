@@ -10,12 +10,27 @@
 {% block content %}
 <link rel="stylesheet" href="{{ prefix }}/static/xterm.css">
 <h1>{{ name }} {{ instance.key }} <span class="muted mono" style="font-size: 14px">{{ system_user }}@{{ folder or "~" }}</span></h1>
+<style>
+  #shell-box { display: flex; flex-direction: column; }
+  #terminal { height: 70vh; background: var(--code-bg); padding: 6px; }
+  #shell-box:fullscreen { background: var(--bg); padding: 10px; }
+  #shell-box:fullscreen #terminal { flex: 1; height: auto; min-height: 0; }
+  #shell-tools { margin-left: auto; display: flex; gap: 6px; align-items: center; }
+</style>
 <div class="panel">
+  <div id="shell-box">
   <div class="actions" style="margin: 0 0 10px">
     <span id="shell-state" class="muted">Connecting…</span>
     <button type="button" id="shell-again" hidden>Open a new shell</button>
+    <span id="shell-tools">
+      <button type="button" id="font-down" title="Smaller text (this page only; the default is on the Options page)">A−</button>
+      <span id="font-size" class="mono muted" title="Text size in pixels">{{ font_size }}</span>
+      <button type="button" id="font-up" title="Larger text (this page only; the default is on the Options page)">A+</button>
+      <button type="button" id="full-screen" title="Full screen (Esc leaves it)">Full screen</button>
+    </span>
   </div>
-  <div id="terminal" style="height: 70vh; background: var(--code-bg); padding: 6px"></div>
+  <div id="terminal"></div>
+  </div>
   <p class="muted" style="margin: 8px 0 0">A login shell ({{ shell }}) of the user running OmniaCLI, on this server{% if command %}, that runs <span class="mono">{{ command }}</span> first and stays open after it{% endif %}: it ends when this page closes.</p>
 </div>
 <script src="{{ prefix }}/static/xterm.js"></script>
@@ -24,7 +39,7 @@
 (function () {
   const state = document.getElementById("shell-state");
   const again = document.getElementById("shell-again");
-  const term = new Terminal({cursorBlink: true, fontSize: 14, scrollback: 5000,
+  const term = new Terminal({cursorBlink: true, fontSize: {{ font_size }}, scrollback: 5000,
                              fontFamily: getComputedStyle(document.body).getPropertyValue("--mono")});
   const fit = new FitAddon.FitAddon();
   term.loadAddon(fit);
@@ -38,6 +53,29 @@
   term.onData((data) => send({type: "input", data}));
   term.onResize(resize);
   window.addEventListener("resize", () => fit.fit());
+
+  // text size: for this page only, within the limits of the Options page
+  const sizeLabel = document.getElementById("font-size");
+  const fontStep = (delta) => {
+    const size = Math.min({{ font_sizes[1] }}, Math.max({{ font_sizes[0] }}, term.options.fontSize + delta));
+    term.options.fontSize = size;
+    sizeLabel.textContent = size;
+    fit.fit();
+    term.focus();
+  };
+  document.getElementById("font-down").onclick = () => fontStep(-1);
+  document.getElementById("font-up").onclick = () => fontStep(1);
+
+  // full screen: the terminal and its buttons fill the screen
+  const box = document.getElementById("shell-box");
+  const full = document.getElementById("full-screen");
+  full.hidden = !document.fullscreenEnabled;
+  full.onclick = () => document.fullscreenElement ? document.exitFullscreen() : box.requestFullscreen();
+  document.addEventListener("fullscreenchange", () => {
+    full.textContent = document.fullscreenElement ? "Exit full screen" : "Full screen";
+    // the size changes after the layout: fit on the next frame
+    requestAnimationFrame(() => { fit.fit(); term.focus(); });
+  });
 
   function connect() {
     again.hidden = true;

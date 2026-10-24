@@ -159,6 +159,13 @@ prepared before Test & activate. The job's log opens in a new tab.
   lower of the link's role and the user's. Every shell opened and closed is
   in the access log, with who and for how long. It is the access of that
   system user, as SSH would give it: give the developer role accordingly.
+  **A−** and **A+** change the text size for that page, **Full screen**
+  fills the screen with the terminal (Esc leaves it); the size it opens
+  with is on the Options page.
+- **Options** (admins, `/options`): the options of the whole instance, in
+  `options.yaml` next to the servers file (`options_file` in the main
+  configuration): the text size the shell and Claude pages open with
+  (8-40 pixels, default 14).
 - **Claude** (same roles, a button on an instance with a **Claude folder**
   in the server form): the same shell, opened in that folder, that runs
   `claude` first (found by the login shell's `PATH`; Claude Code's installer

@@ -16,7 +16,7 @@ from starlette.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from omniacli.app import create_app
-from omniacli.config import parse_settings
+from omniacli.config import load_options, parse_settings
 from omniacli.sessions import COOKIE
 from omniacli.shell import Shell
 
@@ -228,3 +228,26 @@ def test_claude_in_its_folder(env, tmp_path, monkeypatch):
     data["test"]["claude_dir"] = "relative/dir"
     with pytest.raises(ConfigError, match="claude_dir"):
         parse_servers({"srv": data})
+
+
+def test_options_set_the_shell_text_size(env):
+    """The Options page (admin) sets the text size the shell pages open with."""
+    settings = env["settings"]
+    app = create_app(settings)
+    with TestClient(app) as c:
+        page = c.get("/servers/srv/test/shell", headers=browser(app, "dev")).text
+        assert "fontSize: 14," in page and 'id="full-screen"' in page and 'id="font-up"' in page
+        assert c.get("/options", headers=browser(app, "dev")).status_code == 403
+        assert c.post("/api/options/save", json={"shell": {"font_size": 18}},
+                      headers=browser(app, "dev")).status_code == 403
+        page = c.get("/options", headers=browser(app, "admin"))
+        assert page.status_code == 200 and 'value="14"' in page.text
+        for bad in (7, 41, "18", 18.5, True):
+            resp = c.post("/api/options/save", json={"shell": {"font_size": bad}}, headers=browser(app, "admin"))
+            assert resp.status_code == 400 and "8 to 40" in resp.json()["error"], bad
+        resp = c.post("/api/options/save", json={"shell": {"font_size": 18}}, headers=browser(app, "admin"))
+        assert resp.status_code == 200, resp.text
+        assert yaml.safe_load(settings.options_file.read_text()) == {"shell": {"font_size": 18}}
+        assert "fontSize: 18," in c.get("/servers/srv/test/shell", headers=browser(app, "dev")).text
+    # read back at the next start
+    assert load_options(settings.options_file).shell_font_size == 18

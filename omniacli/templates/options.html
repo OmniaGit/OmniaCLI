@@ -1,0 +1,42 @@
+{# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C · SPDX-License-Identifier: AGPL-3.0-or-later -#}
+{% extends "base.html" %}
+{% block title %}Options · OmniaCLI{% endblock %}
+{% block crumbs %}{% from "_crumbs.html" import crumbs with context %}
+{{ crumbs([("Dashboard", "/"), ("Options", None)]) }}
+{% endblock %}
+{% block content %}
+<h1>Options</h1>
+<p class="muted">The options of this OmniaCLI, for every user. Saved in <span class="mono">{{ options_file }}</span>.</p>
+<div id="error" class="banner" hidden></div>
+<form id="form" autocomplete="off">
+  <fieldset>
+    <legend>Shell</legend>
+    <div class="form-grid">
+      <label for="shell-font-size">Text size (pixels)</label>
+      <input type="number" id="shell-font-size" class="mono" required
+             min="{{ font_sizes[0] }}" max="{{ font_sizes[1] }}" step="1" value="{{ options.shell_font_size }}"
+             title="The text size a shell and Claude page opens with ({{ font_sizes[0] }}-{{ font_sizes[1] }}); the A− and A+ buttons there change it for that page only">
+    </div>
+  </fieldset>
+  <div class="actions">
+    <button type="submit">Save</button>
+    <a class="button" href="{{ prefix }}/">Cancel</a>
+    <span id="saved" class="status success" hidden>Saved.</span>
+  </div>
+</form>
+<script>
+document.getElementById("form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const box = document.getElementById("error"), saved = document.getElementById("saved");
+  box.hidden = true; saved.hidden = true;
+  const resp = await fetch("{{ prefix }}/api/options/save", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({shell: {font_size: Number(document.getElementById("shell-font-size").value)}}),
+  }).catch(() => null);
+  const data = resp ? await resp.json().catch(() => ({})) : {};
+  if (resp && resp.ok) { saved.hidden = false; return; }
+  box.textContent = data.error || (resp ? "Error " + resp.status : "OmniaCLI cannot be reached");
+  box.hidden = false;
+});
+</script>
+{% endblock %}
