@@ -528,3 +528,16 @@ async def test_another_users_command_runs_in_root(fake_sudo, monkeypatch, tmp_pa
     # a folder given is kept; OmniaCLI's own commands keep its cwd
     assert await ops.capture(pwd, cwd=tmp_path / "..") == (0, str(tmp_path.parent))
     assert await ops.capture(ops.as_user(None, ["sh", "-c", "pwd"])) == (0, str(tmp_path))
+
+
+async def test_remote_branches(tmp_path):
+    """The remote's branches, the one checked out, and the last fetch's
+    branches when the remote cannot be reached."""
+    work = clone(make_remote(tmp_path, "r"), tmp_path / "work", "test")
+    data = await ops.remote_branches(work, "origin")
+    assert data == {"branches": ["main", "test"], "current": "test", "note": None}
+    sh("git", "remote", "set-url", "origin", str(tmp_path / "gone"), cwd=work)
+    data = await ops.remote_branches(work, "origin")
+    assert data["branches"] == ["main", "test"] and "not reachable" in data["note"]
+    assert "error" in await ops.remote_branches(tmp_path / "missing", "origin")
+    assert "error" in await ops.remote_branches(tmp_path, "origin")

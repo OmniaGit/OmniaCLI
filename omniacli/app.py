@@ -1239,6 +1239,33 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             "checks": [c.to_dict() for c in report] if report is not None else None,
         }
 
+    @app.post("/api/servers/check", dependencies=[Depends(admin)])
+    async def config_check(payload: dict = Body(...)):
+        """The checks on what the form holds: nothing is saved, the form stays open."""
+        name = str(payload.get("name") or "").strip() or "new"
+        server_data = dict(payload.get("server") or {})
+        server_data["status"] = "draft"
+        try:
+            parsed = parse_servers({name: server_data}, settings.logs_dir)[name]
+        except (ConfigError, TypeError, ValueError, AttributeError) as exc:
+            return refuse(str(exc))
+        report = await checks.check_server(parsed, settings.backup_dir)
+        return {"ok": checks.passed(report), "checks": [c.to_dict() for c in report]}
+
+    @app.post("/api/servers/branches", dependencies=[Depends(admin)])
+    async def config_branches(payload: dict = Body(...)):
+        """The branches of a repository row of the form (its path and remote)."""
+        path = str(payload.get("path") or "").strip()
+        remote = str(payload.get("remote") or "").strip() or "origin"
+        if not path or not os.path.isabs(path):
+            return refuse("Type the repository's full path first")
+        if remote.startswith("-"):
+            return refuse(f"Invalid remote {remote}")
+        data = await ops.remote_branches(Path(path), remote, checks.GIT_TIMEOUT)
+        if "error" in data:
+            return refuse(data["error"])
+        return data
+
     async def write_servers(servers):
         """Write the servers file and make it current (OSError when it cannot)."""
         save_servers(settings.servers_file, servers)

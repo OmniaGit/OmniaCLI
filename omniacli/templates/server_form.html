@@ -27,6 +27,7 @@
     <button type="submit" data-activate="1" class="danger">Save, test &amp; activate</button>
     <button type="submit" data-activate="0">Save as draft</button>
     {% endif %}
+    <button type="button" id="check" title="Run the checks on what the form holds: nothing is saved, the form stays open">Test</button>
     <a class="button" href="{{ prefix }}/config">Cancel</a>
   </div>
   <p class="muted">{% if model.active %}This server is live: the change is saved only if every check passes, otherwise it stays as it is.{% else %}A draft is not live: no dashboard, no actions, no auto update.{% endif %}</p>
@@ -105,9 +106,41 @@ function repoRow(tbody, repo) {
     if (key === "path") input.className = "mono";
     td.appendChild(input); tr.appendChild(td);
   }
-  const td = document.createElement("td"), del = document.createElement("button");
+  const td = document.createElement("td"), read = document.createElement("button"), del = document.createElement("button");
+  read.type = "button"; read.textContent = "Branches";
+  read.title = "Read the branches of the remote and choose one from a list";
+  read.onclick = () => readBranches(tr, read);
   del.type = "button"; del.textContent = "Remove"; del.onclick = () => tr.remove();
-  td.appendChild(del); tr.appendChild(td); tbody.appendChild(tr);
+  td.style.whiteSpace = "nowrap"; td.append(read, " ", del); tr.appendChild(td); tbody.appendChild(tr);
+}
+
+// The Branch cell becomes a list of the remote's branches; a branch typed
+// before and missing there stays, marked.
+async function readBranches(tr, button) {
+  const value = (k) => tr.querySelector(`[data-r="${k}"]`).value.trim();
+  button.disabled = true;
+  const resp = await fetch("{{ prefix }}/api/servers/branches", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({path: value("path"), remote: value("remote")}),
+  }).catch(() => null);
+  button.disabled = false;
+  const data = resp ? await resp.json().catch(() => ({})) : {};
+  if (!resp || !resp.ok) { alert(data.error || (resp ? "Error " + resp.status : "OmniaCLI cannot be reached")); return; }
+  const old = tr.querySelector('[data-r="branch"]');
+  const chosen = old.value.trim() || data.current;
+  const select = document.createElement("select");
+  select.dataset.r = "branch";
+  for (const branch of data.branches) {
+    select.add(new Option(branch === data.current ? branch + " (checked out)" : branch, branch));
+  }
+  if (chosen && !data.branches.includes(chosen)) {
+    select.add(new Option(chosen + " (not on the remote)", chosen), 0);
+  }
+  if (!select.options.length) { alert("The remote has no branches"); return; }
+  select.value = chosen || select.options[0].value;
+  select.title = data.note || "";
+  old.replaceWith(select);
+  if (data.note) alert(data.note);
 }
 
 // The plugin's fields of a role box, with the values given (a type change
@@ -327,11 +360,8 @@ function roleValues(box) {
   return data;
 }
 
-document.getElementById("form").addEventListener("submit", async (ev) => {
-  ev.preventDefault();
-  const activate = ev.submitter ? ev.submitter.dataset.activate === "1" : false;
-  if (!activate && MODEL.active && !confirm("Save as draft? The server goes offline: no actions and no auto update until Test & activate.")) return;
-  for (const b of document.querySelectorAll("button[type=submit]")) b.disabled = true;
+// The server as the form holds it, as the servers file has it.
+function formServer() {
   const server = {type: typeSelect.value};
   for (const role of ROLES) {
     const box = boxes[role];
@@ -342,6 +372,40 @@ document.getElementById("form").addEventListener("submit", async (ev) => {
     if (!typed && !data.repositories.length) continue;
     server[role] = data;
   }
+  return server;
+}
+
+function showError(text) {
+  const box = document.getElementById("error");
+  box.textContent = text;
+  box.hidden = false;
+  window.scrollTo(0, 0);
+}
+
+document.getElementById("check").addEventListener("click", async (ev) => {
+  const button = ev.currentTarget;
+  button.disabled = true;
+  document.getElementById("error").hidden = true;
+  const resp = await fetch("{{ prefix }}/api/servers/check", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({name: document.getElementById("name").value.trim(), server: formServer()}),
+  }).catch(() => null);
+  button.disabled = false;
+  const data = resp ? await resp.json().catch(() => ({})) : {};
+  if (resp && resp.ok && data.checks) {
+    OmniaChecks.show("Test", data.checks,
+      (data.ok ? "All checks passed." : "Some checks failed.") + " Nothing was saved.", data.ok);
+    return;
+  }
+  showError(data.error || (resp ? "Error " + resp.status : "OmniaCLI cannot be reached"));
+});
+
+document.getElementById("form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const activate = ev.submitter ? ev.submitter.dataset.activate === "1" : false;
+  if (!activate && MODEL.active && !confirm("Save as draft? The server goes offline: no actions and no auto update until Test & activate.")) return;
+  for (const b of document.querySelectorAll("button[type=submit]")) b.disabled = true;
+  const server = formServer();
   const resp = await fetch("{{ prefix }}/api/servers/save", {
     method: "POST", headers: {"Content-Type": "application/json"},
     body: JSON.stringify({original: MODEL.original, name: document.getElementById("name").value.trim(), server, activate}),
@@ -357,10 +421,7 @@ document.getElementById("form").addEventListener("submit", async (ev) => {
     OmniaChecks.show("Checks", data.checks, summary, ok, () => { if (resp.ok) location.href = "{{ prefix }}/config"; });
     return;
   }
-  const box = document.getElementById("error");
-  box.textContent = data.error || ("Error " + resp.status);
-  box.hidden = false;
-  window.scrollTo(0, 0);
+  showError(data.error || ("Error " + resp.status));
 });
 </script>
 {% endblock %}

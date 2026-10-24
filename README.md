@@ -133,6 +133,12 @@ prepared before Test & activate. The job's log opens in a new tab.
   process and every worker, memory as the resident size of its processes. An
   init.d instance is measured on the processes started with `-c <its Odoo
   config>`. CPU is in percent of one core.
+- **Test** (server form): runs the same checks on what the form holds, saves
+  nothing and leaves the form open, to fix and test again. **Branches** (a
+  repository row) reads the remote's branches (`git ls-remote --heads`) and
+  turns the Branch cell into a list of them. The Servers page (`/config`)
+  has a search field: every word typed, in a server's name, status,
+  database, repository names or branches.
 - **Draft and Test & activate**: a new or cloned server is a draft (no page,
   no actions, no auto update). *Test & activate* runs real checks as the
   OmniaCLI user and makes it live only when no check fails: Odoo config,

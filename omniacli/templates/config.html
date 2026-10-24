@@ -7,12 +7,16 @@
 A new or cloned server is a <strong>draft</strong>: it goes live only when <strong>Test &amp; activate</strong> passes its checks.</p>
 <div id="error" class="banner" hidden></div>
 <div class="panel">
-  <div class="actions" style="margin: 0 0 12px"><a class="button" href="{{ prefix }}/config/new">New server</a></div>
+  <div class="actions" style="margin: 0 0 12px">
+    <input type="search" id="filter" placeholder="Search server, database, repository, branch…" aria-label="Search servers">
+    <a class="button" href="{{ prefix }}/config/new">New server</a>
+  </div>
   <div class="scroll">
   <table>
     <tr><th>Server</th><th>Status</th><th>Instances</th><th>Repositories</th></tr>
     {% for server in servers %}
-    <tr class="config-main">
+    {% set search %}{{ server.name }} {{ server.type }} {{ server.status }}{% for inst in server.instances.values() %} {{ inst.plugin.search_text(inst) | join(" ") }}{% for repo in inst.repositories %} {{ repo.name }} {{ repo.branch }}{% endfor %}{% endfor %}{% endset %}
+    <tr class="config-main" data-search="{{ search | lower }}">
       <td><strong>{{ server.name }}</strong></td>
       <td>{% if server.missing_plugin %}<span class="badge draft">No plugin</span>{% else %}<span class="badge {{ server.status }}">{{ "Active" if server.active else "Draft" }}</span>{% endif %}</td>
       <td>{% for role, inst in server.instances.items() %}<span class="role {{ role }}">{{ role }}</span> <span class="mono">{{ inst.plugin.search_text(inst) | join(" ") }}</span><br>{% endfor %}
@@ -21,7 +25,7 @@ A new or cloned server is a <strong>draft</strong>: it goes live only when <stro
       <td>{% for role, inst in server.instances.items() %}{{ inst.repositories | map(attribute="name") | join(", ") }}<br>{% endfor %}</td>
     </tr>
     {# the actions: a second row, under the server #}
-    <tr class="config-actions">
+    <tr class="config-actions" data-search="{{ search | lower }}">
       <td colspan="4">
         <div class="actions" style="margin: 0">
           <button type="button" class="{{ 'btn-test' if server.active else 'btn-activate' }}" data-test="{{ server.name }}">{{ "Test" if server.active else "Test & activate" }}</button>
@@ -35,12 +39,26 @@ A new or cloned server is a <strong>draft</strong>: it goes live only when <stro
     {% else %}
     <tr><td colspan="4" class="muted">No servers yet: create one with "New server".</td></tr>
     {% endfor %}
+    <tr id="no-match" hidden><td colspan="4" class="muted">No server matches the search.</td></tr>
   </table>
   </div>
 </div>
 {% include "_checks_dialog.html" %}
 <script>
 const errorBox = document.getElementById("error");
+// every word typed, case insensitive, in the server's name, type, status,
+// instances (database...), repository names and branches
+const filter = document.getElementById("filter");
+filter.addEventListener("input", () => {
+  const words = filter.value.toLowerCase().split(/\s+/).filter(Boolean);
+  let shown = 0;
+  for (const tr of document.querySelectorAll("tr[data-search]")) {
+    const match = words.every((w) => tr.dataset.search.includes(w));
+    tr.hidden = !match;
+    if (match && tr.classList.contains("config-main")) shown++;
+  }
+  document.getElementById("no-match").hidden = shown > 0 || !words.length;
+});
 async function post(url, body) {
   const resp = await fetch(url, {method: "POST", headers: {"Content-Type": "application/json"},
                                  body: JSON.stringify(body || {})});

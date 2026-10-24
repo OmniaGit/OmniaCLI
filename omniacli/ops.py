@@ -182,6 +182,29 @@ async def git(repo: Repository, *args: str) -> str:
     return out
 
 
+async def remote_branches(path: Path, remote: str, timeout: float = 30) -> dict:
+    """The branches a working copy's remote has (the ones a pull can follow)
+    and the branch checked out; when the remote cannot be reached, the
+    remote-tracking branches of the last fetch, with a note."""
+    if not path.is_dir():
+        return {"error": f"{path} does not exist"}
+    code, current = await capture(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=path)
+    if code:
+        return {"error": current.splitlines()[0] if current else "not a git repository"}
+    code, out = await capture(["git", "ls-remote", "--heads", remote], cwd=path, timeout=timeout)
+    if code == 0:
+        branches = [line.split("refs/heads/", 1)[1] for line in out.splitlines() if "refs/heads/" in line]
+        return {"branches": sorted(branches), "current": current, "note": None}
+    reason = out.splitlines()[-1] if out else f"exit code {code}"
+    code, out = await capture(
+        ["git", "for-each-ref", "--format=%(refname:strip=3)", f"refs/remotes/{remote}"], cwd=path)
+    if code:
+        return {"error": f"remote {remote} not reachable: {reason}"}
+    branches = [b for b in out.splitlines() if b and b != "HEAD"]
+    return {"branches": sorted(branches), "current": current,
+            "note": f"remote {remote} not reachable ({reason}): branches of the last fetch"}
+
+
 async def repository_status(repo: Repository) -> dict:
     """Branch and last commit of a working copy, for the dashboard."""
     if not repo.path.is_dir():

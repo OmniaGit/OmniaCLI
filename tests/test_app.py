@@ -337,6 +337,37 @@ async def test_restart_action(client, env):
     assert "/servers/srv/production/restart" not in page.text
 
 
+async def test_config_check_saves_nothing(client, env):
+    """The form's Test runs the checks on the typed settings and saves nothing."""
+    from omniacli.config import server_to_dict
+
+    settings = env["settings"]
+    before = settings.servers_file.read_text()
+    server = server_to_dict(settings.servers["srv"])
+    server["test"]["database"] = "OTHER"
+    resp = await client.post("/api/servers/check", headers=POST, json={"name": "srv", "server": server})
+    assert resp.status_code == 200 and resp.json()["checks"], resp.text
+    assert resp.json()["ok"] is False and any(not c["ok"] for c in resp.json()["checks"])
+    # a new name is checked too, and is not added
+    resp = await client.post("/api/servers/check", headers=POST, json={"name": "brand_new", "server": server})
+    assert resp.status_code == 200 and "checks" in resp.json()
+    resp = await client.post("/api/servers/check", headers=POST, json={"name": "bad/name", "server": server})
+    assert resp.status_code == 400 and resp.json()["error"]
+    assert settings.servers_file.read_text() == before
+    assert list(settings.servers) == ["srv"] and settings.servers["srv"].active
+
+
+async def test_config_branches(client, env):
+    repo = env["settings"].servers["srv"].test.repositories[0]
+    resp = await client.post("/api/servers/branches", headers=POST,
+                             json={"path": str(repo.path), "remote": repo.remote})
+    assert resp.status_code == 200 and repo.branch in resp.json()["branches"], resp.text
+    for body in ({"path": "relative/path"}, {"path": str(repo.path), "remote": "--upload-pack=x"},
+                 {"path": "/nonexistent/x"}):
+        resp = await client.post("/api/servers/branches", headers=POST, json=body)
+        assert resp.status_code == 400 and resp.json()["error"], body
+
+
 async def test_failed_checks_keep_live_server_unchanged(client, env):
     """Editing a live server with activate=True and failing checks saves nothing."""
     from omniacli.config import server_to_dict
@@ -874,7 +905,8 @@ async def test_user_role_watches_and_restarts(client, env):
         assert (await get(url)).status_code == 403, url
     for url in ("/servers/srv/test/pull", "/servers/srv/test/backup", "/servers/srv/test/x/odoo/pip-cli",
                 "/servers/srv/test/x/odoo/update",
-                "/servers/srv/merge", "/api/servers/srv/test", "/api/servers/srv/deactivate"):
+                "/servers/srv/merge", "/api/servers/srv/test", "/api/servers/srv/deactivate",
+                "/api/servers/check", "/api/servers/branches"):
         assert (await post(url)).status_code == 403, url
 
 
