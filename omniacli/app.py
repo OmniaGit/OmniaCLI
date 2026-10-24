@@ -28,7 +28,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.background import BackgroundTask
 from starlette.requests import HTTPConnection
 
-from . import checks, disks, linkcopy, ops, plugins, shell
+from . import checks, disks, linkcopy, ops, plugins, schedules, shell
 from .accesslog import AccessLog
 from .diskhistory import DiskHistory, DiskRecorder
 from .auth import ROLES as ACCESS_ROLES
@@ -202,6 +202,15 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
     disk_history = DiskHistory(settings.jobs_dir.parent / "disk_history.json")
     disk_recorder = DiskRecorder(settings, disk_history)
     link_clients = LinkClients(link_transport)
+    # the scheduled actions; a schedules file that cannot be read is shown on
+    # their page, and OmniaCLI starts without them
+    scheduler = schedules.Scheduler(settings, jobs, link_clients,
+                                    schedules.ScheduleHistory(settings.jobs_dir.parent / "schedule_history.json"))
+    schedules_error = ""
+    try:
+        scheduler.load()
+    except ConfigError as exc:
+        schedules_error = str(exc)
     access_log = AccessLog(settings.logs_dir / "access.jsonl")
     # the browsers' logins: next to the jobs, like the access log
     sessions = SessionStore(settings.jobs_dir.parent / "sessions.json")
@@ -285,6 +294,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
         updater.start()
+        scheduler.start()
         sampler.start()
         disk_recorder.start()
         # not nullcontext(): it is an async context manager only from Python 3.10
@@ -296,6 +306,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         await disk_recorder.stop()
         await sampler.stop()
         await updater.stop()
+        await scheduler.stop()
         await link_clients.close()
 
     app = FastAPI(
@@ -555,15 +566,28 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         statuses = await asyncio.gather(
             *(asyncio.gather(*(ops.repository_status(r) for r in i.repositories)) for i in shown)
         )
-        # Copy from link: for a user who logs in here, with the role it needs
-        from_link = {
-            i.key: {"url": f"{base}/{i.role}/from-link", "link": i.from_link.link, "server": i.from_link.server,
-                    "role": i.from_link.role, "label": i.from_link.label,
-                    "known": i.from_link.link in settings.link_targets,
-                    "database": str(i.plugin.describe(i).get("database") or i.key) if i.role == "production" else ""}
-            for i in shown
-            if i.from_link and i.plugin.has_restore and me.kind == "user" and me.can(from_link_role(i))
-        }
+        # Copy from link: for a user who logs in here, with the role it needs;
+        # shown also without a usable link, disabled, saying how to get one
+        from_link = {}
+        for i in shown:
+            if not (i.plugin.has_restore and me.kind == "user" and me.can(from_link_role(i))):
+                continue
+            src = i.from_link
+            if src is None:
+                missing = ("No database from a link: "
+                           + ("set 'Database from link' in the server's form (Edit)" if settings.link_targets
+                              else "add a link on the Links page, then set 'Database from link' "
+                                   "in the server's form (Edit)"))
+                from_link[i.key] = {"disabled": missing}
+                continue
+            from_link[i.key] = {
+                "url": f"{base}/{i.role}/from-link", "link": src.link, "server": src.server,
+                "role": src.role, "label": src.label,
+                "known": src.link in settings.link_targets,
+                "database": str(i.plugin.describe(i).get("database") or i.key) if i.role == "production" else ""}
+            if src.link not in settings.link_targets:
+                from_link[i.key]["disabled"] = (f"No link {src.link} here: add it on the Links page, "
+                                                "or change 'Database from link' in the server's form (Edit)")
         return _TEMPLATES.TemplateResponse(
             request,
             "server.html",
@@ -1589,18 +1613,31 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         """Where the shell of an instance starts: its first repository."""
         return instance.repositories[0].path if instance.repositories else None
 
-    @app.get("/servers/{server}/{role}/shell")
-    async def shell_page(request: Request, server: str, role: str, me: Principal = Depends(developer)):
+    # the shells of an instance: kind -> (where it starts, what it runs first)
+    shell_kinds = {
+        "shell": (shell_folder, lambda: None),
+        # Claude Code in the instance's Claude folder (no folder: no Claude)
+        "claude": (lambda instance: instance.claude_dir, lambda: shell.CLAUDE_COMMAND),
+    }
+
+    def shell_instance(server: str, role: str, kind: str) -> Instance:
         active_server(server)
         instance = get_instance(server, role)
+        if kind == "claude" and instance.claude_dir is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, f"{instance.key} has no Claude folder")
+        return instance
+
+    async def shell_page(request: Request, server: str, role: str, kind: str):
+        instance = shell_instance(server, role, kind)
+        folder, command = shell_kinds[kind]
         return _TEMPLATES.TemplateResponse(request, "shell.html", {
-            "instance": instance, "folder": shell_folder(instance),
+            "instance": instance, "folder": folder(instance), "kind": kind, "command": command(),
             "system_user": pwd.getpwuid(os.getuid()).pw_name, "shell": shell.login_shell()[0]})
 
-    @app.websocket("/servers/{server}/{role}/shell/ws")
-    async def shell_socket(websocket: WebSocket, server: str, role: str, me: Principal = Depends(current_user)):
+    async def shell_socket(websocket: WebSocket, server: str, role: str, kind: str, me: Principal):
         """A login shell of the user running OmniaCLI, in the instance's first
-        repository (developer: a user here, or a link acting for one)."""
+        repository, or running claude in its Claude folder (developer: a user
+        here, or a link acting for one)."""
         await websocket.accept()
         srv = settings.servers.get(server)
         instance = srv.instances.get(role) if srv is not None and srv.active else None
@@ -1610,23 +1647,28 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         if instance is None:
             await websocket.close(1008, f"No instance {server}/{role}")
             return
+        folder, command = shell_kinds[kind]
+        command = command()
+        if command and folder(instance) is None:
+            await websocket.close(1008, f"{instance.key} has no Claude folder")
+            return
         ip = websocket.client.host if websocket.client else ""
         who = f", acting for {me.on_behalf}" if me.on_behalf else ""
-        access_log.record("shell", me.kind, me.name, ip, f"{instance.key} opened{who}")
+        what = f"{instance.key} {kind}" if command else instance.key
+        access_log.record("shell", me.kind, me.name, ip, f"{what} opened{who}")
         opened = time.monotonic()
         try:
-            await shell.serve(websocket, shell_folder(instance))
+            await shell.serve(websocket, folder(instance), command)
         except OSError as exc:
             _logger.warning("shell of %s: %s", instance.key, exc)
             with contextlib.suppress(RuntimeError):
                 await websocket.close(1011, f"The shell did not start: {exc}"[:120])
         finally:
             minutes = round((time.monotonic() - opened) / 60)
-            access_log.record("shell", me.kind, me.name, ip, f"{instance.key} closed after {minutes} min{who}")
+            access_log.record("shell", me.kind, me.name, ip, f"{what} closed after {minutes} min{who}")
 
-    @app.websocket("/links/{name}/servers/{server}/{role}/shell/ws")
-    async def link_shell_socket(websocket: WebSocket, name: str, server: str, role: str,
-                                me: Principal = Depends(current_user)):
+    async def link_shell_socket(websocket: WebSocket, name: str, server: str, role: str, kind: str,
+                                me: Principal):
         """The shell of a linked instance's server, as the link, with at most our role."""
         await websocket.accept()
         link = settings.link_targets.get(name)
@@ -1634,11 +1676,30 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             await websocket.close(1008, "Only a user who logs in here may use a link" if link else f"No link {name}")
             return
         try:
-            await proxy_websocket(websocket, link, f"servers/{server}/{role}/shell/ws",
+            await proxy_websocket(websocket, link, f"servers/{server}/{role}/{kind}/ws",
                                   link_headers(link, me.name, me.role))
         except Exception as exc:  # refused, unreachable, closed: said to the page
             with contextlib.suppress(RuntimeError):
                 await websocket.close(1011, f"link {name}: {describe_error(exc)}"[:120])
+
+    def shell_routes(kind: str) -> None:
+        """The page and the WebSockets of one kind of shell (a path each: a
+        /servers/{server}/{role}/{kind} would catch the plugins' routes)."""
+        @app.get(f"/servers/{{server}}/{{role}}/{kind}", name=f"{kind}_page")
+        async def page(request: Request, server: str, role: str, me: Principal = Depends(developer)):
+            return await shell_page(request, server, role, kind)
+
+        @app.websocket(f"/servers/{{server}}/{{role}}/{kind}/ws", name=f"{kind}_socket")
+        async def socket(websocket: WebSocket, server: str, role: str, me: Principal = Depends(current_user)):
+            await shell_socket(websocket, server, role, kind, me)
+
+        @app.websocket(f"/links/{{name}}/servers/{{server}}/{{role}}/{kind}/ws", name=f"link_{kind}_socket")
+        async def link_socket(websocket: WebSocket, name: str, server: str, role: str,
+                              me: Principal = Depends(current_user)):
+            await link_shell_socket(websocket, name, server, role, kind, me)
+
+    for kind in shell_kinds:
+        shell_routes(kind)
 
     # --- groups of the Dashboard ----------------------------------------
 
@@ -1665,6 +1726,127 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             return refuse(f"Cannot write {settings.groups_file}: {exc}", 500)
         settings.groups = groups
         return {"ok": True}
+
+    # --- scheduled actions ----------------------------------------------
+
+    schedules_lock = asyncio.Lock()
+
+    def schedule_view(sch: schedules.Schedule) -> dict:
+        try:
+            upcoming = [t.isoformat(sep=" ", timespec="minutes") for t in schedules.next_runs(sch.cron)]
+        except (ValueError, KeyError):
+            upcoming = []
+        return {"name": sch.name, "data": schedules.schedule_to_dict(sch), "steps": sch.steps,
+                "user": sch.acting_user, "next": upcoming if sch.enabled else [],
+                "live": scheduler.instance_of(sch) is not None,
+                "runs": scheduler.history.runs(sch.name, jobs)}
+
+    @app.get("/schedules", dependencies=[Depends(admin)])
+    async def schedules_page(request: Request):
+        targets = {}
+        for srv in settings.servers.values():
+            plugin = plugins.registry().get(srv.type)
+            for inst in srv.instances.values():
+                src = inst.from_link
+                targets[inst.key] = {
+                    "live": srv.active,
+                    "has_restore": bool(plugin and plugin.has_restore),
+                    "backup_fields": [_field_dict(f) for f in plugin.backup_fields()] if plugin else [],
+                    "restore_fields": [_field_dict(f) for f in plugin.restore_fields()] if plugin else [],
+                    "from_link": {"link": src.link, "server": src.server, "role": src.role} if src else None,
+                }
+        return _TEMPLATES.TemplateResponse(
+            request, "schedules.html",
+            {"schedules": [schedule_view(s) for s in scheduler.schedules.values()], "targets": targets,
+             "links": list(settings.link_targets), "scripts": schedules.list_scripts(settings.scripts_dir),
+             "scripts_dir": settings.scripts_dir, "schedules_file": settings.schedules_file,
+             "load_error": schedules_error, "default_user": schedules.DEFAULT_USER},
+        )
+
+    @app.get("/api/schedules/next", dependencies=[Depends(admin)])
+    async def schedules_next(cron: str = ""):
+        """The next runs of a crontab expression, for the form."""
+        try:
+            expr = schedules.check_cron(cron, "cron")
+        except ConfigError as exc:
+            return refuse(str(exc).removeprefix("cron: "))
+        return {"cron": expr, "next": [t.isoformat(sep=" ", timespec="minutes")
+                                       for t in schedules.next_runs(expr, 5)]}
+
+    @app.post("/api/schedules/save", dependencies=[Depends(admin)])
+    async def schedules_save(payload: dict = Body(...)):
+        nonlocal schedules_error
+        original = payload.get("original") or None
+        name = str(payload.get("name") or "").strip()
+        data = dict(payload.get("schedule") or {})
+        async with schedules_lock:
+            current = scheduler.schedules
+            if original is not None and original not in current:
+                return refuse(f"Schedule {original} no longer exists", status.HTTP_404_NOT_FOUND)
+            if name != original and name in current:
+                return refuse(f"A schedule named {name} already exists")
+            server, _, role = str(data.get("instance") or "").partition("/")
+            srv = settings.servers.get(server)
+            if srv is None or role not in srv.instances:
+                return refuse(f"No instance {data.get('instance')}")
+            instance = srv.instances[role]
+            copy = data.get("copy")
+            if copy:
+                if not instance.plugin.has_restore:
+                    return refuse(f"{instance.plugin.label} cannot restore a database: no copy from link")
+                # the choices as the instance's plugin asks them
+                try:
+                    copy["backup_options"] = {f.key: _field_value(f, (copy.get("backup_options") or {}).get(f.key))
+                                              for f in instance.plugin.backup_fields()}
+                    copy["restore_options"] = {
+                        f.key: _field_value(f, (copy.get("restore_options") or {}).get(f.key))
+                        for f in instance.plugin.restore_fields()}
+                except ActionRefused as exc:
+                    return refuse(str(exc))
+            try:
+                parsed = schedules.parse_schedule(name, data)
+            except (ConfigError, TypeError, ValueError, AttributeError) as exc:
+                return refuse(str(exc))
+            updated = {}
+            for key, sch in current.items():
+                # an edited schedule keeps its place in the list
+                updated[name if key == original else key] = parsed if key == original else sch
+            updated.setdefault(name, parsed)
+            try:
+                await asyncio.to_thread(schedules.save_schedules, settings.schedules_file, updated)
+            except OSError as exc:
+                return refuse(f"Cannot write {settings.schedules_file}: {exc}", 500)
+            if original and original != name:
+                scheduler.history.rename(original, name)
+            scheduler.schedules = updated
+            schedules_error = ""
+        return {"ok": True}
+
+    @app.post("/api/schedules/delete", dependencies=[Depends(admin)])
+    async def schedules_delete(payload: dict = Body(...)):
+        name = str(payload.get("name") or "")
+        async with schedules_lock:
+            if name not in scheduler.schedules:
+                return refuse(f"No schedule {name}", status.HTTP_404_NOT_FOUND)
+            updated = {k: v for k, v in scheduler.schedules.items() if k != name}
+            try:
+                await asyncio.to_thread(schedules.save_schedules, settings.schedules_file, updated)
+            except OSError as exc:
+                return refuse(f"Cannot write {settings.schedules_file}: {exc}", 500)
+            scheduler.schedules = updated
+            scheduler.history.keep_only(updated)
+        return {"ok": True}
+
+    @app.post("/api/schedules/{name}/run")
+    async def schedules_run(name: str, user: Principal = Depends(admin)):
+        """Run the schedule now, enabled or not."""
+        sch = scheduler.schedules.get(name)
+        if sch is None:
+            return refuse(f"No schedule {name}", status.HTTP_404_NOT_FOUND)
+        job = scheduler.fire(sch, f"manual: {user}")
+        if job is None:
+            return refuse(scheduler.history.data[name][0]["message"])
+        return {"job": job.id}
 
     # --- the caller's own password --------------------------------------
 

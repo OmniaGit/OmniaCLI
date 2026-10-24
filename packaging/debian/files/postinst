@@ -155,7 +155,8 @@ apply_service_user() {
     if [ "$(stat -c %U "$DATA")" != "$user" ]; then
         chown -R "$user:omniacli" "$DATA"
     fi
-    install -d -o "$user" -g omniacli -m 750 "$DATA" "$DATA/jobs" "$DATA/backups" "$DATA/logs"
+    # scripts: the Python scripts the scheduled actions may run (put there by root)
+    install -d -o "$user" -g omniacli -m 750 "$DATA" "$DATA/jobs" "$DATA/backups" "$DATA/logs" "$DATA/scripts"
 }
 
 case "$1" in

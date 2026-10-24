@@ -195,6 +195,14 @@ class OdooPlugin(ServicePlugin):
     def describe(self, instance: Instance) -> dict:
         return {"database": instance.options.database}
 
+    def script_runner(self, instance: Instance) -> tuple[Path, str | None, dict]:
+        # the venv's python, which imports odoo as click-odoo does
+        return instance.options.venv_bin / "python", instance.run_as, ops.odoo_env(instance)
+
+    def script_env(self, instance: Instance) -> dict:
+        return {"OMNIACLI_DATABASE": instance.options.database,
+                "OMNIACLI_ODOO_CONFIG": str(instance.options.odoo_config)}
+
     def disk_paths(self, instance: Instance) -> list[tuple[str, str]]:
         data_dir = _data_dir(instance.options.odoo_config)
         return [("filestore", data_dir)] if data_dir else []

@@ -149,6 +149,11 @@ prepared before Test & activate. The job's log opens in a new tab.
   lower of the link's role and the user's. Every shell opened and closed is
   in the access log, with who and for how long. It is the access of that
   system user, as SSH would give it: give the developer role accordingly.
+- **Claude** (same roles, a button on an instance with a **Claude folder**
+  in the server form): the same shell, opened in that folder, that runs
+  `claude` first (found by the login shell's `PATH`; Claude Code's installer
+  puts it in `~/.local/bin`) and stays open when it ends. Claude Code must be
+  installed and logged in for the user OmniaCLI runs as.
 - **Auto update**: per instance, every `interval_minutes` within `window`,
   OmniaCLI fetches every repository. When there are new commits it runs
   *git pull + restart* as an `auto` job.
@@ -431,7 +436,9 @@ Users page, and a CA file when its certificate is from the customer's own CA.
   downloads the zip and restores it here (see the table of actions). It needs
   the developer role there (for the link and for you) and here, the admin
   role for a production here. Stopping the job here does not stop a backup
-  already running there.
+  already running there. Without a Database from link, or with a link no
+  longer on the Links page, the button is shown disabled, and its tooltip
+  says what to set.
 
 ### Groups
 
@@ -447,6 +454,41 @@ The other instance must be reachable from yours: through an HTTPS reverse
 proxy, a VPN, or an SSH tunnel (`http://` is accepted for a tunnel or a VPN,
 but then the token travels in clear). Both instances need a version with
 links (the Test link button says so).
+
+### Scheduled actions
+
+The **Schedules** page (admins) runs steps on an instance at the times of a
+crontab expression of 5 fields (`0 2 * * *`: every day at 02:00, this
+computer's time; the form shows the next runs). Each step is optional, in
+this order:
+
+1. **git pull** of the instance's repositories. Alone it works as the auto
+   update: the modules are updated and the instance restarted only when
+   something new came. With the copy it does not restart: the restore does.
+2. **Copy from link**: a new backup of an instance of a linked OmniaCLI,
+   downloaded and restored here as the Copy from link button does, with the
+   same choices (without filestore, neutralize). *Backups kept here* (default
+   3) counts the zips of that link in the instance's backups, the new one
+   included: the older ones are deleted before the new backup starts. The
+   backups made there are not deleted (OmniaCLI has no route for that).
+3. **Python script**: a `.py` file of the scripts folder
+   (`/var/lib/omniacli/scripts` in the package, `scripts_dir` in the main
+   configuration), put there by hand; the web interface does not upload
+   scripts. It runs with the instance's python (Odoo: its venv's, as its
+   *Run as* user, so it can import odoo) in its first repository's folder,
+   with its arguments and `OMNIACLI_SERVER`, `OMNIACLI_ROLE`,
+   `OMNIACLI_REPOSITORIES` (JSON name: path), and for Odoo
+   `OMNIACLI_DATABASE` and `OMNIACLI_ODOO_CONFIG`. With *Run as*, sudo gets
+   the variables on its command line: the sudoers line needs `SETENV`. An
+   exit code other than 0 fails the job.
+
+*Acting as* names the jobs' author and the user the linked OmniaCLI is told
+acts there (empty: `omniacli`), with the developer role at most. A run that
+finds a job on its instance is skipped; runs missed while OmniaCLI was
+stopped are not made up. **Run now** runs the steps at once, enabled or not.
+Each schedule keeps the history of its last runs (30 by default). The
+schedules live in `schedules.yaml` next to the servers file
+(`schedules_file`), the history in `schedule_history.json` next to the jobs.
 
 ### Permissions
 

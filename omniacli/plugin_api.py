@@ -30,6 +30,7 @@ from __future__ import annotations
 import inspect
 import os
 import re
+import sys
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -103,7 +104,7 @@ class Check:
 FIELD_KINDS = ("text", "path", "number", "checkbox", "select")
 # the keys of an instance's mapping that the core reads: no field may take them
 CORE_KEYS = ("repositories", "restart", "log_file", "run_as", "from_link", "auto_update", "status",
-             "type")
+             "type", "claude_dir")
 ROLE_NAMES = ("user", "developer", "admin")
 
 
@@ -340,6 +341,17 @@ class ServicePlugin(ABC):
     def disk_paths(self, instance: Instance) -> list[tuple[str, str]]:
         """[(what, path)] the instance writes to, for the disks panel."""
         return []
+
+    def script_runner(self, instance: Instance) -> tuple[Path, str | None, dict]:
+        """How a scheduled action runs a Python script on the instance: the
+        python, the system user (None: OmniaCLI's own, no sudo) and the
+        environment. By default OmniaCLI's python, as OmniaCLI's user."""
+        return Path(sys.executable), None, base_env()
+
+    def script_env(self, instance: Instance) -> dict:
+        """OMNIACLI_* variables the script gets besides the core's
+        (OMNIACLI_SERVER, OMNIACLI_ROLE, OMNIACLI_REPOSITORIES)."""
+        return {}
 
     def self_test(self) -> list[str]:
         """Problems that keep the plugin from working here; any disables it."""

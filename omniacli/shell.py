@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import pwd
+import shlex
 import signal
 import struct
 import termios
@@ -35,6 +36,9 @@ SHELL_EXITED = 1000
 READ_SIZE = 65536
 # what the shell gets of OmniaCLI's environment (the rest is its own)
 _KEPT_ENV = ("PATH", "LANG", "LC_ALL", "TZ")
+# what the Claude button runs, found by the login shell's PATH (Claude
+# Code's installer puts it in ~/.local/bin)
+CLAUDE_COMMAND = "claude"
 
 
 def login_shell() -> tuple[str, str]:
@@ -61,21 +65,28 @@ class Shell:
         self.process = process
 
     @classmethod
-    async def start(cls, cwd: Path | None, cols: int = 80, rows: int = 24) -> "Shell":
+    async def start(cls, cwd: Path | None, cols: int = 80, rows: int = 24, command: str | None = None) -> "Shell":
+        """command: run first by the login shell (its profile sets PATH),
+        which is then left interactive; it needs cwd to exist."""
         shell, home = login_shell()
         user = pwd.getpwuid(os.getuid()).pw_name
         env = {k: os.environ[k] for k in _KEPT_ENV if k in os.environ}
         env.update({"HOME": home, "USER": user, "LOGNAME": user, "SHELL": shell, "TERM": "xterm-256color"})
         env.setdefault("PATH", "/usr/local/bin:/usr/bin:/bin")
         env.setdefault("LANG", "C.UTF-8")
+        if command and (cwd is None or not cwd.is_dir()):
+            raise FileNotFoundError(f"no folder {cwd}")
         folder = cwd if cwd is not None and cwd.is_dir() else Path(home)
         if not folder.is_dir():
             folder = Path("/")
         master, slave = os.openpty()
         try:
             _set_size(master, cols, rows)
+            args = [shell, "-l"]
+            if command:
+                args += ["-c", f"{command}; exec {shlex.quote(shell)} -l"]
             process = await asyncio.create_subprocess_exec(
-                "setsid", "-c", shell, "-l", stdin=slave, stdout=slave, stderr=slave,
+                "setsid", "-c", *args, stdin=slave, stdout=slave, stderr=slave,
                 cwd=str(folder), env=env)
         except BaseException:
             os.close(master)
@@ -129,9 +140,9 @@ class Shell:
             os.close(self.master)
 
 
-async def serve(websocket: WebSocket, cwd: Path | None) -> None:
+async def serve(websocket: WebSocket, cwd: Path | None, command: str | None = None) -> None:
     """Join an accepted WebSocket to a new shell until one of them ends."""
-    shell = await Shell.start(cwd)
+    shell = await Shell.start(cwd, command=command)
 
     async def output():
         while True:

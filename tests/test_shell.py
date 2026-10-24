@@ -178,3 +178,53 @@ def test_shell_through_a_link(env, tmp_path, customer_server):
         time.sleep(0.05)
     assert events[-1]["kind"] == "link" and events[-1]["name"] == "omnia"
     assert events[-1]["detail"] == "srv/test opened, acting for admin"
+
+
+async def test_shell_runs_a_command_then_stays(tmp_path):
+    shell = await Shell.start(tmp_path, command="echo RAN-IN-$(pwd)")
+    shell.write(b"echo STILL-HERE; exit\n")
+    out = b""
+    while True:
+        data = await asyncio.wait_for(shell.read(), 10)
+        if not data:
+            break
+        out += data
+    await shell.close()
+    assert f"RAN-IN-{tmp_path}".encode() in out and b"STILL-HERE" in out
+    with pytest.raises(FileNotFoundError):
+        await Shell.start(tmp_path / "nope", command="true")
+
+
+def test_claude_in_its_folder(env, tmp_path, monkeypatch):
+    from omniacli import shell as shell_module
+    from omniacli.config import parse_servers, server_to_dict
+    from omniacli.config import ConfigError
+
+    # not the real claude: a command that says where it runs
+    monkeypatch.setattr(shell_module, "CLAUDE_COMMAND", "echo CLAUDE-RAN-IN-$(pwd)")
+    settings = env["settings"]
+    folder = tmp_path / "claude-here"
+    folder.mkdir()
+    app = create_app(settings)
+    with TestClient(app) as c:
+        # no Claude folder: no button, no page, no shell
+        assert ">Claude</a>" not in c.get("/servers/srv?view=test", headers=browser(app, "dev")).text
+        assert c.get("/servers/srv/test/claude", headers=browser(app, "dev")).status_code == 404
+        with c.websocket_connect("/servers/srv/test/claude/ws", headers=browser(app, "dev")) as ws:
+            assert closed(ws) == (1008, "srv/test has no Claude folder")
+        settings.servers["srv"].instances["test"].claude_dir = folder
+        page = c.get("/servers/srv?view=test", headers=browser(app, "dev")).text
+        assert 'href="/servers/srv/test/claude"' in page and ">Claude</a>" in page
+        assert "runs <span class=\"mono\">echo CLAUDE-RAN" in c.get("/servers/srv/test/claude",
+                                                                   headers=browser(app, "dev")).text
+        assert c.get("/servers/srv/test/claude", headers=browser(app, "viewer")).status_code == 403
+        with c.websocket_connect("/servers/srv/test/claude/ws", headers=browser(app, "dev")) as ws:
+            out = run(ws, "echo AFTER=$((40+2))\n", "AFTER=42")
+            assert f"CLAUDE-RAN-IN-{folder}" in out
+    # the servers file keeps it; a relative path is refused
+    data = server_to_dict(settings.servers["srv"])
+    assert data["test"]["claude_dir"] == str(folder)
+    assert parse_servers({"srv": data})["srv"].test.claude_dir == folder
+    data["test"]["claude_dir"] = "relative/dir"
+    with pytest.raises(ConfigError, match="claude_dir"):
+        parse_servers({"srv": data})

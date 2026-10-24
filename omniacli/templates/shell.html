@@ -1,21 +1,22 @@
 {# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C · SPDX-License-Identifier: AGPL-3.0-or-later -#}
 {% extends "base.html" %}
-{% block title %}Shell {{ instance.key }} · OmniaCLI{% endblock %}
+{% set name = "Claude" if kind == "claude" else "Shell" %}
+{% block title %}{{ name }} {{ instance.key }} · OmniaCLI{% endblock %}
 {% block crumbs %}{% from "_crumbs.html" import crumbs with context %}
 {{ crumbs([("Dashboard", "/"), (instance.server, "/servers/" ~ instance.server),
            (instance.role | capitalize, "/servers/" ~ instance.server ~ "?view=" ~ instance.role),
-           ("Shell", None)]) }}
+           (name, None)]) }}
 {% endblock %}
 {% block content %}
 <link rel="stylesheet" href="{{ prefix }}/static/xterm.css">
-<h1>Shell {{ instance.key }} <span class="muted mono" style="font-size: 14px">{{ system_user }}@{{ folder or "~" }}</span></h1>
+<h1>{{ name }} {{ instance.key }} <span class="muted mono" style="font-size: 14px">{{ system_user }}@{{ folder or "~" }}</span></h1>
 <div class="panel">
   <div class="actions" style="margin: 0 0 10px">
     <span id="shell-state" class="muted">Connecting…</span>
     <button type="button" id="shell-again" hidden>Open a new shell</button>
   </div>
   <div id="terminal" style="height: 70vh; background: var(--code-bg); padding: 6px"></div>
-  <p class="muted" style="margin: 8px 0 0">A login shell ({{ shell }}) of the user running OmniaCLI, on this server: it ends when this page closes.</p>
+  <p class="muted" style="margin: 8px 0 0">A login shell ({{ shell }}) of the user running OmniaCLI, on this server{% if command %}, that runs <span class="mono">{{ command }}</span> first and stays open after it{% endif %}: it ends when this page closes.</p>
 </div>
 <script src="{{ prefix }}/static/xterm.js"></script>
 <script src="{{ prefix }}/static/addon-fit.js"></script>
@@ -30,7 +31,7 @@
   term.open(document.getElementById("terminal"));
   fit.fit();
   const url = (location.protocol === "https:" ? "wss://" : "ws://") + location.host
-    + "{{ prefix }}/servers/{{ instance.server }}/{{ instance.role }}/shell/ws";
+    + "{{ prefix }}/servers/{{ instance.server }}/{{ instance.role }}/{{ kind }}/ws";
   let socket = null;
   const send = (event) => { if (socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(event)); };
   const resize = () => send({type: "resize", cols: term.cols, rows: term.rows});

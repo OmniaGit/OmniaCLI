@@ -173,6 +173,27 @@ async def test_a_server_unknown_there(here, env):
     assert calls(env) == []
 
 
+async def test_the_button_disabled_says_how_to_enable_it(here):
+    def button(page):
+        return page.split("Copy from link</button>")[0].rsplit("<span", 1)[-1]
+
+    # a link that is gone: shown, disabled, no dialog for it
+    here.settings.link_targets.clear()
+    page = (await here.get("/servers/srv?view=test", headers=as_user("admin"))).text
+    assert "data-from-link=" not in page
+    assert "No link cliente here: add it on the Links page" in button(page) and "disabled" in button(page)
+    # no Database from link, and no link at all
+    here.settings.servers["srv"].instances["test"].from_link = None
+    page = (await here.get("/servers/srv?view=test", headers=as_user("admin"))).text
+    assert "add a link on the Links page, then set &#39;Database from link&#39;" in button(page)
+    # no Database from link, links there
+    here.settings.link_targets["cliente"] = object()
+    page = (await here.get("/servers/srv?view=test", headers=as_user("admin"))).text
+    assert "No database from a link: set &#39;Database from link&#39; in the server&#39;s form" in button(page)
+    # without the role it needs, not shown
+    assert "Copy from link" not in (await here.get("/servers/srv?view=test", headers=as_user("viewer"))).text
+
+
 async def test_the_form_offers_the_links(here):
     page = (await here.get("/config/srv/edit", headers=as_user("admin"))).text
     assert '"links": ["cliente"]' in page and 'data-k="from_link.link"' in page

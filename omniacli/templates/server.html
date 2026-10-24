@@ -96,7 +96,10 @@
       <button type="button" {{ off }} data-backup="{{ base }}/backup" data-download="0" data-key="{{ inst.key }}">{{ icon("backup") }}Backup</button>
       <button type="button" {{ off }} data-backup="{{ base }}/backup" data-download="1" data-key="{{ inst.key }}" title="Back up, then download the zip">{{ icon("download") }}Backup + download</button>
       {% endif %}
-      {% if from_link[inst.key] %}
+      {% if from_link[inst.key] and from_link[inst.key].disabled %}
+      {# the tooltip on the span around the disabled button #}
+      <span title="{{ from_link[inst.key].disabled }}"><button type="button" disabled>{{ icon("download") }}Copy from link</button></span>
+      {% elif from_link[inst.key] %}
       <button type="button" {{ off }} data-from-link='{{ from_link[inst.key] | tojson }}' data-key="{{ inst.key }}"
               title="Back up {{ from_link[inst.key].label }}, download it and restore it into {{ inst.key }}">{{ icon("download") }}Copy from link</button>
       {% endif %}
@@ -107,6 +110,9 @@
       {# a login shell on the server, in a new tab #}
       <div class="action-group">
       <a class="button" href="{{ base }}/shell" target="_blank" rel="noopener" title="A shell of the user running OmniaCLI, in {{ inst.repositories[0].path if inst.repositories else 'its home' }}">{{ icon("terminal") }}Shell</a>
+      {% if inst.claude_dir %}
+      <a class="button" href="{{ base }}/claude" target="_blank" rel="noopener" title="A shell of the user running OmniaCLI in {{ inst.claude_dir }}, running claude">{{ icon("terminal") }}Claude</a>
+      {% endif %}
       </div>
       {% endif %}
       {# the plugin's own groups #}

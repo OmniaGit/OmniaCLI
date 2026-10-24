@@ -113,6 +113,7 @@ pre.console .WARNING { color: #f0c060; }
 .form-grid { display: grid; grid-template-columns: max-content 1fr; gap: 8px 12px; align-items: center; }
 .form-grid label { color: var(--muted); }
 .with-button { display: flex; flex-wrap: wrap; gap: 8px; }
+.with-button.one-line { flex-wrap: nowrap; } .with-button.one-line > input { flex: 1; min-width: 0; } .with-button.one-line > button { flex-shrink: 0; }
 .pip-buttons { display: flex; gap: 8px; } .pip-buttons[hidden] { display: none; }
 .conf-notes { margin-top: 10px; font-size: 13px; } .conf-notes p { margin: 2px 0; }
 input[type=text], input[type=number], input[type=search], select { font: inherit; padding: 5px 8px; width: 100%;
@@ -323,6 +324,7 @@ summary { cursor: pointer; color: var(--muted); }
   {% if is_admin %}<a href="{{ prefix }}/config">Servers</a>
   <a href="{{ prefix }}/users">Users</a>
   <a href="{{ prefix }}/links">Links</a>
+  <a href="{{ prefix }}/schedules">Schedules</a>
   <a href="{{ prefix }}/plugins">Plugins</a>{% endif %}
   {% if can_act %}<a href="{{ prefix }}/help">Help</a>{% endif %}
   <span class="head-end">

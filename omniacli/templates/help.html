@@ -231,6 +231,9 @@ fields.</p>
     <span class="mono">/opt/odoo/venvs/odoo18/bin</span>. OmniaCLI runs <span class="mono">click-odoo-update</span> and
     <span class="mono">click-odoo-backupdb</span> from it; <strong>pip requirements</strong> and <strong>pip
     click-odoo</strong> install into it.</td></tr>
+  <tr><td>Claude folder</td><td>optional: a folder of this computer. The instance's page then has a <strong>Claude</strong>
+    button: a shell of the user running OmniaCLI in that folder, that runs <span class="mono">claude</span> first and
+    stays open after it. Claude Code must be installed and logged in for that user.</td></tr>
   <tr><td>Run as</td><td>the system user of the Odoo service (often <span class="mono">odoo</span>). The venv's
     programs (update, backup, pip, checks) run as that user with <span class="mono">sudo -n -u</span>, so they reach the
     database, the filestore and the venv as Odoo does. Empty: as the user running OmniaCLI. Git always runs as
@@ -239,7 +242,8 @@ fields.</p>
     (for example <span class="mono">customer</span>, <span class="mono">erp</span>, production). The instance's page then has
     <strong>Copy from link</strong>: a backup made there (new or already there) is downloaded into this instance's backups
     and restored into its database, which is dropped first. A production needs the admin role and its database name
-    typed.</td></tr>
+    typed. Without a Database from link, or with a link no longer on the Links page, the button is there but
+    disabled, and its tooltip says what to set.</td></tr>
   <tr><td>HTTP port</td><td>restart type <em>process</em> only: the port Odoo listens on, passed as
     <span class="mono">--http-port</span> (<span class="mono">--xmlrpc-port</span> before Odoo 11), which wins over the
     config. Empty: the port of the config. It applies at the next Start or Restart.</td></tr>

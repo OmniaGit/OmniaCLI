@@ -114,6 +114,9 @@ class Instance:
     # the base URL users open the instance at (its domain name); None: this
     # computer's localhost at the port the plugin knows
     domain: str | None = None
+    # the folder the Claude button of the server page opens a shell in, to
+    # run claude there; None: no button
+    claude_dir: Path | None = None
 
     @property
     def type(self) -> str:
@@ -243,6 +246,9 @@ class Settings:
     # how the Dashboard groups this instance's and the links' servers
     groups_file: Path | None = None
     groups: list[ServerGroup] = field(default_factory=list)
+    # the scheduled actions (schedules.py) and the scripts they may run
+    schedules_file: Path | None = None
+    scripts_dir: Path | None = None
     token_roles: dict[str, str] = field(default_factory=dict)
     fixed: Access = field(default_factory=Access)
     web: Access = field(default_factory=Access)
@@ -356,6 +362,9 @@ def _parse_instance(server: str, role: str, data: dict, logs_dir: Path | None, p
             raise ConfigError(f"{where}.run_as: not available with restart type process")
     from_link = _parse_from_link(data.get("from_link"), f"{where}.from_link")
     domain = _parse_domain(data.get("domain"), f"{where}.domain")
+    claude_dir = str(data.get("claude_dir") or "").strip() or None
+    if claude_dir is not None and not claude_dir.startswith("/"):
+        raise ConfigError(f"{where}.claude_dir: {claude_dir!r} is not an absolute path")
     options = plugin.parse_options(data, where, restart_type)
     return Instance(
         server=server,
@@ -373,6 +382,7 @@ def _parse_instance(server: str, role: str, data: dict, logs_dir: Path | None, p
         run_as=run_as,
         from_link=from_link,
         domain=domain,
+        claude_dir=Path(claude_dir) if claude_dir else None,
     )
 
 
@@ -490,6 +500,8 @@ def instance_to_dict(instance: Instance) -> dict:
         data["run_as"] = instance.run_as
     if instance.domain is not None:
         data["domain"] = instance.domain
+    if instance.claude_dir is not None:
+        data["claude_dir"] = str(instance.claude_dir)
     if instance.from_link is not None:
         src = instance.from_link
         data["from_link"] = {"link": src.link, "server": src.server, "role": src.role}
@@ -740,6 +752,12 @@ def parse_settings(data: dict, base_dir: Path = Path(".")) -> Settings:
     groups_file = Path(data.get("groups_file") or servers_file.parent / "groups.yaml")
     if not groups_file.is_absolute():
         groups_file = base_dir / groups_file
+    schedules_file = Path(data.get("schedules_file") or servers_file.parent / "schedules.yaml")
+    if not schedules_file.is_absolute():
+        schedules_file = base_dir / schedules_file
+    scripts_dir = Path(data.get("scripts_dir") or servers_file.parent / "scripts")
+    if not scripts_dir.is_absolute():
+        scripts_dir = base_dir / scripts_dir
     jobs_dir = Path(_require(data, "jobs_dir", "root"))
     settings = Settings(
         users={},
@@ -752,6 +770,8 @@ def parse_settings(data: dict, base_dir: Path = Path(".")) -> Settings:
         link_targets=load_links(links_file),
         groups_file=groups_file,
         groups=load_groups(groups_file),
+        schedules_file=schedules_file,
+        scripts_dir=scripts_dir,
         fixed=fixed,
     )
     settings.set_web_access(load_access(users_file))

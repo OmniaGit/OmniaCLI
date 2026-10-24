@@ -1,0 +1,254 @@
+{# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C · SPDX-License-Identifier: AGPL-3.0-or-later -#}
+{% extends "base.html" %}
+{% block title %}Schedules · OmniaCLI{% endblock %}
+{% block crumbs %}{% from "_crumbs.html" import crumbs with context %}
+{{ crumbs([("Dashboard", "/"), ("Schedules", None)]) }}
+{% endblock %}
+{% block content %}
+<h1>Schedules</h1>
+<p class="muted">Actions run on an instance at the times of a crontab expression (minute hour day month weekday,
+this computer's time): a git pull of its repositories, a copy of a linked instance's database (as
+<strong>Copy from link</strong>), a Python script of <span class="mono">{{ scripts_dir }}</span>, each step optional,
+in this order. A run that finds a job on the instance is skipped; runs missed while OmniaCLI is stopped are not made up.
+Saved in <span class="mono">{{ schedules_file }}</span>.</p>
+{% if load_error %}<div class="banner">{{ load_error }}: OmniaCLI runs no schedule until it is saved again.</div>{% endif %}
+<div id="error" class="banner" hidden></div>
+
+<div class="panel scroll">
+<table>
+  <tr><th>Name</th><th>Instance</th><th>When</th><th>Steps</th><th>As</th><th>Last run</th><th></th></tr>
+  {% for s in schedules %}
+  {% set last = s.runs[0] if s.runs else None %}
+  <tr>
+    <td><strong>{{ s.name }}</strong>{% if not s.data.enabled %} <span class="badge draft">off</span>{% endif %}</td>
+    <td><a href="{{ prefix }}/servers/{{ s.data.instance.split('/')[0] }}?view={{ s.data.instance.split('/')[1] }}">{{ s.data.instance }}</a>
+      {% if not s.live %}<span class="error" title="The server is a draft or no longer exists">not live</span>{% endif %}</td>
+    <td><span class="mono">{{ s.data.cron }}</span>{% if s.next %}<br><span class="muted" title="Next runs: {{ s.next | join(', ') }}">next {{ s.next[0] }}</span>{% endif %}</td>
+    <td>{{ s.steps | join(", ") }}</td>
+    <td>{{ s.user }}</td>
+    <td>{% if last %}<span class="status {{ last.status }}">{{ last.status }}</span>
+      {% if last.job %}<a href="{{ prefix }}/jobs/{{ last.job }}">{{ last.time | replace("T", " ") }}</a>{% else %}{{ last.time | replace("T", " ") }}{% endif %}
+      {% if last.message %}<br><span class="muted">{{ last.message }}</span>{% endif %}{% else %}<span class="muted">never</span>{% endif %}</td>
+    <td><span class="run-buttons">
+      <button type="button" data-run="{{ s.name }}" title="Run the steps now, enabled or not">Run now</button>
+      <button type="button" data-edit="{{ s.name }}">Edit</button>
+      <button type="button" class="danger" data-delete="{{ s.name }}">Delete</button></span></td>
+  </tr>
+  {% if s.runs %}
+  <tr><td colspan="7" style="padding-top: 0">
+    <details><summary class="muted">History: the last {{ s.runs | length }} of {{ s.data.history }}</summary>
+    <table>
+      <tr><th>Time</th><th>Trigger</th><th>Status</th><th>Job</th><th>Message</th></tr>
+      {% for r in s.runs %}
+      <tr><td class="mono">{{ r.time | replace("T", " ") }}</td><td>{{ r.trigger }}</td><td class="status {{ r.status }}">{{ r.status }}</td>
+        <td>{% if r.job %}<a href="{{ prefix }}/jobs/{{ r.job }}">{{ r.job }}</a>{% endif %}</td><td class="error">{{ r.message }}</td></tr>
+      {% endfor %}
+    </table></details>
+  </td></tr>
+  {% endif %}
+  {% else %}
+  <tr><td colspan="7" class="muted">No schedules yet.</td></tr>
+  {% endfor %}
+</table>
+</div>
+<div class="actions"><button type="button" id="new">New schedule</button></div>
+
+<form id="form" class="panel" hidden style="margin-top: 16px">
+  <h2 id="form-title"></h2>
+  <div class="form-grid">
+    <label for="f-name">Name</label><input type="text" id="f-name" placeholder="letters, digits and . _ -">
+    <label for="f-enabled">Enabled</label><input type="checkbox" id="f-enabled">
+    <label for="f-instance">Instance</label>
+    <select id="f-instance">{% for key, t in targets.items() %}<option value="{{ key }}">{{ key }}{{ "" if t.live else " (draft)" }}</option>{% endfor %}</select>
+    <label for="f-cron">When (crontab)</label>
+    <div><input type="text" id="f-cron" class="mono" placeholder="0 2 * * *  (every day at 02:00)">
+      <div class="muted" id="f-next" style="margin-top: 4px"></div></div>
+    <label for="f-user">Acting as</label>
+    <input type="text" id="f-user" placeholder="empty: {{ default_user }}" title="The name in the jobs, and the user the linked OmniaCLI is told acts there">
+    <label for="f-history">History</label>
+    <input type="number" id="f-history" min="1" title="How many runs the history keeps">
+  </div>
+
+  <h3>1. Git pull</h3>
+  <label><input type="checkbox" id="f-pull"> Pull the instance's repositories</label>
+  <p class="muted" style="margin: 4px 0 0">Alone: the modules are updated and the instance restarted only when something new came (as the auto update).
+  With the copy: no restart, the restore that follows updates the modules and starts it.</p>
+
+  <h3>2. Copy from link</h3>
+  <label id="copy-row"><input type="checkbox" id="f-copy"> Back up an instance of a linked OmniaCLI, download it and restore it here</label>
+  <p class="muted" id="copy-off" hidden style="margin: 4px 0 0"></p>
+  <div id="copy-box" class="form-grid" style="margin-top: 8px">
+    <label for="f-link">Link</label>
+    <select id="f-link">{% for l in links %}<option value="{{ l }}">{{ l }}</option>{% endfor %}</select>
+    <label for="f-src-server">Server there</label><input type="text" id="f-src-server">
+    <label for="f-src-role">Its role</label>
+    <select id="f-src-role"><option value="production">production</option><option value="test">test</option></select>
+    <label>Backup there</label><div id="f-backup-options"></div>
+    <label>Restore here</label><div id="f-restore-options"></div>
+    <label for="f-keep">Backups kept here</label>
+    <input type="number" id="f-keep" min="1" title="The zips of this link in the instance's backups, the new one included: the older ones are deleted before the new backup starts">
+  </div>
+
+  <h3>3. Python script</h3>
+  <label><input type="checkbox" id="f-script" {{ "" if scripts else "disabled" }}> Run a script of <span class="mono">{{ scripts_dir }}</span></label>
+  {% if not scripts %}<p class="muted" style="margin: 4px 0 0">There is no .py file in that folder: put one there to choose it.</p>{% endif %}
+  <div id="script-box" class="form-grid" style="margin-top: 8px">
+    <label for="f-script-name">Script</label>
+    <select id="f-script-name">{% for name in scripts %}<option value="{{ name }}">{{ name }}</option>{% endfor %}</select>
+    <label for="f-args">Arguments</label><input type="text" id="f-args" class="mono" placeholder="as on a command line">
+  </div>
+  <p class="muted" style="margin: 4px 0 0">Run with the instance's python (Odoo: its venv's, as its run as user), in its first repository's folder,
+  with OMNIACLI_SERVER, OMNIACLI_ROLE, OMNIACLI_REPOSITORIES (JSON name: path) and, for Odoo, OMNIACLI_DATABASE and OMNIACLI_ODOO_CONFIG.
+  Its output goes to the job; an exit code other than 0 fails it.</p>
+
+  <div class="actions">
+    <button type="submit">Save</button>
+    <button type="button" id="cancel">Cancel</button>
+  </div>
+</form>
+
+<script>
+(function () {
+  const SCHEDULES = {{ schedules | map(attribute="data") | list | tojson }};
+  const NAMES = {{ schedules | map(attribute="name") | list | tojson }};
+  const TARGETS = {{ targets | tojson }};
+  const LINKS = {{ links | tojson }};
+  const prefix = "{{ prefix }}";
+  const $ = (id) => document.getElementById(id);
+  const form = $("form"), errorBox = $("error");
+  let original = null;
+
+  function showError(message) {
+    errorBox.textContent = message; errorBox.hidden = !message;
+    if (message) window.scrollTo(0, 0);
+  }
+  async function post(url, body) {
+    const resp = await fetch(prefix + url, {method: "POST", headers: {"Content-Type": "application/json"},
+                                            body: JSON.stringify(body || {})});
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || data.detail || ("Error " + resp.status));
+    return data;
+  }
+
+  // the backup and restore choices of the chosen instance's type
+  function optionBoxes(holder, fields, values) {
+    holder.replaceChildren();
+    for (const f of fields) {
+      const label = document.createElement("label"), input = document.createElement("input");
+      label.style.display = "block"; label.title = f.help || "";
+      input.dataset.key = f.key;
+      if (f.kind === "checkbox") {
+        input.type = "checkbox";
+        input.checked = values && f.key in values ? !!values[f.key] : !!f.default;
+        label.append(input, " " + f.label);
+      } else {
+        input.type = "text"; input.placeholder = f.placeholder || "";
+        input.value = values && f.key in values ? (values[f.key] ?? "") : (f.default ?? "");
+        label.append(f.label + " ", input);
+      }
+      holder.appendChild(label);
+    }
+    if (!fields.length) holder.innerHTML = '<span class="muted">none</span>';
+  }
+  function optionValues(holder) {
+    const out = {};
+    for (const input of holder.querySelectorAll("[data-key]")) {
+      out[input.dataset.key] = input.type === "checkbox" ? input.checked : input.value.trim();
+    }
+    return out;
+  }
+
+  function sync() {
+    const target = TARGETS[$("f-instance").value] || {};
+    const canCopy = target.has_restore && LINKS.length > 0;
+    $("f-copy").disabled = !canCopy;
+    if (!canCopy) $("f-copy").checked = false;
+    $("copy-off").hidden = canCopy;
+    $("copy-off").textContent = !target.has_restore ? "This instance's type cannot restore a database."
+      : "No link here: add one on the Links page.";
+    $("copy-box").hidden = !$("f-copy").checked;
+    $("script-box").hidden = !$("f-script").checked;
+  }
+  function fillCopy(copy) {
+    const target = TARGETS[$("f-instance").value] || {};
+    const src = copy || target.from_link || {};
+    $("f-link").value = LINKS.includes(src.link) ? src.link : (LINKS[0] || "");
+    $("f-src-server").value = src.server || "";
+    $("f-src-role").value = src.role || "production";
+    $("f-keep").value = copy ? copy.keep_backups : 3;
+    optionBoxes($("f-backup-options"), target.backup_fields || [], copy && copy.backup_options);
+    optionBoxes($("f-restore-options"), target.restore_fields || [], copy && copy.restore_options);
+  }
+
+  let timer = null;
+  async function preview() {
+    const cron = $("f-cron").value.trim(), out = $("f-next");
+    if (!cron) { out.textContent = ""; return; }
+    const resp = await fetch(prefix + "/api/schedules/next?cron=" + encodeURIComponent(cron));
+    const data = await resp.json().catch(() => ({}));
+    out.textContent = resp.ok ? "Next: " + data.next.join(", ") : (data.error || "");
+    out.classList.toggle("error", !resp.ok);
+  }
+  $("f-cron").addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(preview, 300); });
+
+  function open(name) {
+    const s = name === null ? null : SCHEDULES[NAMES.indexOf(name)];
+    original = name;
+    $("form-title").textContent = s ? `Edit ${name}` : "New schedule";
+    $("f-name").value = name || "";
+    $("f-enabled").checked = s ? s.enabled : true;
+    $("f-instance").value = s ? s.instance : $("f-instance").options[0]?.value || "";
+    $("f-cron").value = s ? s.cron : "";
+    $("f-user").value = s && s.user || "";
+    $("f-history").value = s ? s.history : 30;
+    $("f-pull").checked = s ? !!s.pull : true;
+    $("f-copy").checked = !!(s && s.copy);
+    fillCopy(s && s.copy);
+    $("f-script").checked = !!(s && s.script);
+    if (s && s.script) { $("f-script-name").value = s.script.name; $("f-args").value = s.script.args || ""; }
+    else $("f-args").value = "";
+    sync(); preview(); showError("");
+    form.hidden = false; form.scrollIntoView({behavior: "smooth"});
+  }
+  $("new").onclick = () => open(null);
+  $("cancel").onclick = () => { form.hidden = true; };
+  $("f-instance").onchange = () => { fillCopy(null); sync(); };
+  $("f-copy").onchange = sync;
+  $("f-script").onchange = sync;
+  for (const b of document.querySelectorAll("[data-edit]")) b.onclick = () => open(b.dataset.edit);
+
+  form.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const schedule = {
+      instance: $("f-instance").value, cron: $("f-cron").value.trim(), enabled: $("f-enabled").checked,
+      user: $("f-user").value.trim(), pull: $("f-pull").checked, history: $("f-history").value,
+    };
+    if ($("f-copy").checked) schedule.copy = {
+      link: $("f-link").value, server: $("f-src-server").value.trim(), role: $("f-src-role").value,
+      backup_options: optionValues($("f-backup-options")), restore_options: optionValues($("f-restore-options")),
+      keep_backups: $("f-keep").value,
+    };
+    if ($("f-script").checked) schedule.script = {name: $("f-script-name").value, args: $("f-args").value.trim()};
+    try {
+      await post("/api/schedules/save", {original, name: $("f-name").value.trim(), schedule});
+      location.reload();
+    } catch (err) { showError(err.message); }
+  });
+  for (const b of document.querySelectorAll("[data-delete]")) {
+    b.onclick = async () => {
+      if (!confirm(`Delete the schedule ${b.dataset.delete} and its history?`)) return;
+      try { await post("/api/schedules/delete", {name: b.dataset.delete}); location.reload(); }
+      catch (err) { showError(err.message); }
+    };
+  }
+  for (const b of document.querySelectorAll("[data-run]")) {
+    b.onclick = async () => {
+      if (!confirm(`Run ${b.dataset.run} now?`)) return;
+      try { const data = await post(`/api/schedules/${encodeURIComponent(b.dataset.run)}/run`);
+            location.href = `${prefix}/jobs/${data.job}`; }
+      catch (err) { showError(err.message); }
+    };
+  }
+})();
+</script>
+{% endblock %}

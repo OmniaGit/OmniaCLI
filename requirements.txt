@@ -10,5 +10,7 @@ Jinja2==3.1.6
 PyYAML==6.0.3
 # links to other OmniaCLI instances
 httpx==0.28.1
+# the crontab expressions of the scheduled actions
+croniter==6.2.4
 # the MCP interface (/mcp), Python 3.10 or newer
 mcp==2.3.0; python_version >= '3.10'
