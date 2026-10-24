@@ -18,9 +18,13 @@ script, or an Odoo that OmniaCLI starts itself.
   into production, after a backup.
 - **Backups** of database and filestore, to download; **copy of production
   into test**, neutralized.
+- **Schedules**: at the times of a crontab expression, a git pull, a copy
+  of a linked instance's database and a Python script on an instance.
 - **Jobs** shown live; an administrator stops one that hangs.
 - **Logs** in the browser, with an "errors only" filter.
 - **Links**: operate the OmniaCLI of other machines from your own.
+- **Shell** of the server in the browser, and **Claude Code** opened in an
+  instance's folder.
 - **MCP**: AI clients (Claude Code and others) read, update test instances
   and back them up through a token.
 - Users with roles (user, developer, admin), an access log, and a Help page.
@@ -312,10 +316,12 @@ once per database, when you know the modules are up to date:
 
 ## Configure
 
-The configuration has five files:
+The configuration has six files and a folder:
 
 - the **main config** (`omniacli.yaml`): the users set by hand, `backup_dir`,
-  `jobs_dir`, `servers_file` and `users_file`. It is edited by hand and the
+  `jobs_dir`, `servers_file` and, when not in their default place, the paths
+  of the files below (`users_file`, `links_file`, `groups_file`,
+  `schedules_file`) and of the scripts folder (`scripts_dir`). It is edited by hand and the
   web interface never writes it.
 - the **users file** (`users_file`, by default `users.yaml` next to the
   servers file): the users, links and MCP tokens managed from the web
@@ -328,6 +334,12 @@ The configuration has five files:
   owner only.
 - the **groups file** (`groups_file`, by default `groups.yaml` next to the
   servers file): the headings of the Dashboard (**Edit groups**, admins).
+- the **schedules file** (`schedules_file`, by default `schedules.yaml` next
+  to the servers file): the scheduled actions (**Schedules** page, admins;
+  see Scheduled actions).
+- the **scripts folder** (`scripts_dir`, by default `scripts` next to the
+  servers file, `/var/lib/omniacli/scripts` in the package): the Python
+  scripts a scheduled action may run, put there by hand.
 - the **servers file** (`servers_file`, see `servers.example.yaml`): the
   servers and their instances. It is edited from the web interface
   (**Servers** page: new, edit, clone, delete), so the user running
@@ -353,8 +365,8 @@ Every user has a role:
 | Role | May |
 |---|---|
 | `user` | watch: servers, load, logs, jobs, the backup list; and restart, start and stop Odoo |
-| `developer` | also act on the servers: pull, update, backup and the download of a backup, pip, the shell |
-| `admin` | everything: also the configuration pages and the merge of test into production |
+| `developer` | also act on the servers: pull, update, backup and the download of a backup, pip, the shell, Claude |
+| `admin` | everything: also the configuration pages (servers, users, links, schedules) and the merge of test into production |
 
 ```yaml
 auth:
@@ -812,6 +824,11 @@ A plugin may also give:
 - **`restore()`** and **`restore_fields()`**: load a backup zip into an
   instance, with the choices asked first (Odoo: neutralize). The core's
   *Copy from link* is offered only for a type that has it.
+- **`script_runner()`** and **`script_env()`**: how a scheduled action runs a
+  Python script on an instance (the python, the system user, the
+  environment) and the `OMNIACLI_*` variables it adds (Odoo: the venv's
+  python as `run_as`, `OMNIACLI_DATABASE`, `OMNIACLI_ODOO_CONFIG`). Without
+  them: OmniaCLI's own python, as OmniaCLI's user.
 
 Two plugins are built in: **generic** (git repositories and a systemd or
 init.d service, nothing else: what an install without plugins has) and

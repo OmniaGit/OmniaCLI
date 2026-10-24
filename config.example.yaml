@@ -23,3 +23,7 @@ servers_file: /var/lib/omniacli/servers.yaml
 # users_file: /var/lib/omniacli/users.yaml
 # links_file: /var/lib/omniacli/links.yaml
 # groups_file: /var/lib/omniacli/groups.yaml
+# schedules_file: /var/lib/omniacli/schedules.yaml
+# The Python scripts the scheduled actions may run, put there by hand; by
+# default next to the servers file:
+# scripts_dir: /var/lib/omniacli/scripts
