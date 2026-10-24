@@ -1643,25 +1643,43 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         """Where the shell of an instance starts: its first repository."""
         return instance.repositories[0].path if instance.repositories else None
 
-    # the shells of an instance: kind -> (where it starts, what it runs first)
-    shell_kinds = {
-        "shell": (shell_folder, lambda: None),
+    def claude_run(instance: Instance):
         # Claude Code in the instance's Claude folder (no folder: no Claude)
-        "claude": (lambda instance: instance.claude_dir, lambda: shell.CLAUDE_COMMAND),
+        if instance.claude_dir is None:
+            return f"{instance.key} has no Claude folder"
+        return shell.CLAUDE_COMMAND, {}, True
+
+    def psql_run(instance: Instance):
+        # the plugin's database client; the page ends with it
+        found = instance.plugin.db_shell(instance)
+        if found is None:
+            return f"{instance.key} has no database shell"
+        command, env = found
+        return command, env, False
+
+    # the shells of an instance: kind -> (where it starts, what it runs:
+    # (command first, its environment, the shell stays after it), or why
+    # the instance has none of that kind)
+    shell_kinds = {
+        "shell": (shell_folder, lambda instance: (None, {}, True)),
+        "claude": (lambda instance: instance.claude_dir, claude_run),
+        "psql": (shell_folder, psql_run),
     }
 
     def shell_instance(server: str, role: str, kind: str) -> Instance:
         active_server(server)
         instance = get_instance(server, role)
-        if kind == "claude" and instance.claude_dir is None:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, f"{instance.key} has no Claude folder")
+        run = shell_kinds[kind][1](instance)
+        if isinstance(run, str):
+            raise HTTPException(status.HTTP_404_NOT_FOUND, run)
         return instance
 
     async def shell_page(request: Request, server: str, role: str, kind: str):
         instance = shell_instance(server, role, kind)
-        folder, command = shell_kinds[kind]
+        folder, run = shell_kinds[kind]
+        command, _, stay = run(instance)
         return _TEMPLATES.TemplateResponse(request, "shell.html", {
-            "instance": instance, "folder": folder(instance), "kind": kind, "command": command(),
+            "instance": instance, "folder": folder(instance), "kind": kind, "command": command, "stay": stay,
             "system_user": pwd.getpwuid(os.getuid()).pw_name, "shell": shell.login_shell()[0],
             "font_size": settings.options.shell_font_size, "font_sizes": SHELL_FONT_SIZES})
 
@@ -1678,18 +1696,19 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         if instance is None:
             await websocket.close(1008, f"No instance {server}/{role}")
             return
-        folder, command = shell_kinds[kind]
-        command = command()
-        if command and folder(instance) is None:
-            await websocket.close(1008, f"{instance.key} has no Claude folder")
+        folder, run = shell_kinds[kind]
+        run = run(instance)
+        if isinstance(run, str):
+            await websocket.close(1008, run)
             return
+        command, env, stay = run
         ip = websocket.client.host if websocket.client else ""
         who = f", acting for {me.on_behalf}" if me.on_behalf else ""
         what = f"{instance.key} {kind}" if command else instance.key
         access_log.record("shell", me.kind, me.name, ip, f"{what} opened{who}")
         opened = time.monotonic()
         try:
-            await shell.serve(websocket, folder(instance), command)
+            await shell.serve(websocket, folder(instance), command, env, stay)
         except OSError as exc:
             _logger.warning("shell of %s: %s", instance.key, exc)
             with contextlib.suppress(RuntimeError):

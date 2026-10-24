@@ -171,6 +171,14 @@ prepared before Test & activate. The job's log opens in a new tab.
   `claude` first (found by the login shell's `PATH`; Claude Code's installer
   puts it in `~/.local/bin`) and stays open when it ends. Claude Code must be
   installed and logged in for the user OmniaCLI runs as.
+- **psql** (same roles, Odoo instances): the same page running `psql` on
+  the instance's database, connected as Odoo connects (`db_host`,
+  `db_port`, `db_user`, `db_password` of its Odoo config, given in the
+  `PG*` environment, not on the command line); it ends when psql ends.
+  `psql` must be installed (Debian: `postgresql-client`). It runs as the
+  user OmniaCLI runs as: an Odoo config without `db_host` connects through
+  the local socket, which PostgreSQL's `peer` method refuses to another
+  system user (an instance with `run_as`).
 - **Auto update**: per instance, every `interval_minutes` within `window`,
   OmniaCLI fetches every repository. When there are new commits it runs
   *git pull + restart* as an `auto` job.
@@ -842,6 +850,8 @@ A plugin may also give:
   environment) and the `OMNIACLI_*` variables it adds (Odoo: the venv's
   python as `run_as`, `OMNIACLI_DATABASE`, `OMNIACLI_ODOO_CONFIG`). Without
   them: OmniaCLI's own python, as OmniaCLI's user.
+- **`db_shell()`**: the database client of the psql page (the command and
+  its environment); without it, no psql button.
 
 Two plugins are built in: **generic** (git repositories and a systemd or
 init.d service, nothing else: what an install without plugins has) and

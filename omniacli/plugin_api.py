@@ -342,6 +342,12 @@ class ServicePlugin(ABC):
         """[(what, path)] the instance writes to, for the disks panel."""
         return []
 
+    def db_shell(self, instance: Instance) -> tuple[str, dict] | None:
+        """The database client of the instance's psql page: the command the
+        login shell runs (found by its PATH) and the environment it gets.
+        None: the instance has no database shell."""
+        return None
+
     def script_runner(self, instance: Instance) -> tuple[Path, str | None, dict]:
         """How a scheduled action runs a Python script on the instance: the
         python, the system user (None: OmniaCLI's own, no sudo) and the

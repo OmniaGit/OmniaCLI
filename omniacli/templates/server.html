@@ -113,6 +113,9 @@
       {% if inst.claude_dir %}
       <a class="button" href="{{ base }}/claude" target="_blank" rel="noopener" title="A shell of the user running OmniaCLI in {{ inst.claude_dir }}, running claude">{{ icon("terminal") }}Claude</a>
       {% endif %}
+      {% if inst.plugin.db_shell(inst) %}
+      <a class="button" href="{{ base }}/psql" target="_blank" rel="noopener" title="psql on {{ inst.plugin.describe(inst).database or 'the database' }}, as the instance connects to it">{{ icon("terminal") }}psql</a>
+      {% endif %}
       </div>
       {% endif %}
       {# the plugin's own groups #}

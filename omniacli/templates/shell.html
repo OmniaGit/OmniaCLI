@@ -1,6 +1,6 @@
 {# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C · SPDX-License-Identifier: AGPL-3.0-or-later -#}
 {% extends "base.html" %}
-{% set name = "Claude" if kind == "claude" else "Shell" %}
+{% set name = {"claude": "Claude", "psql": "psql"}.get(kind, "Shell") %}
 {% block title %}{{ name }} {{ instance.key }} · OmniaCLI{% endblock %}
 {% block crumbs %}{% from "_crumbs.html" import crumbs with context %}
 {{ crumbs([("Dashboard", "/"), (instance.server, "/servers/" ~ instance.server),
@@ -31,7 +31,7 @@
   </div>
   <div id="terminal"></div>
   </div>
-  <p class="muted" style="margin: 8px 0 0">A login shell ({{ shell }}) of the user running OmniaCLI, on this server{% if command %}, that runs <span class="mono">{{ command }}</span> first and stays open after it{% endif %}: it ends when this page closes.</p>
+  <p class="muted" style="margin: 8px 0 0">A login shell ({{ shell }}) of the user running OmniaCLI, on this server{% if command and stay %}, that runs <span class="mono">{{ command }}</span> first and stays open after it{% elif command %}, that runs <span class="mono">{{ command }}</span> on the instance's database with the connection settings of its configuration, and ends with it{% endif %}: it ends when this page closes.</p>
 </div>
 <script src="{{ prefix }}/static/xterm.js"></script>
 <script src="{{ prefix }}/static/addon-fit.js"></script>

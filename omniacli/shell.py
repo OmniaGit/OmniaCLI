@@ -65,16 +65,20 @@ class Shell:
         self.process = process
 
     @classmethod
-    async def start(cls, cwd: Path | None, cols: int = 80, rows: int = 24, command: str | None = None) -> "Shell":
+    async def start(cls, cwd: Path | None, cols: int = 80, rows: int = 24, command: str | None = None,
+                    env: dict | None = None, stay: bool = True) -> "Shell":
         """command: run first by the login shell (its profile sets PATH),
-        which is then left interactive; it needs cwd to exist."""
+        which is then left interactive (stay) or ends with it; a cwd given
+        must exist. env: more variables for the shell and the command."""
         shell, home = login_shell()
         user = pwd.getpwuid(os.getuid()).pw_name
+        extra = env or {}
         env = {k: os.environ[k] for k in _KEPT_ENV if k in os.environ}
         env.update({"HOME": home, "USER": user, "LOGNAME": user, "SHELL": shell, "TERM": "xterm-256color"})
         env.setdefault("PATH", "/usr/local/bin:/usr/bin:/bin")
         env.setdefault("LANG", "C.UTF-8")
-        if command and (cwd is None or not cwd.is_dir()):
+        env.update(extra)
+        if command and cwd is not None and not cwd.is_dir():
             raise FileNotFoundError(f"no folder {cwd}")
         folder = cwd if cwd is not None and cwd.is_dir() else Path(home)
         if not folder.is_dir():
@@ -84,7 +88,7 @@ class Shell:
             _set_size(master, cols, rows)
             args = [shell, "-l"]
             if command:
-                args += ["-c", f"{command}; exec {shlex.quote(shell)} -l"]
+                args += ["-c", f"{command}; exec {shlex.quote(shell)} -l" if stay else f"exec {command}"]
             process = await asyncio.create_subprocess_exec(
                 "setsid", "-c", *args, stdin=slave, stdout=slave, stderr=slave,
                 cwd=str(folder), env=env)
@@ -140,9 +144,10 @@ class Shell:
             os.close(self.master)
 
 
-async def serve(websocket: WebSocket, cwd: Path | None, command: str | None = None) -> None:
+async def serve(websocket: WebSocket, cwd: Path | None, command: str | None = None,
+                env: dict | None = None, stay: bool = True) -> None:
     """Join an accepted WebSocket to a new shell until one of them ends."""
-    shell = await Shell.start(cwd, command=command)
+    shell = await Shell.start(cwd, command=command, env=env, stay=stay)
 
     async def output():
         while True:

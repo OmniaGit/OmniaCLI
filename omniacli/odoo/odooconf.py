@@ -25,6 +25,21 @@ def _option(parser: configparser.ConfigParser, key: str) -> str:
     return "" if value in ("False", "None") else value
 
 
+def db_connection(path: str | Path) -> dict:
+    """The db_host, db_port, db_user and db_password an Odoo config sets
+    (the unset ones left out); empty when it cannot be read."""
+    parser = configparser.ConfigParser(interpolation=None)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            parser.read_file(fh)
+    except (OSError, configparser.Error, UnicodeDecodeError):
+        return {}
+    if not parser.has_section("options"):
+        return {}
+    found = {key: _option(parser, key) for key in ("db_host", "db_port", "db_user", "db_password")}
+    return {key: value for key, value in found.items() if value}
+
+
 async def _repository(top: Path, notes: list[str]) -> dict:
     _, branch = await capture(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=top)
     if branch == "HEAD":

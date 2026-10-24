@@ -195,6 +195,15 @@ class OdooPlugin(ServicePlugin):
     def describe(self, instance: Instance) -> dict:
         return {"database": instance.options.database}
 
+    def db_shell(self, instance: Instance) -> tuple[str, dict] | None:
+        # the connection Odoo makes: its config's db_* options, in the
+        # environment (a password is not on the command line)
+        env = {"PGDATABASE": instance.options.database, "PGAPPNAME": "omniacli psql"}
+        for key, value in odooconf.db_connection(instance.options.odoo_config).items():
+            env[{"db_host": "PGHOST", "db_port": "PGPORT", "db_user": "PGUSER",
+                 "db_password": "PGPASSWORD"}[key]] = value
+        return "psql", env
+
     def script_runner(self, instance: Instance) -> tuple[Path, str | None, dict]:
         # the venv's python, which imports odoo as click-odoo does
         return instance.options.venv_bin / "python", instance.run_as, ops.odoo_env(instance)

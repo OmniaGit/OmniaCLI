@@ -251,3 +251,49 @@ def test_options_set_the_shell_text_size(env):
         assert "fontSize: 18," in c.get("/servers/srv/test/shell", headers=browser(app, "dev")).text
     # read back at the next start
     assert load_options(settings.options_file).shell_font_size == 18
+
+
+def test_psql_on_the_instance_database(env, monkeypatch):
+    """The psql page: psql with the Odoo config's connection, in the
+    environment; the page ends with it."""
+    settings = env["settings"]
+    instance = settings.servers["srv"].instances["test"]
+    instance.options.odoo_config.write_text(
+        "[options]\ndb_host = dbhost\ndb_port = 5433\ndb_user = odoo\ndb_password = se cret\ndb_sslmode = False\n")
+    plugin = instance.plugin
+    command, found = plugin.db_shell(instance)
+    assert command == "psql" and found == {
+        "PGDATABASE": "DB_test", "PGAPPNAME": "omniacli psql", "PGHOST": "dbhost", "PGPORT": "5433",
+        "PGUSER": "odoo", "PGPASSWORD": "se cret"}
+    # unset options are left out (a local socket, the OS user)
+    instance.options.odoo_config.write_text("[options]\ndb_host = False\ndb_user = odoo\n")
+    assert plugin.db_shell(instance)[1] == {"PGDATABASE": "DB_test", "PGAPPNAME": "omniacli psql", "PGUSER": "odoo"}
+    instance.options.odoo_config.write_text("[options]\ndb_password = se cret\ndb_user = odoo\n")
+    # not the real psql: a command that shows what it got, then ends
+    original = type(plugin).db_shell
+    monkeypatch.setattr(type(plugin), "db_shell", lambda self, inst: (
+        'echo "PSQL $PGDATABASE $PGUSER $PGPASSWORD"', original(self, inst)[1]))
+    app = create_app(settings)
+    with TestClient(app) as c:
+        page = c.get("/servers/srv?view=test", headers=browser(app, "dev")).text
+        assert 'href="/servers/srv/test/psql"' in page
+        assert "/psql" not in c.get("/servers/srv?view=test", headers=browser(app, "viewer")).text
+        page = c.get("/servers/srv/test/psql", headers=browser(app, "dev"))
+        assert page.status_code == 200 and "and ends with it" in page.text
+        assert c.get("/servers/srv/test/psql", headers=browser(app, "viewer")).status_code == 403
+        with c.websocket_connect("/servers/srv/test/psql/ws", headers=browser(app, "dev")) as ws:
+            out = ""
+            while True:
+                message = ws.receive()
+                if message["type"] == "websocket.close":
+                    break
+                out += (message.get("bytes") or b"").decode("utf-8", "replace")
+            assert "PSQL DB_test odoo se cret" in out
+    # a plugin without a database shell: no button, no page
+    monkeypatch.setattr(type(plugin), "db_shell", lambda self, inst: None)
+    app = create_app(settings)
+    with TestClient(app) as c:
+        assert "/psql" not in c.get("/servers/srv?view=test", headers=browser(app, "dev")).text
+        assert c.get("/servers/srv/test/psql", headers=browser(app, "dev")).status_code == 404
+        with c.websocket_connect("/servers/srv/test/psql/ws", headers=browser(app, "dev")) as ws:
+            assert closed(ws) == (1008, "srv/test has no database shell")
