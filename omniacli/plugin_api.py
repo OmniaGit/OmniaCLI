@@ -329,6 +329,13 @@ class ServicePlugin(ABC):
         """The port of the instance's web interface (the Dashboard's link)."""
         return None
 
+    def tunnel_address(self, instance: Instance, path: str) -> tuple[str, int] | None:
+        """Where a tunnel's connection goes, from the path of its first
+        request: (host, port) on this machine. By default the web port on
+        127.0.0.1; None: the instance cannot be reached by a tunnel."""
+        port = self.web_port(instance)
+        return ("127.0.0.1", port) if port else None
+
     def search_text(self, instance: Instance) -> list[str]:
         """Words the Dashboard's filter finds the instance by."""
         return []

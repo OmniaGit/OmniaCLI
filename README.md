@@ -166,6 +166,26 @@ prepared before Test & activate. The job's log opens in a new tab.
   `options.yaml` next to the servers file (`options_file` in the main
   configuration): the text size the shell and Claude pages open with
   (8-40 pixels, default 14).
+- **Tunnels** (every user who logs in, `/tunnels`): a port of this machine
+  that reaches the web interface of an instance of a linked OmniaCLI, for
+  when this OmniaCLI reaches it and the browser does not. Every connection
+  to the port travels in a WebSocket of its own through the link; the
+  other side connects only to that instance's own ports (Odoo: its web
+  port, and its gevent port for `/websocket` when it runs workers; before
+  Odoo 16 `/longpolling` and `longpolling_port`). The web interface is at
+  the root of its own address, as Odoo needs (its pages call root paths:
+  they cannot be served under `/links/<name>/`). Options: the address the
+  ports listen on (`127.0.0.1` by default: only a browser on this machine
+  reaches them; `0.0.0.0` and a firewall rule for a server), the ports
+  (`18000-18099`, the first free one is taken) and the hours without
+  traffic after which a tunnel closes (4). Who opened a tunnel, or an
+  admin, closes it; OmniaCLI stopping closes them all. The port has no
+  login of its own: whoever reaches it reaches the instance's login. The
+  browser keeps cookies by address, not by port: two tunnels open at once
+  share Odoo's session. An admin logging in to Odoo through a tunnel
+  makes Odoo set `web.base.url` to the tunnel's address, unless the
+  instance has the system parameter `web.base.url.freeze`. Both instances
+  need a version with tunnels.
 - **Claude** (same roles, a button on an instance with a **Claude folder**
   in the server form): the same shell, opened in that folder, that runs
   `claude` first (found by the login shell's `PATH`; Claude Code's installer
@@ -852,6 +872,9 @@ A plugin may also give:
   them: OmniaCLI's own python, as OmniaCLI's user.
 - **`db_shell()`**: the database client of the psql page (the command and
   its environment); without it, no psql button.
+- **`tunnel_address()`**: where a tunnel's connection goes, from the path
+  of its first request (Odoo: the bus to the gevent port); by default the
+  web port on `127.0.0.1`.
 
 Two plugins are built in: **generic** (git repositories and a systemd or
 init.d service, nothing else: what an install without plugins has) and

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import datetime
+import ipaddress
 import os
 import re
 import shutil
@@ -743,6 +744,12 @@ def save_groups(path: Path, groups: list[ServerGroup]) -> None:
 # the text size of the shell pages, in pixels
 SHELL_FONT_SIZE = 14
 SHELL_FONT_SIZES = (8, 40)
+# tunnels: closed after this many hours without traffic (TUNNEL_IDLE_HOURS
+# the limits); the local address and ports they listen on
+TUNNEL_IDLE = 4
+TUNNEL_IDLE_HOURS = (1, 720)
+TUNNEL_BIND = "127.0.0.1"
+TUNNEL_PORTS = "18000-18099"
 
 
 @dataclass
@@ -750,18 +757,37 @@ class Options:
     """The options of the system, set on the Options page (admin)."""
 
     shell_font_size: int = SHELL_FONT_SIZE
+    tunnel_idle_hours: int = TUNNEL_IDLE
+    tunnel_bind: str = TUNNEL_BIND
+    tunnel_ports: str = TUNNEL_PORTS
+
+
+def _whole(value, where: str, limits: tuple[int, int]) -> int:
+    low, high = limits
+    if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+        raise ConfigError(f"{where} must be a whole number from {low} to {high}")
+    return value
 
 
 def parse_options(data) -> Options:
     data = data if isinstance(data, dict) else {}
     shell = data.get("shell") or {}
-    if not isinstance(shell, dict):
-        raise ConfigError("shell must be a mapping")
-    size = shell.get("font_size", SHELL_FONT_SIZE)
-    low, high = SHELL_FONT_SIZES
-    if isinstance(size, bool) or not isinstance(size, int) or not low <= size <= high:
-        raise ConfigError(f"shell.font_size must be a whole number from {low} to {high}")
-    return Options(shell_font_size=size)
+    tunnel = data.get("tunnel") or {}
+    if not isinstance(shell, dict) or not isinstance(tunnel, dict):
+        raise ConfigError("shell and tunnel must be mappings")
+    size = _whole(shell.get("font_size", SHELL_FONT_SIZE), "shell.font_size", SHELL_FONT_SIZES)
+    idle = _whole(tunnel.get("idle_hours", TUNNEL_IDLE), "tunnel.idle_hours", TUNNEL_IDLE_HOURS)
+    bind = str(tunnel.get("bind", TUNNEL_BIND)).strip()
+    try:
+        ipaddress.ip_address(bind)
+    except ValueError:
+        raise ConfigError(f"tunnel.bind: {bind!r} is not an IP address (127.0.0.1, 0.0.0.0...)") from None
+    ports = str(tunnel.get("ports", TUNNEL_PORTS)).strip()
+    match = re.fullmatch(r"(\d+)(?:-(\d+))?", ports)
+    low, high = (int(match[1]), int(match[2] or match[1])) if match else (0, 0)
+    if not 1024 <= low <= high <= 65535:
+        raise ConfigError(f"tunnel.ports: {ports!r} must be a port or a range low-high, from 1024 to 65535")
+    return Options(shell_font_size=size, tunnel_idle_hours=idle, tunnel_bind=bind, tunnel_ports=ports)
 
 
 def load_options(path: Path) -> Options:
@@ -779,7 +805,9 @@ def load_options(path: Path) -> Options:
 
 
 def save_options(path: Path, options: Options) -> None:
-    text = yaml.safe_dump({"shell": {"font_size": options.shell_font_size}}, sort_keys=False)
+    text = yaml.safe_dump({"shell": {"font_size": options.shell_font_size},
+                           "tunnel": {"idle_hours": options.tunnel_idle_hours, "bind": options.tunnel_bind,
+                                      "ports": options.tunnel_ports}}, sort_keys=False)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(text, encoding="utf-8")

@@ -189,6 +189,20 @@ class OdooPlugin(ServicePlugin):
     def web_port(self, instance: Instance) -> int | None:
         return instance.options.http_port or odooconf.http_port(instance.options.odoo_config)
 
+    def tunnel_address(self, instance: Instance, path: str) -> tuple[str, int] | None:
+        port = self.web_port(instance)
+        if not port:
+            return None
+        found = odooconf.tunnel_settings(instance.options.odoo_config)
+        # Odoo listens on http_interface, all of them when it is unset
+        host = found.get("interface") or "127.0.0.1"
+        host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
+        # with workers, the bus (/websocket from Odoo 16, /longpolling
+        # before) is served by the evented server on its own port
+        if found.get("workers") and (path == "/websocket" or path.startswith(("/websocket/", "/longpolling"))):
+            return host, found["evented_port"]
+        return host, port
+
     def search_text(self, instance: Instance) -> list[str]:
         return [instance.options.database]
 

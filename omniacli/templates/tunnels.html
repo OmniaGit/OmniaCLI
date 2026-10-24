@@ -1,0 +1,86 @@
+{# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C · SPDX-License-Identifier: AGPL-3.0-or-later -#}
+{% extends "base.html" %}
+{% block title %}Tunnels · OmniaCLI{% endblock %}
+{% block crumbs %}{% from "_crumbs.html" import crumbs with context %}
+{{ crumbs([("Dashboard", "/"), ("Tunnels", None)]) }}
+{% endblock %}
+{% block content %}
+<h1>Tunnels</h1>
+<p class="muted">A tunnel opens a port of this machine (<span class="mono">{{ options.tunnel_bind }}</span>,
+ports <span class="mono">{{ options.tunnel_ports }}</span>) that reaches the web interface of an instance of a
+linked OmniaCLI, through the link: for when this OmniaCLI reaches it and your browser does not.
+{% if options.tunnel_bind.startswith("127.") or options.tunnel_bind == "::1" %}Only a browser on this machine reaches it.{% endif %}
+It closes when you close it, when OmniaCLI stops, or after {{ options.tunnel_idle_hours }} h without traffic.
+Anyone who reaches the port reaches the instance's own login: the tunnel adds no login of its own.
+The browser keeps a site's cookies by address, not by port: two tunnels open at once share Odoo's login.</p>
+<div id="error" class="banner" hidden></div>
+<div class="panel">
+  <form id="open" class="actions" style="margin: 0">
+    <select id="server" aria-label="Server of a link" required>
+      {% for srv in servers %}<option value="{{ srv.link }}" data-server="{{ srv.name }}" data-roles="{{ srv.roles | join(' ') }}">{{ srv.label }}</option>{% endfor %}
+    </select>
+    <select id="role" aria-label="Instance"></select>
+    <button type="submit" {% if not servers %}disabled{% endif %}>Open tunnel</button>
+    {% if not servers %}<span class="muted">No server of a link answers{% for e in errors %} · {{ e.link }}: {{ e.error }}{% endfor %}.</span>{% endif %}
+  </form>
+</div>
+<div class="panel">
+  <div class="scroll">
+  <table>
+    <tr><th>Instance</th><th>Address</th><th>Opened by</th><th>Last traffic</th><th>Connections</th><th></th></tr>
+    {% for t in tunnels %}
+    <tr>
+      <td>{{ t.link }} › {{ t.server }} <span class="role {{ t.role }}">{{ t.role }}</span></td>
+      <td><a class="mono" href="{{ t.url }}" target="_blank" rel="noopener">{{ t.url }}</a></td>
+      <td>{{ t.owner }}</td>
+      <td class="mono" data-time="{{ t.last_active }}"></td>
+      <td class="mono">{{ t.connections }}</td>
+      <td>{% if t.can_close %}<button type="button" class="danger" data-close="{{ t.id }}">Close</button>{% endif %}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="6" class="muted">No tunnel open.</td></tr>
+    {% endfor %}
+  </table>
+  </div>
+</div>
+<script>
+(function () {
+  const errorBox = document.getElementById("error");
+  const server = document.getElementById("server"), role = document.getElementById("role");
+  const roles = () => {
+    const option = server.selectedOptions[0];
+    role.replaceChildren(...(option ? option.dataset.roles.split(" ") : []).map((r) => new Option(r, r)));
+  };
+  server.addEventListener("change", roles);
+  roles();
+  for (const cell of document.querySelectorAll("[data-time]")) {
+    cell.textContent = new Date(Number(cell.dataset.time) * 1000).toLocaleString();
+  }
+  async function post(url, body) {
+    const resp = await fetch(url, {method: "POST", headers: {"Content-Type": "application/json"},
+                                   body: JSON.stringify(body || {})}).catch(() => null);
+    const data = resp ? await resp.json().catch(() => ({})) : {};
+    if (!resp || !resp.ok) {
+      errorBox.textContent = data.error || data.detail || (resp ? "Error " + resp.status : "OmniaCLI cannot be reached");
+      errorBox.hidden = false;
+      return null;
+    }
+    return data;
+  }
+  document.getElementById("open").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const button = ev.submitter;
+    button.disabled = true; button.textContent = "Opening…";
+    const option = server.selectedOptions[0];
+    const data = await post("/api/tunnels/open", {link: option.value, server: option.dataset.server, role: role.value});
+    button.disabled = false; button.textContent = "Open tunnel";
+    if (data) location.reload();
+  });
+  for (const button of document.querySelectorAll("[data-close]")) {
+    button.addEventListener("click", async () => {
+      if (await post(`/api/tunnels/${encodeURIComponent(button.dataset.close)}/close`)) location.reload();
+    });
+  }
+})();
+</script>
+{% endblock %}

@@ -28,7 +28,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.background import BackgroundTask
 from starlette.requests import HTTPConnection
 
-from . import checks, disks, linkcopy, ops, plugins, schedules, shell
+from . import checks, disks, linkcopy, ops, plugins, schedules, shell, tunnel
 from .accesslog import AccessLog
 from .diskhistory import DiskHistory, DiskRecorder
 from .auth import ROLES as ACCESS_ROLES
@@ -36,6 +36,7 @@ from .auth import Authenticator, Principal, hash_password, hash_token, new_token
 from .config import (
     ROLES,
     SHELL_FONT_SIZES,
+    TUNNEL_IDLE_HOURS,
     Access,
     ConfigError,
     Instance,
@@ -217,6 +218,9 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
     access_log = AccessLog(settings.logs_dir / "access.jsonl")
     # the browsers' logins: next to the jobs, like the access log
     sessions = SessionStore(settings.jobs_dir.parent / "sessions.json")
+    tunnels = tunnel.TunnelManager(
+        lambda: settings.options, link_headers,
+        lambda user, detail: access_log.record("tunnel", "user", user, "", detail))
     limiter = LoginLimiter()
 
     def identify(request: HTTPConnection) -> Principal:
@@ -300,12 +304,14 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         scheduler.start()
         sampler.start()
         disk_recorder.start()
+        tunnels.start()
         # not nullcontext(): it is an async context manager only from Python 3.10
         if mcp_manager:
             async with mcp_manager.run():
                 yield
         else:
             yield
+        await tunnels.stop()
         await disk_recorder.stop()
         await sampler.stop()
         await updater.stop()
@@ -324,6 +330,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
     app.state.sampler = sampler
     app.state.disk_history, app.state.disk_recorder = disk_history, disk_recorder
     app.state.access_log = access_log
+    app.state.tunnels = tunnels
     app.state.sessions, app.state.authenticator = sessions, authenticator
 
     @app.middleware("http")
@@ -1751,6 +1758,93 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
     for kind in shell_kinds:
         shell_routes(kind)
 
+    # --- tunnels -----------------------------------------------------------
+
+    @app.websocket("/servers/{server}/{role}/tunnel/ws")
+    async def tunnel_socket(websocket: WebSocket, server: str, role: str,
+                            me: Principal = Depends(current_user)):
+        """One connection of a tunnel opened by a linked OmniaCLI (or by a
+        user here), to the instance's web interface; ?probe=1 only says
+        whether it can be reached."""
+        await websocket.accept()
+        if me.kind == "token":
+            await websocket.close(1008, "An MCP token cannot open a tunnel")
+            return
+        srv = settings.servers.get(server)
+        instance = srv.instances.get(role) if srv is not None and srv.active else None
+        if instance is None:
+            await websocket.close(1008, f"No instance {server}/{role}")
+            return
+        if instance.plugin.tunnel_address(instance, "/") is None:
+            await websocket.close(1008, f"{instance.key} has no web port")
+            return
+        if websocket.query_params.get("probe"):
+            ip = websocket.client.host if websocket.client else ""
+            who = f", acting for {me.on_behalf}" if me.on_behalf else ""
+            access_log.record("tunnel", me.kind, me.name, ip, f"{instance.key} opened{who}")
+            await websocket.close(1000, "ready")
+            return
+        await tunnel.serve_far(websocket, lambda path: instance.plugin.tunnel_address(instance, path))
+
+    def tunnel_url(request: Request, found: tunnel.Tunnel) -> str:
+        """The address of a tunnel, as the browser reaches this OmniaCLI."""
+        wildcard = found.bind in ("0.0.0.0", "::")
+        host = (request.url.hostname or "localhost") if wildcard else found.bind
+        host = f"[{host}]" if ":" in host else host
+        return f"http://{host}:{found.port}/"
+
+    def tunnel_rows(request: Request, me: Principal) -> list[dict]:
+        rows = []
+        for found in tunnels.tunnels.values():
+            row = found.to_dict()
+            row["url"] = tunnel_url(request, found)
+            row["can_close"] = found.owner == me.name or me.can("admin")
+            rows.append(row)
+        return rows
+
+    def tunnel_user(me: Principal) -> Principal:
+        if me.kind != "user":
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Only a user who logs in here may open a tunnel")
+        return me
+
+    @app.get("/tunnels")
+    async def tunnels_page(request: Request, me: Principal = Depends(current_user)):
+        tunnel_user(me)
+        rows = await remote_servers(me)
+        return _TEMPLATES.TemplateResponse(request, "tunnels.html", {
+            "tunnels": tunnel_rows(request, me), "servers": [r for r in rows if "error" not in r],
+            "errors": [r for r in rows if "error" in r], "options": settings.options})
+
+    @app.get("/api/tunnels")
+    async def tunnels_list(request: Request, me: Principal = Depends(current_user)):
+        return tunnel_rows(request, tunnel_user(me))
+
+    @app.post("/api/tunnels/open")
+    async def tunnels_open(request: Request, payload: dict = Body(...), me: Principal = Depends(current_user)):
+        tunnel_user(me)
+        link = settings.link_targets.get(str(payload.get("link") or ""))
+        server, role = str(payload.get("server") or ""), str(payload.get("role") or "")
+        if link is None:
+            return refuse(f"No link {payload.get('link')}")
+        if not server or role not in ("production", "test"):
+            return refuse("Choose a server and an instance (production or test)")
+        try:
+            found = await tunnels.open(link, server, role, me.name, me.role)
+        except tunnel.TunnelError as exc:
+            return refuse(str(exc))
+        return {**found.to_dict(), "url": tunnel_url(request, found)}
+
+    @app.post("/api/tunnels/{tunnel_id}/close")
+    async def tunnels_close(tunnel_id: str, me: Principal = Depends(current_user)):
+        tunnel_user(me)
+        found = tunnels.tunnels.get(tunnel_id)
+        if found is None:
+            return refuse("No such tunnel (closed already?)", status.HTTP_404_NOT_FOUND)
+        if found.owner != me.name and not me.can("admin"):
+            return refuse("Only who opened it, or an admin, closes a tunnel", status.HTTP_403_FORBIDDEN)
+        await tunnels.close(tunnel_id, f"closed by {me.name}")
+        return {"ok": True}
+
     # --- groups of the Dashboard ----------------------------------------
 
     @app.get("/groups")
@@ -1783,7 +1877,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
     async def options_page(request: Request):
         return _TEMPLATES.TemplateResponse(request, "options.html", {
             "options": settings.options, "options_file": settings.options_file,
-            "font_sizes": SHELL_FONT_SIZES})
+            "font_sizes": SHELL_FONT_SIZES, "idle_hours": TUNNEL_IDLE_HOURS})
 
     @app.post("/api/options/save", dependencies=[Depends(admin)])
     async def options_save(payload: dict = Body(...)):

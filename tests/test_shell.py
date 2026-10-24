@@ -247,7 +247,7 @@ def test_options_set_the_shell_text_size(env):
             assert resp.status_code == 400 and "8 to 40" in resp.json()["error"], bad
         resp = c.post("/api/options/save", json={"shell": {"font_size": 18}}, headers=browser(app, "admin"))
         assert resp.status_code == 200, resp.text
-        assert yaml.safe_load(settings.options_file.read_text()) == {"shell": {"font_size": 18}}
+        assert yaml.safe_load(settings.options_file.read_text())["shell"] == {"font_size": 18}
         assert "fontSize: 18," in c.get("/servers/srv/test/shell", headers=browser(app, "dev")).text
     # read back at the next start
     assert load_options(settings.options_file).shell_font_size == 18

@@ -120,6 +120,25 @@ async def read_odoo_config(path: str | Path) -> dict:
             "repositories": repositories, "notes": notes}
 
 
+def tunnel_settings(path: str | Path) -> dict:
+    """What a tunnel needs of an Odoo config: the interface Odoo listens on
+    (http_interface), its workers and the port of its evented server
+    (gevent_port, longpolling_port before Odoo 16, 8072 by default)."""
+    parser = configparser.ConfigParser(interpolation=None)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            parser.read_file(fh)
+    except (OSError, configparser.Error, UnicodeDecodeError):
+        return {}
+    if not parser.has_section("options"):
+        return {}
+    workers = _option(parser, "workers")
+    evented = _option(parser, "gevent_port") or _option(parser, "longpolling_port")
+    return {"interface": _option(parser, "http_interface"),
+            "workers": int(workers) if workers.isdigit() else 0,
+            "evented_port": int(evented) if evented.isdigit() else 8072}
+
+
 def http_port(path: str | Path) -> int | None:
     """The port Odoo serves on: http_port, xmlrpc_port before Odoo 11, 8069
     when the config sets neither; None when the config cannot be read."""

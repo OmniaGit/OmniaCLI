@@ -327,6 +327,7 @@ summary { cursor: pointer; color: var(--muted); }
   <a href="{{ prefix }}/schedules">Schedules</a>
   <a href="{{ prefix }}/plugins">Plugins</a>
   <a href="{{ prefix }}/options">Options</a>{% endif %}
+  {% if account and not prefix %}<a href="/tunnels">Tunnels</a>{% endif %}
   {% if can_act %}<a href="{{ prefix }}/help">Help</a>{% endif %}
   <span class="head-end">
     {% if account %}<a href="{{ prefix }}/account" title="Your account and password">{{ account }}</a>

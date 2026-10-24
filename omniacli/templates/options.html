@@ -18,6 +18,20 @@
              title="The text size a shell and Claude page opens with ({{ font_sizes[0] }}-{{ font_sizes[1] }}); the A− and A+ buttons there change it for that page only">
     </div>
   </fieldset>
+  <fieldset>
+    <legend>Tunnels</legend>
+    <div class="form-grid">
+      <label for="tunnel-idle">Close after (hours without traffic)</label>
+      <input type="number" id="tunnel-idle" class="mono" required min="{{ idle_hours[0] }}" max="{{ idle_hours[1] }}" step="1"
+             value="{{ options.tunnel_idle_hours }}">
+      <label for="tunnel-bind">Listen on (IP address)</label>
+      <input type="text" id="tunnel-bind" class="mono" required value="{{ options.tunnel_bind }}"
+             title="127.0.0.1: only a browser on this machine reaches a tunnel; 0.0.0.0: every address of this machine (then open the ports in the firewall)">
+      <label for="tunnel-ports">Ports</label>
+      <input type="text" id="tunnel-ports" class="mono" required value="{{ options.tunnel_ports }}"
+             title="A port or a range low-high (1024-65535): every tunnel takes the first free one">
+    </div>
+  </fieldset>
   <div class="actions">
     <button type="submit">Save</button>
     <a class="button" href="{{ prefix }}/">Cancel</a>
@@ -31,7 +45,12 @@ document.getElementById("form").addEventListener("submit", async (ev) => {
   box.hidden = true; saved.hidden = true;
   const resp = await fetch("{{ prefix }}/api/options/save", {
     method: "POST", headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({shell: {font_size: Number(document.getElementById("shell-font-size").value)}}),
+    body: JSON.stringify({
+      shell: {font_size: Number(document.getElementById("shell-font-size").value)},
+      tunnel: {idle_hours: Number(document.getElementById("tunnel-idle").value),
+               bind: document.getElementById("tunnel-bind").value.trim(),
+               ports: document.getElementById("tunnel-ports").value.trim()},
+    }),
   }).catch(() => null);
   const data = resp ? await resp.json().catch(() => ({})) : {};
   if (resp && resp.ok) { saved.hidden = false; return; }
