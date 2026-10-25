@@ -917,17 +917,59 @@ nosniff`, `Referrer-Policy: same-origin`, and over HTTPS
 proxy that keeps the `Host` header: POSTs are accepted only when their
 `Origin` matches `Host`, which blocks cross-site requests, and the password
 must never travel in clear. The same holds for the WebSocket of the shell,
-which the proxy must pass on; for nginx, in the `location` of OmniaCLI:
+which the proxy must pass on. Without it the shell page says "refused or
+connection lost".
+
+#### nginx
+
+A complete site for nginx: HTTPS on port 8443, open to the LAN only, in
+front of OmniaCLI listening on `127.0.0.1:8090` (`omniacli serve --host
+127.0.0.1 --port 8090`, as the package runs it). Put the certificate and its
+key in `/etc/nginx/omniacli/`, the file in `/etc/nginx/sites-available/`
+(linked from `sites-enabled/`) or in `/etc/nginx/conf.d/`, write your own
+networks in `allow`, then `nginx -t` and `systemctl reload nginx`.
 
 ```nginx
-proxy_http_version 1.1;
-proxy_set_header Upgrade $http_upgrade;
-proxy_set_header Connection "upgrade";
-proxy_set_header Host $host;
-proxy_read_timeout 1h;   # an idle shell stays open up to this
+server {
+    listen 8443 ssl;
+    server_name _;
+
+    ssl_certificate     /etc/nginx/omniacli/omniacli.crt;
+    ssl_certificate_key /etc/nginx/omniacli/omniacli.key;
+
+    # the LAN only
+    allow 10.11.1.0/24;
+    allow 172.20.1.0/24;
+    deny  all;
+
+    location / {
+        proxy_pass http://127.0.0.1:8090;
+
+        # the WebSockets of the shell, Claude and psql pages and of the tunnels
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+
+        # OmniaCLI accepts a POST (and a WebSocket) only when its Origin
+        # matches Host: pass the Host the browser sent, port included.
+        # Not $host, which drops the port: every POST would be refused
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # backup downloads and the pages of linked instances are streamed;
+        # an idle shell stays open up to the read timeout
+        proxy_buffering off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+}
 ```
 
-Without them the shell page says "refused or connection lost".
+Each `proxy_read_timeout` once: nginx refuses a directive set twice in the
+same `location` ("directive is duplicate"). And `Host` once: two
+`proxy_set_header Host` lines send two Host headers, and OmniaCLI answers
+400.
 
 ## Develop
 
