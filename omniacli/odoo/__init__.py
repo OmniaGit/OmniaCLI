@@ -216,7 +216,12 @@ class OdooPlugin(ServicePlugin):
         for key, value in odooconf.db_connection(instance.options.odoo_config).items():
             env[{"db_host": "PGHOST", "db_port": "PGPORT", "db_user": "PGUSER",
                  "db_password": "PGPASSWORD"}[key]] = value
-        return "psql", env
+        if instance.run_as is None:
+            return "psql", env
+        # with run_as, as the user Odoo runs as: PostgreSQL's peer login on
+        # the local socket takes the system user; sudo keeps the PG*
+        # variables (sudoers needs SETENV, the Run as check prints the line)
+        return f"sudo -n -u {instance.run_as} --preserve-env={','.join(env)} {ops.psql_path()}", env
 
     def script_runner(self, instance: Instance) -> tuple[Path, str | None, dict]:
         # the venv's python, which imports odoo as click-odoo does

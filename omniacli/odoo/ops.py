@@ -86,6 +86,12 @@ def odoo_env(instance: Instance) -> dict:
     return {**base_env(), "PYTHONPATH": str(odoo_bin.parent)}
 
 
+def psql_path() -> str:
+    """The psql of the psql page, by its full path: the one a sudoers line
+    names for an instance with run_as."""
+    return shutil.which("psql") or "/usr/bin/psql"
+
+
 def find_odoo_bin(instance: Instance) -> Path | None:
     return locate_odoo_bin(instance.options.odoo_bin, [r.path for r in instance.repositories])
 

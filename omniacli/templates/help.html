@@ -294,9 +294,12 @@ all commented); a failed check prints the exact lines. Examples, with your servi
 omniacli ALL=(root) NOPASSWD: /usr/bin/systemctl --no-ask-password start odoo-customer-test
 omniacli ALL=(root) NOPASSWD: /usr/bin/systemctl --no-ask-password stop odoo-customer-test
 omniacli ALL=(root) NOPASSWD: /etc/init.d/odoo-customer-test restart
-omniacli ALL=(odoo) NOPASSWD:SETENV: /opt/odoo/venvs/odoo18/bin/</pre>
-<p>The last line is for <strong>Run as</strong> <span class="mono">odoo</span>: it allows the programs of that venv
-folder, and <span class="mono">SETENV</span> passes <span class="mono">PYTHONPATH</span>. Check a sudoers file with
+omniacli ALL=(odoo) NOPASSWD:SETENV: /opt/odoo/venvs/odoo18/bin/
+omniacli ALL=(odoo) NOPASSWD:SETENV: /usr/bin/psql</pre>
+<p>The last two lines are for <strong>Run as</strong> <span class="mono">odoo</span>: the first allows the programs of
+that venv folder, and <span class="mono">SETENV</span> passes <span class="mono">PYTHONPATH</span>; the second lets the
+psql page connect as <span class="mono">odoo</span> (PostgreSQL's peer login), <span class="mono">SETENV</span> passing
+its <span class="mono">PG*</span> variables. Check a sudoers file with
 <span class="mono">sudo visudo -cf /etc/sudoers.d/omniacli</span>.</p>
 <p>On a development workstation, whose repositories and configs belong to you, the whole service may run as your
 user: <span class="mono">OMNIACLI_USER=&lt;user&gt;</span> in <span class="mono">/etc/default/omniacli</span>, then

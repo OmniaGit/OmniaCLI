@@ -234,9 +234,11 @@ prepared before Test & activate. The job's log opens in a new tab.
   `db_port`, `db_user`, `db_password` of its Odoo config, given in the
   `PG*` environment, not on the command line); it ends when psql ends.
   `psql` must be installed (Debian: `postgresql-client`). It runs as the
-  user OmniaCLI runs as: an Odoo config without `db_host` connects through
-  the local socket, which PostgreSQL's `peer` method refuses to another
-  system user (an instance with `run_as`).
+  user OmniaCLI runs as, or with `run_as` as that user (`sudo -n -u <user>
+  --preserve-env=PG… psql`), so that an Odoo config without `db_host`
+  passes PostgreSQL's `peer` login on the local socket as Odoo does. That
+  needs a sudoers line for psql, with `SETENV` for the `PG*` variables;
+  the **psql** check (a warning) prints it.
 - **Auto update**: per instance, every `interval_minutes` within `window`,
   OmniaCLI fetches every repository. When there are new commits it runs
   *git pull + restart* as an `auto` job.
@@ -685,7 +687,10 @@ The user that runs OmniaCLI needs:
 
   ```
   omniacli ALL=(odoo) NOPASSWD:SETENV: /opt/odoo/venvs/odoo18/bin/
+  omniacli ALL=(odoo) NOPASSWD:SETENV: /usr/bin/psql
   ```
+
+  The second line is for the psql page only (the **psql** check, a warning).
 
   A backup made as that user is written in `/var/tmp` first, then moved
   into the backup folder. Not with restart type `process`: OmniaCLI stops

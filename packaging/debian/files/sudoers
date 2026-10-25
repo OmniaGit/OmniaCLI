@@ -15,4 +15,9 @@
 #
 # omniacli ALL=(odoo) NOPASSWD:SETENV: /opt/odoo/venvs/odoo18/bin/
 #
+# The psql page of such an instance runs psql as that user (the "psql" check
+# prints the line):
+#
+# omniacli ALL=(odoo) NOPASSWD:SETENV: /usr/bin/psql
+#
 # Check the file after every change: visudo -cf /etc/sudoers.d/omniacli

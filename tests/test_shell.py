@@ -273,6 +273,14 @@ def test_psql_on_the_instance_database(env, monkeypatch):
     # unset options are left out (a local socket, the OS user)
     instance.options.odoo_config.write_text("[options]\ndb_host = False\ndb_user = odoo\n")
     assert plugin.db_shell(instance)[1] == {"PGDATABASE": "DB_test", "PGAPPNAME": "omniacli psql", "PGUSER": "odoo"}
+    # with run_as: through sudo as that user (peer login), keeping the PG* variables
+    import dataclasses
+
+    from omniacli.odoo import ops as odoo_ops
+
+    command, _ = plugin.db_shell(dataclasses.replace(instance, run_as="odoo"))
+    assert command == ("sudo -n -u odoo --preserve-env=PGDATABASE,PGAPPNAME,PGUSER "
+                       f"{odoo_ops.psql_path()}")
     instance.options.odoo_config.write_text("[options]\ndb_password = se cret\ndb_user = odoo\n")
     # not the real psql: a command that shows what it got, then ends
     original = type(plugin).db_shell

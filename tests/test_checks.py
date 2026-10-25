@@ -48,7 +48,10 @@ async def test_run_as_checks(env, fake_sudo):
     test.options.odoo_config.write_text("[options]\ndb_name = x\n")
     report = await checks._instance_checks(dataclasses.replace(test, run_as=getpass.getuser()))
     assert by_name(report, "test", "Run as").ok
+    psql = by_name(report, "test", "psql")
+    assert psql.ok and psql.level == checks.WARNING
     sudo = fake_sudo.read_text()
+    assert f"sudo -n -l -u {getpass.getuser()} /" in sudo and "psql" in sudo
     assert f"sudo -n -l -u {getpass.getuser()} {test.options.venv_bin}/python" in sudo
     # the probes run as that user too
     assert f"sudo -n -u {getpass.getuser()} {test.options.venv_bin}/python -c import click_odoo" in sudo

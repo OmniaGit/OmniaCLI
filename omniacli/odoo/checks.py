@@ -99,8 +99,8 @@ async def instance_checks(instance: Instance) -> list[Check]:
 
 
 async def _run_as_checks(instance: Instance) -> list[Check]:
-    """The user exists, and sudo lets this one run the venv's programs as it,
-    setting PYTHONPATH (SETENV), without a password."""
+    """The user exists, and sudo lets this one run the venv's programs and
+    psql as it, setting variables (SETENV), without a password."""
     import pwd
 
     try:
@@ -111,10 +111,18 @@ async def _run_as_checks(instance: Instance) -> list[Check]:
     python = venv_bin / "python"
     code, _ = await capture(["sudo", "-n", "-l", "-u", instance.run_as, python])
     line = f"{system_user()} ALL=({instance.run_as}) NOPASSWD:SETENV: {venv_bin}/"
-    return [Check(instance.role, "Run as", code == 0,
-                  f"sudo runs the venv's programs as {instance.run_as}" if code == 0 else
-                  f"sudo refuses to run {python} as {instance.run_as} or asks a password; "
-                  f"add to /etc/sudoers.d/omniacli: {line}")]
+    checks = [Check(instance.role, "Run as", code == 0,
+                    f"sudo runs the venv's programs as {instance.run_as}" if code == 0 else
+                    f"sudo refuses to run {python} as {instance.run_as} or asks a password; "
+                    f"add to /etc/sudoers.d/omniacli: {line}")]
+    # the psql page runs psql as that user too (a warning: only that page needs it)
+    psql = ops.psql_path()
+    code, _ = await capture(["sudo", "-n", "-l", "-u", instance.run_as, psql])
+    line = f"{system_user()} ALL=({instance.run_as}) NOPASSWD:SETENV: {psql}"
+    checks.append(Check(instance.role, "psql", code == 0,
+                        f"sudo runs {psql} as {instance.run_as}" if code == 0 else
+                        f"the psql page will not connect: add to /etc/sudoers.d/omniacli: {line}", WARNING))
+    return checks
 
 
 def server_checks(production: Instance, test: Instance) -> list[Check]:
