@@ -103,6 +103,37 @@ async def test_a_new_backup_there_restored_here(here, env):
                for j in there)
 
 
+async def test_passwords_set_to_admin(here, env):
+    odoo_version(env, "test", 18)
+    page = (await here.get("/servers/srv?view=both", headers=as_user("admin"))).text
+    assert 'data-option="reset_passwords" checked' in page and 'data-option="load_only" >' in page
+    resp = await here.post(URL, headers=as_user("dev", post=True), json={"neutralize": True, "reset_passwords": True})
+    job = await wait(here, resp.json()["job"])
+    assert job["status"] == "success", job
+    done = calls(env)
+    # after the restore, before the update of the modules
+    assert done[2].startswith("restore ")
+    assert done[3] == f"click-odoo -c {env['tmp']}/odoo.conf -d DB_test reset_passwords.py 18"
+    assert done[4].startswith("update ") and done[5] == "start odoo-test"
+
+
+async def test_load_only(here, env):
+    resp = await here.post(URL, headers=as_user("dev", post=True), json={"neutralize": True, "load_only": True})
+    job = await wait(here, resp.json()["job"])
+    assert job["status"] == "success", job
+    done = calls(env)
+    # not stopped, no module update, no restart: the restore alone
+    assert done[0].startswith("backup ") and done[1].startswith("restore ") and len(done) == 2
+    assert any("only the database is loaded" in line for line in job["lines"])
+
+
+async def test_passwords_need_the_odoo_version(here, env):
+    resp = await here.post(URL, headers=as_user("dev", post=True), json={"reset_passwords": True})
+    job = await wait(here, resp.json()["job"])
+    # refused before the instance is touched
+    assert job["status"] == "failed" and "the passwords cannot be set to admin" in job["error"]
+    assert not any(c.startswith(("stop", "restore")) for c in calls(env))
+
 async def test_a_new_backup_there_without_filestore(here, env):
     page = (await here.get("/servers/srv?view=both", headers=as_user("admin"))).text
     assert 'data-backup-option="no_filestore"' in page

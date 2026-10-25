@@ -79,6 +79,11 @@ def fake_venv(tmp_path) -> Path:
         f'#!/bin/sh\necho "restore $*" >> {calls}\n'
         f'if [ -e {tmp_path / "restore-fails"} ]; then echo "restore failed" >&2; exit 1; fi\n'
     )
+    # click-odoo runs a script: its name and arguments are recorded
+    (bin_dir / "click-odoo").write_text(
+        f'#!/bin/sh\nargs=""\nfor a; do case "$a" in */*.py) a=$(basename "$a");; esac; args="$args $a"; done\n'
+        f'echo "click-odoo$args" >> {calls}\n'
+    )
     (bin_dir / "click-odoo-backupdb").write_text(
         f'#!/bin/sh\necho "backup $*" >> {calls}\n'
         'for last; do :; done\necho dump > "$last"\n'

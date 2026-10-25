@@ -24,6 +24,8 @@ BACKUP_STAGING = Path("/var/tmp")
 CLI_PACKAGE = "click-odoo-contrib"
 # what the venv's python runs to share a filestore through hard links
 LINK_SCRIPT = Path(__file__).with_name("link_filestore.py")
+# what click-odoo runs to set every user's password to admin
+PASSWORDS_SCRIPT = Path(__file__).with_name("reset_passwords.py")
 
 
 async def update_modules(job: Job, instance: Instance, force: bool = False) -> None:
@@ -307,6 +309,25 @@ async def restore(job: Job, instance: Instance, backup_zip: Path, neutralize: bo
     finally:
         shutil.rmtree(staging, ignore_errors=True)
 
+
+
+async def reset_passwords(job: Job, instance: Instance, major: int) -> None:
+    """click-odoo runs reset_passwords.py on the instance's database, as the
+    user the instance runs as: every user's password becomes admin."""
+    opts = instance.options
+    job.log(f"--- every user's password in database {opts.database} set to admin")
+    env = odoo_env(instance)
+    # a copy of the script any user may read, in a folder only OmniaCLI writes to
+    staging = Path(tempfile.mkdtemp(prefix="omniacli-passwords-", dir=BACKUP_STAGING))
+    try:
+        staging.chmod(0o755)
+        script = staging / PASSWORDS_SCRIPT.name
+        shutil.copyfile(PASSWORDS_SCRIPT, script)
+        script.chmod(0o644)
+        cmd = [opts.venv_bin / "click-odoo", "-c", opts.odoo_config, "-d", opts.database, script, str(major)]
+        await run(job, as_user(instance.run_as, cmd, env), env=env)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
 
 
 async def share_filestore(job: Job, instance: Instance, src: Path, dst: Path, check: bool = False) -> None:

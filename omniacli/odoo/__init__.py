@@ -336,19 +336,28 @@ class OdooPlugin(ServicePlugin):
 
     def restore_fields(self) -> list[Field]:
         return [Field("neutralize", "Neutralize (Odoo 16 and later): no scheduled actions, no outgoing mail",
-                      kind="checkbox", default=True)]
+                      kind="checkbox", default=True),
+                Field("reset_passwords", "Every user's password set to admin", kind="checkbox", default=True),
+                Field("load_only", "Only load the database: not stopped, no module update, no restart "
+                      "(development)", kind="checkbox", default=False)]
 
     async def restore(self, job: Job, instance: Instance, backup_zip: Path, options: dict) -> None:
         """Stop the instance, restore the backup into its database, update the
         changed modules, start it. Refused, before anything is touched, for a
         backup of another Odoo version and for Odoo 20 and later."""
-        await self._restore(job, instance, backup_zip, bool(options.get("neutralize", True)))
+        # a schedule saved before the option keeps its passwords
+        await self._restore(job, instance, backup_zip, bool(options.get("neutralize", True)),
+                            reset_passwords=bool(options.get("reset_passwords", False)),
+                            load_only=bool(options.get("load_only", False)))
 
     async def _restore(self, job: Job, instance: Instance, backup_zip: Path, neutralize: bool,
-                       shared: tuple[Path, Path] | None = None) -> None:
+                       shared: tuple[Path, Path] | None = None, reset_passwords: bool = False,
+                       load_only: bool = False) -> None:
         """restore(); with shared (production's filestore, the instance's), the
         instance's filestore is made of hard links to production's files after
-        the restore of a backup without filestore."""
+        the restore of a backup without filestore; with reset_passwords every
+        user's password becomes admin; with load_only the instance is neither
+        stopped nor updated nor restarted."""
         odoo_bin = ops.find_odoo_bin(instance)
         major = ops.odoo_major(odoo_bin) if odoo_bin else None
         found = ops.backup_major(backup_zip)
@@ -361,6 +370,9 @@ class OdooPlugin(ServicePlugin):
         major = major if major is not None else found
         if major is not None and major >= 20:
             raise JobFailed("click-odoo-restoredb does not restore Odoo 20 and later")
+        if reset_passwords and major is None:
+            raise JobFailed("the Odoo version is unknown (no odoo-bin, no manifest.json in the backup): "
+                            "the passwords cannot be set to admin")
         if neutralize and major is not None and major < 16:
             neutralize = False
             job.log(f"WARNING: Odoo {major} cannot be neutralized (Odoo 16 and later): the copy keeps "
@@ -370,8 +382,10 @@ class OdooPlugin(ServicePlugin):
                     "servers of the backup")
         # init.d: no stop from here; Odoo's drop of the database ends its
         # connections, and the restart at the end starts it on the copy
-        stoppable = instance.restart.type in ("systemd", "process")
-        if stoppable:
+        stoppable = instance.restart.type in ("systemd", "process") and not load_only
+        if load_only:
+            job.log(f"--- only the database is loaded: {instance.key} is not stopped, updated or restarted")
+        elif stoppable:
             await stop(job, instance)
         else:
             job.log(f"--- {instance.key} is an init.d service: not stopped, restarted at the end")
@@ -379,10 +393,16 @@ class OdooPlugin(ServicePlugin):
             await ops.restore(job, instance, backup_zip, neutralize)
             if shared:
                 await ops.share_filestore(job, instance, *shared)
+            if reset_passwords:
+                await ops.reset_passwords(job, instance, major)
         except JobFailed:
             job.log(f"{instance.key}" + (" is left stopped" if stoppable else " is not restarted")
                     + ": its database may be missing or half restored")
             raise
+        if load_only:
+            job.log(f"WARNING: the modules of {instance.key} are not updated and it is not restarted: "
+                    "do it by hand when the code differs from the backup's")
+            return
         await ops.update_modules(job, instance, force=True)
         if stoppable:
             await start(job, instance)
