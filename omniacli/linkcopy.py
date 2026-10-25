@@ -29,15 +29,30 @@ BACKUP_NAME = re.compile(r"[A-Za-z0-9._-]+\.zip")
 _FINISHED = ("success", "failed", "stopped", "interrupted")
 
 
+def _said(resp: httpx.Response) -> str:
+    """What the answer says (read): an OmniaCLI's detail or error, else the
+    start of its text (a proxy's page)."""
+    try:
+        data = resp.json()
+    except ValueError:
+        data = None
+    if isinstance(data, dict) and isinstance(data.get("detail") or data.get("error"), str):
+        return data.get("detail") or data.get("error")
+    text = " ".join(resp.text.split())
+    return text[:200] + ("..." if len(text) > 200 else "")
+
+
 def _refused(link: LinkTarget, resp: httpx.Response, what: str) -> JobFailed:
+    said = _said(resp)
+    said = f": {said}" if said else ""
     if resp.status_code == 401:
-        return JobFailed(f"{link.name} refused the link's token: ask it for a new one")
+        return JobFailed(f"{link.name} refused the link's token: ask it for a new one{said}")
     if resp.status_code == 403:
         return JobFailed(f"{link.name} refused {what}: the developer role is needed there, for the link "
-                         "and for you")
+                         f"and for you{said}")
     if resp.status_code == 404:
-        return JobFailed(f"{link.name} does not know {what} (404)")
-    return JobFailed(f"{link.name} answered HTTP {resp.status_code} to {what}")
+        return JobFailed(f"{link.name} does not know {what} (404){said}")
+    return JobFailed(f"{link.name} answered HTTP {resp.status_code} to {what}{said}")
 
 
 async def _remote_backup(job: Job, client: httpx.AsyncClient, link: LinkTarget, headers: dict,
@@ -92,6 +107,7 @@ async def _download(job: Job, client: httpx.AsyncClient, link: LinkTarget, heade
     try:
         async with client.stream("GET", f"/backups/{src.server}/{src.role}/{name}", headers=headers) as resp:
             if resp.status_code != 200:
+                await resp.aread()
                 raise _refused(link, resp, f"the backup {name} of {src.server}/{src.role}")
             length = int(resp.headers.get("content-length") or 0)
             # since: the page's first look gets a speed
