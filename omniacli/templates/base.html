@@ -73,6 +73,16 @@ details.group > summary h2 { display: inline; font-size: 17px; }
   border-radius: var(--r); background: var(--bg); color: var(--text); }
 header a { color: var(--text); text-decoration: none; }
 header a:hover { color: var(--accent); }
+/* the header's groups: open on hover, or on a click (the focus) for touch screens */
+.menu { position: relative; }
+.menu-label { border: 0; background: none; padding: 0; color: var(--text); }
+.menu-label:hover, .menu:focus-within .menu-label { color: var(--accent); }
+.menu-items { display: none; position: absolute; top: 100%; left: -12px; padding-top: 6px; z-index: 11; }
+.menu:hover .menu-items, .menu:focus-within .menu-items { display: block; }
+.menu-items a { display: block; padding: 6px 12px; min-width: 140px; white-space: nowrap;
+  background: var(--panel); border: 1px solid var(--border); border-top-width: 0; }
+.menu-items a:first-child { border-top-width: 1px; border-radius: var(--r) var(--r) 0 0; }
+.menu-items a:last-child { border-radius: 0 0 var(--r) var(--r); }
 main { padding: 20px; max-width: 1400px; margin: 0 auto; }
 a { color: var(--accent); }
 h1 { font-size: 20px; margin: 0 0 16px; }
@@ -321,14 +331,24 @@ summary { cursor: pointer; color: var(--muted); }
   <strong><a class="brand" href="{{ prefix }}/"><img src="/icon-180.png" alt=""><span class="brand-name">Omnia<span>CLI</span></span></a></strong>
   <a href="{{ prefix }}/">Dashboard</a>
   <a href="{{ prefix }}/jobs">Jobs</a>
-  {% if is_admin %}<a href="{{ prefix }}/config">Servers</a>
-  <a href="{{ prefix }}/users">Users</a>
-  <a href="{{ prefix }}/links">Links</a>
-  <a href="{{ prefix }}/schedules">Schedules</a>
-  <a href="{{ prefix }}/plugins">Plugins</a>
-  <a href="{{ prefix }}/options">Options</a>
-  <a href="{{ prefix }}/omniacli/log" title="OmniaCLI's own log">Log</a>{% endif %}
-  {% if account and not prefix %}<a href="/tunnels">Tunnels</a>{% endif %}
+  {% if is_admin or (can_act and account and not prefix) %}<div class="menu">
+    <button type="button" class="menu-label" aria-haspopup="true">Configure ▾</button>
+    <div class="menu-items">
+      {% if is_admin %}<a href="{{ prefix }}/config">Servers</a>
+      <a href="{{ prefix }}/links">Links</a>
+      <a href="{{ prefix }}/schedules">Schedules</a>{% endif %}
+      {% if can_act and account and not prefix %}<a href="/tunnels">Tunnels</a>{% endif %}
+    </div>
+  </div>{% endif %}
+  {% if is_admin %}<div class="menu">
+    <button type="button" class="menu-label" aria-haspopup="true">Settings ▾</button>
+    <div class="menu-items">
+      <a href="{{ prefix }}/plugins">Plugins</a>
+      <a href="{{ prefix }}/users">Users</a>
+      <a href="{{ prefix }}/omniacli/log" title="OmniaCLI's own log">Log</a>
+      <a href="{{ prefix }}/options">Options</a>
+    </div>
+  </div>{% endif %}
   {% if can_act %}<a href="{{ prefix }}/help">Help</a>{% endif %}
   <span class="head-end">
     {% if account %}<a href="{{ prefix }}/account" title="Your account and password">{{ account }}</a>

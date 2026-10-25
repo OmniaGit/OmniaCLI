@@ -195,7 +195,8 @@ prepared before Test & activate. The job's log opens in a new tab.
   `options.yaml` next to the servers file (`options_file` in the main
   configuration): the text size the shell and Claude pages open with
   (8-40 pixels, default 14).
-- **Tunnels** (every user who logs in, `/tunnels`): a port of this machine
+- **Tunnels** (every user who logs in, `/tunnels`; the menu names it to
+  developers and administrators only): a port of this machine
   that reaches the web interface of an instance of a linked OmniaCLI, for
   when this OmniaCLI reaches it and the browser does not. Every connection
   to the port travels in a WebSocket of its own through the link; the

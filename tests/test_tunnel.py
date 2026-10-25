@@ -99,7 +99,8 @@ def my_app(tmp_path, url, ports):
     (conf / "options.yaml").write_text(yaml.safe_dump({"tunnel": {"ports": ports}}))
     settings = parse_settings({
         "auth": {"users": {"admin": USER_HASH, "viewer": {"password": USER_HASH, "role": "user"},
-                           "other": {"password": USER_HASH, "role": "user"}},
+                           "other": {"password": USER_HASH, "role": "user"},
+                           "dev": {"password": USER_HASH, "role": "developer"}},
                  "tokens": {"tester": hash_token(TOKEN)}},
         "backup_dir": str(tmp_path / "my-backups"), "jobs_dir": str(tmp_path / "my-jobs"),
         "servers_file": "servers.yaml",
@@ -154,7 +155,9 @@ def test_tunnel_through_a_link(env, tmp_path, customer):
     with TestClient(mine) as c:
         page = c.get("/tunnels", headers=browser(mine, "viewer")).text
         assert 'data-server="srv"' in page and 'data-roles="production test"' in page
-        assert 'href="/tunnels"' in page
+        # the menu names the page to developers and administrators only
+        assert 'href="/tunnels"' not in page
+        assert 'href="/tunnels"' in c.get("/tunnels", headers=browser(mine, "dev")).text
         # a user may open one (the link's role capped to user is enough there)
         resp = c.post("/api/tunnels/open", json={"link": "cliente", "server": "srv", "role": "test"},
                       headers=browser(mine, "viewer"))
