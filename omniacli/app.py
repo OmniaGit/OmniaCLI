@@ -28,13 +28,14 @@ from fastapi.templating import Jinja2Templates
 from starlette.background import BackgroundTask
 from starlette.requests import HTTPConnection
 
-from . import checks, disks, linkcopy, ops, plugins, schedules, shell, tunnel
+from . import checks, disks, linkcopy, ops, plugins, schedules, selflog, shell, tunnel
 from .accesslog import AccessLog
 from .diskhistory import DiskHistory, DiskRecorder
 from .auth import ROLES as ACCESS_ROLES
 from .auth import Authenticator, Principal, hash_password, hash_token, new_token, verify_password
 from .config import (
     ROLES,
+    SERVER_NAME,
     SHELL_FONT_SIZES,
     TUNNEL_IDLE_HOURS,
     Access,
@@ -216,6 +217,8 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
     except ConfigError as exc:
         schedules_error = str(exc)
     access_log = AccessLog(settings.logs_dir / "access.jsonl")
+    # OmniaCLI's own log (selflog), shown to the admins
+    own_log_file = settings.logs_dir / "omniacli.log"
     # the browsers' logins: next to the jobs, like the access log
     sessions = SessionStore(settings.jobs_dir.parent / "sessions.json")
     tunnels = tunnel.TunnelManager(
@@ -300,6 +303,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
+        own_log = selflog.attach(own_log_file)
         updater.start()
         scheduler.start()
         sampler.start()
@@ -317,6 +321,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         await updater.stop()
         await scheduler.stop()
         await link_clients.close()
+        selflog.detach(own_log)
 
     app = FastAPI(
         title="OmniaCLI",
@@ -1071,6 +1076,20 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             return JSONResponse({"error": f"Cannot read {instance.log_file}: {exc.strerror}"},
                                 status_code=404)
 
+    @app.get("/omniacli/log", dependencies=[Depends(admin)])
+    async def own_log_page(request: Request):
+        return _TEMPLATES.TemplateResponse(request, "own_log.html", {"log_file": own_log_file})
+
+    @app.get("/api/omniacli/log", dependencies=[Depends(admin)])
+    async def own_log_read(pos: Optional[int] = None, inode: Optional[int] = None):
+        """OmniaCLI's own log lines after pos (the last 300 when pos is missing)."""
+        try:
+            return await asyncio.to_thread(read_since, own_log_file, pos, inode)
+        except FileNotFoundError:
+            return {"lines": [], "pos": None, "inode": None, "rotated": False, "more": False}
+        except OSError as exc:
+            return JSONResponse({"error": f"Cannot read {own_log_file}: {exc.strerror}"}, status_code=404)
+
     @app.get("/jobs")
     async def job_list(request: Request, server: str = "", q: str = ""):
         """Every job kept, filtered by server and by text (title, started
@@ -1307,6 +1326,60 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             except OSError as exc:
                 raise ConfigError(f"Cannot write {settings.servers_file}: {exc}") from exc
             return parsed
+
+    @app.get("/config/discover", dependencies=[Depends(admin)])
+    async def config_discover(request: Request):
+        return _TEMPLATES.TemplateResponse(request, "discover.html", {"roles": ROLES})
+
+    @app.get("/api/servers/discover", dependencies=[Depends(admin)])
+    async def discover_list():
+        """What every plugin finds on this machine (Discover page)."""
+        known = [i for s in settings.servers.values() for i in s.instances.values()]
+        found = []
+        for name, plugin in plugins.registry().plugins.items():
+            try:
+                items = await plugin.discover([i for i in known if i.type == name])
+            except Exception as exc:  # noqa: BLE001 - one plugin does not hide the others
+                _logger.exception("discover of %s", name)
+                found.append({"type": name, "type_label": plugin.label, "error": str(exc)})
+                continue
+            found.extend({"type": name, "type_label": plugin.label, **item.to_dict()} for item in items)
+        return {"found": found, "names": sorted(settings.servers)}
+
+    @app.post("/api/servers/discover", dependencies=[Depends(admin)])
+    async def discover_save(payload: dict = Body(...)):
+        """Save what the Discover page chose as drafts: items of {name, role,
+        type, instance}; the items of one name are the instances of one server."""
+        servers: dict[str, dict] = {}
+        for item in payload.get("items") or []:
+            if not isinstance(item, dict) or not isinstance(item.get("instance"), dict):
+                return refuse("Every item needs a name, a role, a type and its instance")
+            name, role = str(item.get("name") or "").strip(), str(item.get("role") or "")
+            kind = str(item.get("type") or "")
+            if not SERVER_NAME.fullmatch(name):
+                return refuse(f"{name!r}: a server name is letters, digits, '.', '_' and '-'")
+            if role not in ROLES:
+                return refuse(f"{name}: the role is {' or '.join(ROLES)}")
+            server = servers.setdefault(name, {"type": kind, "status": "draft"})
+            if server["type"] != kind:
+                return refuse(f"{name}: its instances are of different types")
+            if role in server:
+                return refuse(f"{name}: two instances of role {role}")
+            server[role] = item["instance"]
+        if not servers:
+            return refuse("Choose at least one instance")
+        async with config_lock:
+            taken = [n for n in servers if n in settings.servers]
+            if taken:
+                return refuse(f"A server named {', '.join(taken)} already exists")
+            try:
+                parsed = parse_servers(servers, settings.logs_dir)
+            except (ConfigError, TypeError, ValueError, AttributeError) as exc:
+                return refuse(str(exc))
+            error = await store({**settings.servers, **parsed})
+            if error:
+                return error
+        return {"ok": True, "created": [{"name": n, "error": s.error} for n, s in parsed.items()]}
 
     @app.post("/api/servers/{name}/test", dependencies=[Depends(admin)])
     async def config_test(name: str):

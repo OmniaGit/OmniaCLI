@@ -326,7 +326,8 @@ summary { cursor: pointer; color: var(--muted); }
   <a href="{{ prefix }}/links">Links</a>
   <a href="{{ prefix }}/schedules">Schedules</a>
   <a href="{{ prefix }}/plugins">Plugins</a>
-  <a href="{{ prefix }}/options">Options</a>{% endif %}
+  <a href="{{ prefix }}/options">Options</a>
+  <a href="{{ prefix }}/omniacli/log" title="OmniaCLI's own log">Log</a>{% endif %}
   {% if account and not prefix %}<a href="/tunnels">Tunnels</a>{% endif %}
   {% if can_act %}<a href="{{ prefix }}/help">Help</a>{% endif %}
   <span class="head-end">

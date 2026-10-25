@@ -139,6 +139,35 @@ prepared before Test & activate. The job's log opens in a new tab.
   turns the Branch cell into a list of them. The Servers page (`/config`)
   has a search field: every word typed, in a server's name, status,
   database, repository names or branches.
+- **Discover** (Servers page, admins): for a machine where OmniaCLI is new.
+  It finds the Odoo instances there, from the processes running (an
+  `odoo-bin`, `odoo` or `openerp-server` started by a python) and from the
+  systemd units that start one, stopped ones too. For each it shows what it
+  read and fills in the instance:
+  - the Odoo config (`-c`) and, from it, the database, the log file and the
+    git repositories of the `addons_path`, each with its branch and remote;
+  - what the command line sets wins over the config: `-d`, `--logfile`,
+    `--http-port`, `--addons-path`;
+  - odoo-bin, also when it was started as a bare `odoo-bin` from its
+    folder: through the process's working directory, the unit's
+    `WorkingDirectory`, or the repositories. It is checked: the file exists
+    and `odoo/release.py` next to it gives the Odoo version. Its repository
+    is added when the `addons_path` does not name it;
+  - the venv's bin folder (the python of the command; a python outside a
+    venv is noted);
+  - the user it runs as, as `run_as` when it is not OmniaCLI's own;
+  - the service: the unit the process runs in, only when that unit's
+    `MainPID` is the process (an Odoo started by hand from a shell of
+    another service runs inside that service's unit). Started by hand, it is
+    noted, with restart type `process` proposed when it runs as OmniaCLI's
+    user.
+
+  What it could not find is listed as a note to complete by hand (a config
+  OmniaCLI's user cannot read, with the `adduser` that fixes it). Odoo in a
+  container, Odoo's gevent server and its workers are skipped; an instance
+  OmniaCLI already has is marked. Each one chosen gets a server name and a
+  role, and is saved as a **draft**: two with the same name are the
+  production and the test of one server. Nothing on the machine is changed.
 - **Draft and Test & activate**: a new or cloned server is a draft (no page,
   no actions, no auto update). *Test & activate* runs real checks as the
   OmniaCLI user and makes it live only when no check fails: Odoo config,
@@ -441,6 +470,13 @@ every call to `/mcp`, with its JSON-RPC method and tool, and every shell
 opened and closed. It is kept in
 `access.jsonl` in the logs folder next to `jobs_dir` (`/var/lib/omniacli/logs`
 for the package); past 5 MiB it moves to `access.jsonl.1`.
+
+The **Log** page (admins) shows OmniaCLI's own log: the requests it serves,
+its calls to the links, its errors, with the follow and errors-only switches
+of the instances' log. OmniaCLI writes it to `omniacli.log` in the same logs
+folder, besides what it writes to its standard output (the journal): the
+package's user `omniacli` may not read the system journal. Past 5 MiB it
+moves to `omniacli.log.1`.
 
 ### Linked instances
 
@@ -875,6 +911,9 @@ A plugin may also give:
 - **`tunnel_address()`**: where a tunnel's connection goes, from the path
   of its first request (Odoo: the bus to the gevent port); by default the
   web port on `127.0.0.1`.
+- **`discover()`**: the instances of the type found on this machine, for
+  the Discover page (`Discovered`: what was read, the instance's mapping,
+  the notes); without it, the type finds nothing.
 
 Two plugins are built in: **generic** (git repositories and a systemd or
 init.d service, nothing else: what an install without plugins has) and

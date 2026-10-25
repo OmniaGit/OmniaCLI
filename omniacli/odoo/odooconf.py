@@ -92,9 +92,19 @@ async def read_odoo_config(path: str | Path) -> dict:
     if log_file is None:
         notes.append("no logfile: Odoo logs to its standard output, set the log file by hand")
 
+    repositories = await addons_repositories(_option(parser, "addons_path"), notes)
+    if repositories and not any((Path(r["path"]) / "odoo-bin").is_file() for r in repositories):
+        notes.append("no repository holds odoo-bin: add the Odoo repository or set odoo-bin")
+    return {"database": database, "log_file": log_file,
+            "repositories": repositories, "notes": notes}
+
+
+async def addons_repositories(addons_path: str, notes: list[str]) -> list[dict]:
+    """The git repositories that hold the folders of an addons_path, each
+    once; what is wrong goes to notes."""
     repositories: list[dict] = []
     tops: set[str] = set()
-    for raw in _option(parser, "addons_path").replace("\n", ",").split(","):
+    for raw in addons_path.replace("\n", ",").split(","):
         folder = os.path.expandvars(os.path.expanduser(raw.strip()))
         if not folder:
             continue
@@ -114,10 +124,16 @@ async def read_odoo_config(path: str | Path) -> dict:
             repositories.append(await _repository(Path(top), notes))
     if not repositories:
         notes.append("no git repository found in addons_path")
-    elif not any((Path(r["path"]) / "odoo-bin").is_file() for r in repositories):
-        notes.append("no repository holds odoo-bin: add the Odoo repository or set odoo-bin")
-    return {"database": database, "log_file": log_file,
-            "repositories": repositories, "notes": notes}
+    return repositories
+
+
+async def repository_of(folder: Path, notes: list[str]) -> dict | None:
+    """The git repository holding folder, as addons_repositories gives it;
+    None when folder is not in one."""
+    code, top = await capture(["git", "rev-parse", "--show-toplevel"], cwd=folder)
+    if code:
+        return None
+    return await _repository(Path(top), notes)
 
 
 def tunnel_settings(path: str | Path) -> dict:

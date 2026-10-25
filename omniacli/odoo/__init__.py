@@ -40,7 +40,7 @@ from ..plugin_api import (
     start,
     stop,
 )
-from . import checks, odooconf, ops
+from . import checks, discover, odooconf, ops
 
 # Odoo config options that are secrets or belong to the server's own layout:
 # never given out by dev_setup
@@ -225,6 +225,9 @@ class OdooPlugin(ServicePlugin):
     def script_env(self, instance: Instance) -> dict:
         return {"OMNIACLI_DATABASE": instance.options.database,
                 "OMNIACLI_ODOO_CONFIG": str(instance.options.odoo_config)}
+
+    async def discover(self, known: list[Instance]) -> list:
+        return await discover.discover(known)
 
     def disk_paths(self, instance: Instance) -> list[tuple[str, str]]:
         data_dir = _data_dir(instance.options.odoo_config)

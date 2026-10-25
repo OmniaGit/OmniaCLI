@@ -1,0 +1,128 @@
+{# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C · SPDX-License-Identifier: AGPL-3.0-or-later -#}
+{% extends "base.html" %}
+{% block title %}Discover · OmniaCLI{% endblock %}
+{% block crumbs %}{% from "_crumbs.html" import crumbs with context %}
+{{ crumbs([("Dashboard", "/"), ("Servers", "/config"), ("Discover", None)]) }}
+{% endblock %}
+{% block content %}
+<h1>Discover</h1>
+<p class="muted">The instances running on this machine, and the systemd units that start one (stopped ones too),
+read from the processes and from systemd. Choose the ones to add, give each a server name and a role: they are
+saved as <strong>drafts</strong>, two instances with the same name as the production and the test of one server.
+Then open each draft, complete what the notes say and run <strong>Test &amp; activate</strong>.
+Nothing on the machine is changed.</p>
+<div id="error" class="banner" hidden></div>
+<div class="panel">
+  <div class="actions" style="margin: 0">
+    <button type="button" id="search">Search</button>
+    <button type="button" id="save" hidden>Create drafts</button>
+    <span id="status" class="muted"></span>
+  </div>
+</div>
+<div id="found"></div>
+<style>
+.found-item { margin-bottom: 12px; }
+.found-item h2 { font-size: 1rem; margin: 0 0 8px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.found-item dl { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin: 0 0 8px; }
+.found-item dt { color: var(--muted); }
+.found-item dd { margin: 0; overflow-wrap: anywhere; }
+.found-item ul { margin: 0 0 8px; padding-left: 20px; }
+.found-item.off { opacity: .7; }
+</style>
+<script>
+(function () {
+  const prefix = "{{ prefix }}", roles = {{ roles | list | tojson }};
+  const errorBox = document.getElementById("error"), status = document.getElementById("status");
+  const list = document.getElementById("found"), save = document.getElementById("save");
+  let found = [];
+
+  function el(tag, attrs, ...children) {
+    const node = document.createElement(tag);
+    for (const [k, v] of Object.entries(attrs || {})) {
+      if (k === "class") node.className = v; else if (v !== false && v != null) node.setAttribute(k, v === true ? "" : v);
+    }
+    node.append(...children.filter((c) => c != null));
+    return node;
+  }
+  function fail(text) { errorBox.textContent = text; errorBox.hidden = false; }
+
+  function render(data) {
+    found = data.found;
+    const taken = new Set(data.names);
+    list.replaceChildren();
+    if (!found.length) {
+      list.append(el("div", {class: "panel muted"}, "No instance found on this machine."));
+      return;
+    }
+    found.forEach((item, i) => {
+      if (item.error) {
+        list.append(el("div", {class: "panel found-item"}, el("span", {class: "error"}, `${item.type_label}: ${item.error}`)));
+        return;
+      }
+      const usable = !item.skip && !item.known;
+      let name = item.name;
+      for (let n = 2; taken.has(name); n++) name = `${item.name}_${n}`;
+      const box = el("div", {class: "panel found-item" + (usable ? "" : " off"), "data-i": i});
+      const head = el("h2", {},
+        el("input", {type: "checkbox", "data-k": "use", checked: usable, disabled: !usable, "aria-label": "Add"}),
+        el("span", {}, `${item.type_label} · ${item.label}`),
+        el("span", {class: "muted"}, item.facts.find((f) => f[0] === "State")?.[1] || ""));
+      if (item.known) head.append(el("span", {class: "badge active"}, `already ${item.known}`));
+      if (item.skip) head.append(el("span", {class: "badge draft"}, `skipped: ${item.skip}`));
+      box.append(head);
+      const facts = el("dl");
+      for (const [label, value] of item.facts) {
+        if (label !== "State") facts.append(el("dt", {}, label), el("dd", {class: "mono"}, value));
+      }
+      if (item.instance.repositories) {
+        facts.append(el("dt", {}, "Repositories"),
+          el("dd", {class: "mono"}, item.instance.repositories.map((r) => `${r.name} (${r.branch || "no branch"})`).join(", ") || "none"));
+      }
+      box.append(facts);
+      if (item.notes.length) box.append(el("ul", {}, ...item.notes.map((n) => el("li", {}, n))));
+      if (usable) {
+        const select = el("select", {"data-k": "role", "aria-label": "Role"}, ...roles.map((r) => new Option(r, r)));
+        box.append(el("div", {class: "actions", style: "margin: 0"},
+          el("label", {}, "Server name ", el("input", {type: "text", class: "mono", "data-k": "name", value: name, required: true})),
+          el("label", {}, "Role ", select)));
+      }
+      list.append(box);
+    });
+    save.hidden = !found.some((item) => !item.error && !item.skip && !item.known);
+  }
+
+  document.getElementById("search").addEventListener("click", async (ev) => {
+    const button = ev.currentTarget;
+    errorBox.hidden = true; button.disabled = true; status.textContent = "Searching…";
+    const resp = await fetch(`${prefix}/api/servers/discover`).catch(() => null);
+    const data = resp ? await resp.json().catch(() => ({})) : {};
+    button.disabled = false; status.textContent = "";
+    if (!resp || !resp.ok) return fail(data.error || data.detail || (resp ? "Error " + resp.status : "OmniaCLI cannot be reached"));
+    render(data);
+  });
+
+  save.addEventListener("click", async () => {
+    errorBox.hidden = true;
+    const items = [];
+    for (const box of list.querySelectorAll("[data-i]")) {
+      if (!box.querySelector('[data-k="use"]')?.checked) continue;
+      const item = found[Number(box.dataset.i)];
+      items.push({name: box.querySelector('[data-k="name"]').value.trim(), role: box.querySelector('[data-k="role"]').value,
+                  type: item.type, instance: item.instance});
+    }
+    if (!items.length) return fail("Choose at least one instance");
+    save.disabled = true;
+    const resp = await fetch(`${prefix}/api/servers/discover`, {method: "POST", headers: {"Content-Type": "application/json"},
+                                                                body: JSON.stringify({items})}).catch(() => null);
+    const data = resp ? await resp.json().catch(() => ({})) : {};
+    save.disabled = false;
+    if (!resp || !resp.ok) return fail(data.error || data.detail || (resp ? "Error " + resp.status : "OmniaCLI cannot be reached"));
+    list.replaceChildren(el("div", {class: "panel"}, el("p", {}, "Drafts created: open each one to complete it."),
+      el("ul", {}, ...data.created.map((c) => el("li", {},
+        el("a", {href: `${prefix}/config/${encodeURIComponent(c.name)}/edit`}, c.name),
+        c.error ? el("span", {class: "muted"}, ` · incomplete: ${c.error}`) : null)))));
+    save.hidden = true;
+  });
+})();
+</script>
+{% endblock %}

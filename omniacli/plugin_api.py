@@ -21,8 +21,9 @@ follows a pull, the backup, and the command of the process OmniaCLI starts.
 
 A plugin may also give: the fields of its settings in the server form
 (fields), buttons of its own on the server page (actions), routes of its own
-under /x/<plugin>/ (router, with templates and static files of its own), and
-its part of what the MCP tool dev_setup tells (dev_setup).
+under /x/<plugin>/ (router, with templates and static files of its own),
+its part of what the MCP tool dev_setup tells (dev_setup), and the instances
+of its type it finds on the machine (discover).
 """
 
 from __future__ import annotations
@@ -61,6 +62,7 @@ __all__ = [
     "ConfigError", "Instance", "Repository", "Server", "Job", "JobFailed",
     "run", "capture", "as_user", "restart", "start", "stop", "service_state", "base_env", "system_user",
     "ROLES", "SERVER_NAME", "USER_NAME", "Field", "FormButton", "Action", "ActionRefused", "Host",
+    "Discovered",
 ]
 
 
@@ -94,6 +96,30 @@ class Check:
     ok: bool
     detail: str
     level: str = ERROR
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
+class Discovered:
+    """An instance found on this machine (discover): what the Discover page
+    shows and, once given a server name and a role, saves as a draft.
+    key: what tells it from the others (its config file); name: the server
+    name proposed; instance: its mapping as in the servers file (it may be
+    incomplete: the draft then says what is missing); facts: (label, value)
+    shown; notes: what could not be found and what to do; known: the
+    instance of OmniaCLI already using it ("server/role"); skip: why it
+    cannot be added (in a container...), None when it can."""
+
+    key: str
+    label: str
+    name: str
+    instance: dict
+    facts: list
+    notes: list
+    known: str | None = None
+    skip: str | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -397,6 +423,12 @@ class ServicePlugin(ABC):
         add keys to the dicts of repositories."""
         return {}
 
+    async def discover(self, known: list[Instance]) -> list[Discovered]:
+        """The instances of the type that run, or are set up, on this
+        machine (Discover page of the Servers). known: the instances
+        OmniaCLI already has, to mark those it finds again."""
+        return []
+
     # what the MCP clients are told of the type (the server's instructions)
     mcp_help: str = ""
 
@@ -416,7 +448,7 @@ class ServicePlugin(ABC):
 
 
 # the methods a plugin must write as async def
-ASYNC_METHODS = ("checks", "after_pull", "backup", "restore", "dev_setup")
+ASYNC_METHODS = ("checks", "after_pull", "backup", "restore", "dev_setup", "discover")
 _ID = re.compile(r"[a-z][a-z0-9_-]{0,31}")
 
 
