@@ -207,3 +207,21 @@ async def test_groups_with_linked_servers(mine):
     assert page.index("<h2>Customers") < page.index("cliente › srv")
     # the linked instance's own page has no groups of ours
     assert "Edit groups" not in (await mine.get("/links/cliente/", headers=headers)).text
+
+
+def test_describe_websocket_refusals():
+    from websockets.datastructures import Headers
+    from websockets.exceptions import InvalidStatus
+    from websockets.http11 import Response
+
+    from omniacli.links import describe_error
+
+    def refused(code):
+        return describe_error(InvalidStatus(Response(code, "", Headers())))
+
+    # a proxy that drops the Upgrade header: the route answers 404 to plain HTTP
+    assert "does not pass WebSockets on" in refused(404)
+    assert "refused the token" in refused(401)
+    assert refused(502) == "WebSocket refused (502)"
+    # the close reason of a link's shell keeps the whole message
+    assert len(f"link nisbau: {refused(404)}".encode()) <= 120

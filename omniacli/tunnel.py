@@ -205,7 +205,8 @@ class TunnelManager:
         except InvalidStatus as exc:
             status = exc.response.status_code
             raise TunnelError(
-                f"{link.name} answered {status}: an OmniaCLI without tunnels (update it)"
+                f"{link.name} answered {status}: a proxy there that does not pass WebSockets on,"
+                " or an OmniaCLI without tunnels (update it)"
                 if status == 404 else f"{link.name} refused the tunnel ({status})") from None
         except (OSError, asyncio.TimeoutError) as exc:
             raise TunnelError(f"{link.name} cannot be reached: {exc}") from None

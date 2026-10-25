@@ -115,6 +115,17 @@ async def proxy_websocket(websocket, link: LinkTarget, path: str, headers: dict[
 
 
 def describe_error(exc: Exception) -> str:
+    from websockets.exceptions import InvalidStatus
+
+    if isinstance(exc, InvalidStatus):
+        # a WebSocket the other side answered with plain HTTP: 404 when a
+        # proxy drops the Upgrade header, or the route is not there yet
+        code = exc.response.status_code
+        if code == 401:
+            return "the other instance refused the token: ask for a new one"
+        if code == 404:
+            return "WebSocket refused (404): a proxy there that does not pass WebSockets on, or an older OmniaCLI"
+        return f"WebSocket refused ({code})"
     if isinstance(exc, httpx.TimeoutException):
         return "no answer in time"
     if isinstance(exc, httpx.ConnectError):
