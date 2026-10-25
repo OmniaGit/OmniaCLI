@@ -178,6 +178,7 @@
     tr.insertCell().textContent = job.source;
     const created = tr.insertCell(); created.className = "mono"; created.textContent = job.created;
     tr.insertCell().className = "mono job-finished";
+    tr.insertCell().className = "job-duration";
     tr.insertCell().className = "error job-error";
     return tr;
   }
@@ -198,6 +199,7 @@
       const st = tr.querySelector(".job-status");
       if (st.textContent.trim() !== job.status) statusCell(st, job.status);
       tr.querySelector(".job-finished").textContent = job.finished || "";
+      tr.querySelector(".job-duration").textContent = job.duration || "";
       tr.querySelector(".job-error").textContent = job.error || "";
     }
   }

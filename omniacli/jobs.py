@@ -66,6 +66,28 @@ class Job:
     def finished_flag(self) -> bool:
         return self.status in FINISHED
 
+    @property
+    def duration(self) -> str:
+        """How long it ran: from its start to its end, or to now while it
+        runs; empty when it never started."""
+        if not self.started:
+            return ""
+        start = datetime.datetime.fromisoformat(self.started)
+        end = datetime.datetime.fromisoformat(self.finished) if self.finished else datetime.datetime.now()
+        return duration_text((end - start).total_seconds())
+
+
+def duration_text(seconds: float) -> str:
+    """12 s, 3 min 05 s, 1 h 02 min."""
+    seconds = max(0, int(seconds))
+    hours, rest = divmod(seconds, 3600)
+    minutes, seconds = divmod(rest, 60)
+    if hours:
+        return f"{hours} h {minutes:02d} min"
+    if minutes:
+        return f"{minutes} min {seconds:02d} s"
+    return f"{seconds} s"
+
 
 def filter_jobs(jobs: list[Job], server: str = "", query: str = "") -> list[Job]:
     """The jobs of a server and containing every word of query (title,

@@ -5,7 +5,7 @@ import asyncio
 import os
 
 from omniacli import ops
-from omniacli.jobs import STOPPED, SUCCESS, JobManager
+from omniacli.jobs import STOPPED, SUCCESS, Job, JobManager, duration_text
 
 from .test_app import AUTH, HOST, POST, basic, client, wait_job  # noqa: F401
 
@@ -90,3 +90,13 @@ async def test_only_an_admin_stops_a_job(client, env):
     assert data["status"] == "stopped" and data["error"] == "stopped by admin"
     assert (await client.post(f"/jobs/{job.id}/stop", headers=POST)).status_code == 409
     assert f'action="/jobs/{job.id}/stop"' not in (await client.get(f"/jobs/{job.id}", headers={"Authorization": AUTH})).text
+
+
+def test_duration():
+    assert duration_text(12.7) == "12 s"
+    assert duration_text(185) == "3 min 05 s"
+    assert duration_text(3720) == "1 h 02 min"
+    job = Job(id="x", title="t", instances=[], source="s")
+    assert job.duration == ""
+    job.started, job.finished = "2026-10-25T10:00:00", "2026-10-25T10:01:30"
+    assert job.duration == "1 min 30 s"

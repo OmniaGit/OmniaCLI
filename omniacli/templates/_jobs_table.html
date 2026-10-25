@@ -2,7 +2,7 @@
 {% from "_icons.html" import runner %}
 <div class="scroll">
 <table>
-  <tr><th>Job</th><th>Server</th><th>Status</th><th>Started by</th><th>Created</th><th>Finished</th><th>Error</th></tr>
+  <tr><th>Job</th><th>Server</th><th>Status</th><th>Started by</th><th>Created</th><th>Finished</th><th>Duration</th><th>Error</th></tr>
   {% for job in jobs %}
   <tr data-job="{{ job.id }}">
     <td><a href="{{ prefix }}/jobs/{{ job.id }}">{{ job.title }}</a></td>
@@ -11,10 +11,11 @@
     <td>{{ job.source }}</td>
     <td class="mono">{{ job.created }}</td>
     <td class="mono job-finished">{{ job.finished or "" }}</td>
+    <td class="job-duration">{{ job.duration }}</td>
     <td class="error job-error">{{ job.error or "" }}</td>
   </tr>
   {% else %}
-  <tr><td colspan="7" class="muted">{{ "No jobs match." if server or q else "No jobs yet." }}</td></tr>
+  <tr><td colspan="8" class="muted">{{ "No jobs match." if server or q else "No jobs yet." }}</td></tr>
   {% endfor %}
 </table>
 </div>

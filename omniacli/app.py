@@ -1130,7 +1130,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         return {
             "jobs": [{"id": j.id, "title": j.title, "status": j.status, "instances": j.instances,
                       "servers": j.servers, "source": j.source, "created": j.created,
-                      "finished": j.finished, "error": j.error} for j in found],
+                      "finished": j.finished, "duration": j.duration, "error": j.error} for j in found],
             "busy": sorted({key for j in jobs.jobs.values() if j.status == "running" for key in j.instances}),
         }
 
@@ -1140,6 +1140,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         if job is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "No such job")
         data = asdict(job)
+        data["duration"] = job.duration
         data["lines"] = job.lines[since:]
         data["next"] = len(job.lines)
         return JSONResponse(data)

@@ -101,6 +101,7 @@
     <dt>Instances</dt><dd>{{ job.instances | join(", ") }}</dd>
     <dt>Created</dt><dd class="mono">{{ job.created }}</dd>
     <dt>Finished</dt><dd class="mono" id="finished">{{ job.finished or "" }}</dd>
+    <dt>Duration</dt><dd id="duration">{{ job.duration }}</dd>
     <dt>Error</dt><dd class="error" id="error">{{ job.error or "" }}</dd>
   </dl>
   <p id="download" hidden></p>
@@ -127,6 +128,7 @@
     st.textContent = data.status; st.className = "status " + data.status;
     showState(data.status);
     document.getElementById("finished").textContent = data.finished || "";
+    document.getElementById("duration").textContent = data.duration || "";
     document.getElementById("error").textContent = data.error || "";
     if ({{ can_act | tojson }} && data.status === "success" && data.result && data.result.download) offerDownload(data.result);
     if (data.result && data.result.progress) showSteps(data.result.progress, data.status);
