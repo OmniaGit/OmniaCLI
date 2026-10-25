@@ -306,6 +306,75 @@ The package:
 - installs `/etc/sudoers.d/omniacli`, all comments, to be completed;
 - on purge, deletes configuration and jobs but keeps the backups.
 
+### First setup on a machine where Odoo already runs
+
+The usual case: Odoo installed as the system user `odoo`, its configs and
+logs readable by group `odoo` only, a systemd service per instance. After
+`apt install`, as root:
+
+1. **Let OmniaCLI read the Odoo configs and logs.** Add `omniacli` to the
+   group `odoo`, but only if that group exists: `adduser` to a missing group
+   fails (checked on Debian 11, 12 and Ubuntu 22.04, 24.04). The service gets
+   the new group only when it starts again:
+
+   ```bash
+   getent group odoo && sudo adduser omniacli odoo
+   sudo systemctl restart omniacli
+   sudo -u omniacli head -c 1 /etc/odoo/odoo.conf; echo " $?"   # 0: readable
+   ```
+
+   Without a group `odoo` (configs owned by another user), give read access
+   to each file with an ACL instead (see Configuration cases below).
+
+2. **Let OmniaCLI run the venv's programs as `odoo`** (`run_as: odoo`:
+   click-odoo, `odoo-bin -u`, pip, the database checks), in
+   `/etc/sudoers.d/omniacli`. Either one line per venv, which is what the
+   **Run as** check prints:
+
+   ```
+   omniacli ALL=(odoo) NOPASSWD:SETENV: /opt/odoo/venvs/odoo18/bin/
+   ```
+
+   or one line for every venv of the machine, including the ones made later:
+
+   ```
+   omniacli ALL=(odoo) NOPASSWD:SETENV: ALL
+   ```
+
+   The second one gives no more than the first in practice, because the
+   venv's `python` runs any code it is given. With either, OmniaCLI acts as
+   `odoo`, never as root. A line naming `odoo` can be written before that
+   user exists, for example before Odoo is installed: `visudo` accepts it,
+   the other sudo rules keep working, and `sudo -u odoo` answers
+   `unknown user odoo` until the user is created, then works (checked on
+   Debian 11, 12, 13 and Ubuntu 22.04, 24.04, sudo 1.9.5 to 1.9.16).
+
+3. **Let OmniaCLI restart, start and stop each Odoo service**: one exact
+   line per service and action, as root. No wildcard: `systemctl restart *`
+   would let OmniaCLI restart any service of the machine, `ssh` included.
+   The **Restart permission** and **Start/Stop permission** checks print the
+   lines missing:
+
+   ```
+   omniacli ALL=(root) NOPASSWD: /usr/bin/systemctl --no-ask-password restart odoo-prod
+   omniacli ALL=(root) NOPASSWD: /usr/bin/systemctl --no-ask-password start odoo-prod
+   omniacli ALL=(root) NOPASSWD: /usr/bin/systemctl --no-ask-password stop odoo-prod
+   ```
+
+   Check the file after every change: `sudo visudo -cf /etc/sudoers.d/omniacli`
+   (a broken sudoers file can stop every `sudo` of the machine).
+
+4. **Give OmniaCLI the repositories and a git key**: git runs as
+   `omniacli`, which must own the repositories and reach their remotes
+   without a prompt (see "dubious ownership" and the deploy key under
+   Configuration cases below).
+
+5. **Add the servers**: on the web interface, **Servers → Discover** finds
+   every Odoo running, and every systemd unit that starts one, and saves
+   the chosen ones as drafts. Complete what its notes say, then run
+   **Test & activate** on each: its checks say which of the steps above is
+   still missing, with the line or the command to add.
+
 ### The service as another user (OMNIACLI_USER)
 
 On a development workstation the repositories, the Odoo configs and the logs
