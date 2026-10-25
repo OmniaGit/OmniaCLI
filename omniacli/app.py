@@ -1915,6 +1915,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
                 src = inst.from_link
                 targets[inst.key] = {
                     "live": srv.active,
+                    "type": srv.type,
                     "has_restore": bool(plugin and plugin.has_restore),
                     "backup_fields": [_field_dict(f) for f in plugin.backup_fields()] if plugin else [],
                     "restore_fields": [_field_dict(f) for f in plugin.restore_fields()] if plugin else [],

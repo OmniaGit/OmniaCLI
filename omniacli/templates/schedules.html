@@ -80,9 +80,11 @@ Saved in <span class="mono">{{ schedules_file }}</span>.</p>
   <div id="copy-box" class="form-grid" style="margin-top: 8px">
     <label for="f-link">Link</label>
     <select id="f-link">{% for l in links %}<option value="{{ l }}">{{ l }}</option>{% endfor %}</select>
-    <label for="f-src-server">Server there</label><input type="text" id="f-src-server">
+    <label for="f-src-server">Server there</label>
+    <div><select id="f-src-server" title="A server of the instance's type there, with its databases"></select>
+      <p class="muted" id="f-src-note" hidden style="margin: 4px 0 0"></p></div>
     <label for="f-src-role">Its role</label>
-    <select id="f-src-role"><option value="production">production</option><option value="test">test</option></select>
+    <select id="f-src-role"></select>
     <label>Backup there</label><div id="f-backup-options"></div>
     <label>Restore here</label><div id="f-restore-options"></div>
     <label for="f-keep">Backups kept here</label>
@@ -107,6 +109,7 @@ Saved in <span class="mono">{{ schedules_file }}</span>.</p>
   </div>
 </form>
 
+{% include "_link_source.html" %}
 <script>
 (function () {
   const SCHEDULES = {{ schedules | map(attribute="data") | list | tojson }};
@@ -173,8 +176,7 @@ Saved in <span class="mono">{{ schedules_file }}</span>.</p>
     const target = TARGETS[$("f-instance").value] || {};
     const src = copy || target.from_link || {};
     $("f-link").value = LINKS.includes(src.link) ? src.link : (LINKS[0] || "");
-    $("f-src-server").value = src.server || "";
-    $("f-src-role").value = src.role || "production";
+    offerServers($("f-link").value === src.link ? src : {});
     $("f-keep").value = copy ? copy.keep_backups : 3;
     optionBoxes($("f-backup-options"), target.backup_fields || [], copy && copy.backup_options);
     optionBoxes($("f-restore-options"), target.restore_fields || [], copy && copy.restore_options);
@@ -212,6 +214,13 @@ Saved in <span class="mono">{{ schedules_file }}</span>.</p>
   }
   $("new").onclick = () => open(null);
   $("cancel").onclick = () => { form.hidden = true; };
+  // the servers there of the instance's type, current chosen (fillLinkSource)
+  function offerServers(current) {
+    const target = TARGETS[$("f-instance").value] || {};
+    fillLinkSource({prefix, link: $("f-link").value, type: target.type || "", server: $("f-src-server"),
+                    role: $("f-src-role"), current, note: $("f-src-note")});
+  }
+  $("f-link").onchange = () => offerServers({});
   $("f-instance").onchange = () => { fillCopy(null); sync(); };
   $("f-copy").onchange = sync;
   $("f-script").onchange = sync;
@@ -224,7 +233,7 @@ Saved in <span class="mono">{{ schedules_file }}</span>.</p>
       user: $("f-user").value.trim(), pull: $("f-pull").checked, history: $("f-history").value,
     };
     if ($("f-copy").checked) schedule.copy = {
-      link: $("f-link").value, server: $("f-src-server").value.trim(), role: $("f-src-role").value,
+      link: $("f-link").value, server: $("f-src-server").value, role: $("f-src-role").value,
       backup_options: optionValues($("f-backup-options")), restore_options: optionValues($("f-restore-options")),
       keep_backups: $("f-keep").value,
     };

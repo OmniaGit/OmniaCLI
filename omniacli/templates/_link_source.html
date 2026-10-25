@@ -1,0 +1,53 @@
+{# fillLinkSource(): the instances of a linked OmniaCLI as two selects, the
+   server there and its role, read from its /api/servers through the link
+   proxy. Included by server_form.html and schedules.html. #}
+<script>
+// Fill the selects server and role with the servers of type (all: empty) the
+// link answers, each named with its databases, and the roles of the chosen
+// one. current ({server, role}) stays chosen; a choice the link no longer
+// lists (or one it cannot be asked about) stays, marked, and note says why.
+async function fillLinkSource({prefix, link, type, server, role, current, note}) {
+  const seq = server._seq = (server._seq || 0) + 1;
+  current = current || {};
+  let servers = [], problem = "";
+  if (link) {
+    try {
+      const resp = await fetch(`${prefix}/links/${encodeURIComponent(link)}/api/servers`,
+                               {headers: {Accept: "application/json"}});
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const data = await resp.json();
+      servers = (Array.isArray(data) ? data : data.servers || [])
+        .filter(s => s && s.name && (!type || s.type === type));
+    } catch (err) {
+      problem = `Cannot read the servers of ${link} (${err.message}): the saved choice is kept.`;
+    }
+  }
+  if (seq !== server._seq) return;  // a newer fill started meanwhile
+  const known = Object.fromEntries(servers.map(s => [s.name, s]));
+  const what = (inst) => inst && inst.database ? ` — ${inst.database}` : "";
+  server.replaceChildren();
+  for (const s of servers) {
+    const dbs = Object.entries(s.instances || {}).map(([r, inst]) => r + what(inst)).join(", ");
+    server.add(new Option(dbs ? `${s.name} (${dbs})` : s.name, s.name));
+  }
+  if (current.server && !known[current.server]) {
+    server.add(new Option(`${current.server} (not on ${link})`, current.server));
+    if (!problem && link) problem = `${link} has no ${type || ""} server ${current.server}: choose one of its servers.`;
+  }
+  if (!server.options.length) server.add(new Option(link ? `no ${type || ""} server on ${link}` : "", ""));
+  if (current.server) server.value = current.server;
+  function roles() {
+    const s = known[server.value], chosen = role.value || current.role || "production";
+    role.replaceChildren();
+    const have = s ? Object.keys(s.instances || {}) : ["production", "test"];
+    for (const r of ["production", "test"].filter(r => have.includes(r))) {
+      role.add(new Option(r + what(s && s.instances[r]), r));
+    }
+    role.value = have.includes(chosen) ? chosen : (role.options[0] ? role.options[0].value : "");
+  }
+  role.replaceChildren();
+  roles();
+  server.onchange = roles;
+  if (note) { note.textContent = problem; note.hidden = !problem; }
+}
+</script>

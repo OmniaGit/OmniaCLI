@@ -55,8 +55,9 @@
         <label class="from-link-row">Database from link</label>
         <div class="from-link-row with-button" title="Copy from link: an instance of a linked OmniaCLI whose backups are restored into this one">
           <select data-k="from_link.link" class="from-link-link"><option value="">none</option></select>
-          <input type="text" data-k="from_link.server" class="mono from-link-server" placeholder="server there" list="">
-          <select data-k="from_link.role"><option value="production">production</option><option value="test">test</option></select>
+          <select data-k="from_link.server" class="from-link-server" title="A server of the same type there, with its databases"></select>
+          <select data-k="from_link.role" class="from-link-role"></select>
+          <span class="muted from-link-note" hidden></span>
         </div>
       </div>
       <div class="conf-notes" hidden></div>
@@ -72,6 +73,7 @@
   </fieldset>
 </template>
 
+{% include "_link_source.html" %}
 <script>
 const MODEL = {{ model | tojson }};
 const ROLES = ["production", "test"];
@@ -206,7 +208,7 @@ for (const role of ROLES) {
     const value = get(values, input.dataset.k);
     if (input.type === "checkbox") input.checked = !!value; else input.value = value == null ? "" : value;
   }
-  linkFields(box, get(values, "from_link.link") || "");
+  linkFields(box, get(values, "from_link") || {});
   const tbody = box.querySelector("tbody");
   for (const repo of values.repositories || []) repoRow(tbody, repo);
   box.querySelector(".add-repo").onclick = () => repoRow(tbody, {remote: "origin"});
@@ -220,32 +222,29 @@ typeSelect.onchange = () => {
   for (const role of ROLES) {
     pluginFields(boxes[role], role, roleValues(boxes[role]));
     for (const el of boxes[role].querySelectorAll(".from-link-row")) el.hidden = !currentType().has_restore;
+    boxes[role].offerLinkServers();
   }
 };
 
 // Database from link: the links of this instance; a link no longer there
-// stays shown, to be changed. The servers there are offered once a link is chosen.
-function linkFields(box, current) {
+// stays shown, to be changed. The server there and its role are chosen among
+// the servers of this type the link answers (fillLinkSource).
+function linkFields(box, saved) {
   const select = box.querySelector(".from-link-link");
+  const current = saved.link || "";
   for (const name of MODEL.links) select.add(new Option(name, name));
   if (current && !MODEL.links.includes(current)) select.add(new Option(current + " (no such link)", current));
   select.value = current;
-  const server = box.querySelector(".from-link-server");
-  const listId = "from-link-servers-" + Math.random().toString(36).slice(2);
-  const datalist = document.createElement("datalist");
-  datalist.id = listId; server.setAttribute("list", listId); server.after(datalist);
-  async function offer() {
-    datalist.replaceChildren();
-    server.disabled = box.querySelector('[data-k="from_link.role"]').disabled = !select.value;
-    if (!select.value || !MODEL.links.includes(select.value)) return;
-    try {
-      const resp = await fetch(`{{ prefix }}/links/${select.value}/api/servers`, {headers: {Accept: "application/json"}});
-      const data = await resp.json();
-      for (const s of data.servers || data || []) if (s.name) datalist.appendChild(new Option(s.name));
-    } catch (e) { /* typed by hand */ }
-  }
-  select.onchange = offer;
-  offer();
+  const server = box.querySelector(".from-link-server"), role = box.querySelector(".from-link-role");
+  box.offerLinkServers = () => {
+    server.disabled = role.disabled = !select.value;
+    // the saved choice on its link; on another link nothing is chosen yet
+    fillLinkSource({prefix: "{{ prefix }}", link: select.value, type: typeSelect.value, server, role,
+                    current: select.value && select.value === current ? saved : {},
+                    note: box.querySelector(".from-link-note")});
+  };
+  select.onchange = box.offerLinkServers;
+  box.offerLinkServers();
   for (const el of box.querySelectorAll(".from-link-row")) el.hidden = !currentType().has_restore;
 }
 
