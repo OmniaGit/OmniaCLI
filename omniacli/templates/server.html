@@ -8,6 +8,7 @@
 {% block content %}
 {% from "_icons.html" import icon %}
 {% from "_actions.html" import action_button %}
+{% from "_console.html" import logbox, console_script with context %}
 <div class="server-head" style="padding: 0 0 14px; border: 0">
   <h1 style="margin: 0">{{ server.name }}</h1>
   <div class="actions" style="margin: 0">
@@ -195,13 +196,8 @@
     {% endif %}
 
     <h3 class="chart-title" style="margin-top: 16px">Log <span class="muted mono" style="font-weight: 400">{{ inst.log_file }}</span></h3>
-    <div class="actions" style="margin: 0 0 8px">
-      <label><input type="checkbox" class="log-errors"> Errors only</label>
-      <label><input type="checkbox" class="log-follow" checked> Follow</label>
-      <span class="log-state muted"></span>
-    </div>
-    <pre class="console log-out" style="height: {{ '45vh' if instances | length == 1 else '38vh' }}"
-         data-log="{{ prefix }}/api/servers/{{ server.name }}/{{ inst.role }}/log"></pre>
+    <div class="log-panel" data-log="{{ prefix }}/api/servers/{{ server.name }}/{{ inst.role }}/log">
+      {{ logbox("server-log", height="45vh" if instances | length == 1 else "38vh") }}</div>
   </section>
 {% endfor %}
 </div>
@@ -214,7 +210,7 @@
 {% if from_link %}{% include "_from_link_dialog.html" %}{% endif %}
 {% if can_act %}{% include "_backup_dialog.html" %}{% endif %}
 {% include "_charts.html" %}
-{% include "_logview.html" %}
+{{ console_script() }}
 <script>
 (function () {
   const panels = [...document.querySelectorAll(".instance-panel")];
@@ -287,13 +283,8 @@
   }
   watchJobs();
 
-  for (const panel of panels) {
-    const out = panel.querySelector(".log-out");
-    OmniaLog.attach(out, out.dataset.log, {
-      errorsOnly: panel.querySelector(".log-errors"),
-      follow: panel.querySelector(".log-follow"),
-      state: panel.querySelector(".log-state"),
-    });
+  for (const panel of document.querySelectorAll(".log-panel")) {
+    OmniaLog.attach(panel.querySelector(".console-box"), panel.dataset.log);
   }
 })();
 </script>

@@ -36,6 +36,7 @@ from .auth import Authenticator, Principal, hash_password, hash_token, new_token
 from .config import (
     ROLES,
     SERVER_NAME,
+    SHELL_FONT_SIZE,
     SHELL_FONT_SIZES,
     TUNNEL_IDLE_HOURS,
     Access,
@@ -72,8 +73,13 @@ def _page_context(request: Request) -> dict:
     """In every template: prefix, the path the pages are served under (a
     linked instance's, empty otherwise), and what the caller may do."""
     user = getattr(request.state, "user", None)
+    settings = getattr(request.app.state, "settings", None)
     return {
         "prefix": getattr(request.state, "prefix", ""),
+        # the text size the consoles (logs, terminals) open with: the Options
+        # page's, within its limits (_console.html)
+        "console_font": settings.options.shell_font_size if settings else SHELL_FONT_SIZE,
+        "console_font_sizes": SHELL_FONT_SIZES,
         "can_act": bool(user and user.can("developer")),
         # restart, start and stop: every role; an MCP token only reads
         "can_restart": bool(user and user.kind != "token"),
@@ -1761,8 +1767,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         command, _, stay = run(instance)
         return _TEMPLATES.TemplateResponse(request, "shell.html", {
             "instance": instance, "folder": folder(instance), "kind": kind, "command": command, "stay": stay,
-            "system_user": pwd.getpwuid(os.getuid()).pw_name, "shell": shell.login_shell()[0],
-            "font_size": settings.options.shell_font_size, "font_sizes": SHELL_FONT_SIZES})
+            "system_user": pwd.getpwuid(os.getuid()).pw_name, "shell": shell.login_shell()[0]})
 
     async def shell_socket(websocket: WebSocket, server: str, role: str, kind: str, me: Principal):
         """A login shell of the user running OmniaCLI, in the instance's first

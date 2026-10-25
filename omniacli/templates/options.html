@@ -10,12 +10,12 @@
 <div id="error" class="banner" hidden></div>
 <form id="form" autocomplete="off">
   <fieldset>
-    <legend>Shell</legend>
+    <legend>Consoles (logs, shells, Claude, psql)</legend>
     <div class="form-grid">
       <label for="shell-font-size">Text size (pixels)</label>
       <input type="number" id="shell-font-size" class="mono" required
              min="{{ font_sizes[0] }}" max="{{ font_sizes[1] }}" step="1" value="{{ options.shell_font_size }}"
-             title="The text size a shell and Claude page opens with ({{ font_sizes[0] }}-{{ font_sizes[1] }}); the A− and A+ buttons there change it for that page only">
+             title="The text size every log and terminal opens with ({{ font_sizes[0] }}-{{ font_sizes[1] }}); the A− and A+ buttons of a console change it in that browser, for that kind of console">
     </div>
   </fieldset>
   <fieldset>

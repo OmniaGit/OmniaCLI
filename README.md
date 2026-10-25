@@ -193,8 +193,16 @@ prepared before Test & activate. The job's log opens in a new tab.
   with is on the Options page.
 - **Options** (admins, `/options`): the options of the whole instance, in
   `options.yaml` next to the servers file (`options_file` in the main
-  configuration): the text size the shell and Claude pages open with
-  (8-40 pixels, default 14).
+  configuration): the text size every console opens with (8-40 pixels,
+  default 14).
+- **Consoles**: every log (an instance's, OmniaCLI's own, a job's) and every
+  terminal (shell, Claude, psql) is the same widget (`templates/_console.html`)
+  with the same bar: A− and A+ for the text size, kept in the browser for
+  each kind of console, and Expand, which fills the browser window (Esc
+  leaves it in a log; F11 makes the browser full screen). A log also has
+  tags, combined: the levels of its records (a traceback goes with its
+  record), and for a job its steps, commands and their output; no tag
+  chosen shows every line. A text filter and Follow complete it.
 - **Tunnels** (every user who logs in, `/tunnels`; the menu names it to
   developers and administrators only): a port of this machine
   that reaches the web interface of an instance of a linked OmniaCLI, for

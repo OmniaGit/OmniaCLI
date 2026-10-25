@@ -120,6 +120,18 @@ pre.console { background: var(--code-bg); color: var(--code-text); padding: 12px
   margin: 0; font-size: 12.5px; line-height: 1.4; }
 pre.console .ERROR, pre.console .CRITICAL { color: #ff7b7b; }
 pre.console .WARNING { color: #f0c060; }
+/* the consoles (_console.html): a log or a terminal with its bar */
+.console-box { display: flex; flex-direction: column; }
+.console-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 0 0 8px; }
+.console-tags { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+.console-tag { padding: 1px 8px; font-size: 12px; border-radius: 10px; }
+.console-tag[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--panel); }
+input[type=search].console-search { width: 14em; padding: 3px 8px; }
+.console-tools { margin-left: auto; display: inline-flex; gap: 6px; align-items: center; }
+.console-term { background: var(--code-bg); padding: 6px; }
+.console-box.expanded { position: fixed; inset: 0; z-index: 40; background: var(--bg); padding: 12px; }
+.console-box.expanded .console-out, .console-box.expanded .console-term { flex: 1; height: auto !important; min-height: 0; }
+body.console-expanded { overflow: hidden; }
 .form-grid { display: grid; grid-template-columns: max-content 1fr; gap: 8px 12px; align-items: center; }
 .form-grid label { color: var(--muted); }
 .with-button { display: flex; flex-wrap: wrap; gap: 8px; }

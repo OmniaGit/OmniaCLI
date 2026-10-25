@@ -8,20 +8,10 @@
 {% endblock %}
 {% block content %}
 <h1>Log {{ instance.key }} <span class="muted mono">{{ instance.log_file }}</span></h1>
-<div class="panel">
-  <div class="actions" style="margin: 0 0 10px">
-    <label><input type="checkbox" id="errors"> Errors only (ERROR, CRITICAL and their tracebacks)</label>
-    <label><input type="checkbox" id="follow" checked> Follow</label>
-    <span id="state" class="muted"></span>
-  </div>
-  <pre class="console" id="out" style="height: 70vh"></pre>
-</div>
-{% include "_logview.html" %}
+{% from "_console.html" import logbox, console_script with context %}
+<div class="panel" id="log">{{ logbox("log") }}</div>
+{{ console_script() }}
 <script>
-OmniaLog.attach(document.getElementById("out"), "{{ prefix }}/api/servers/{{ instance.server }}/{{ instance.role }}/log", {
-  errorsOnly: document.getElementById("errors"),
-  follow: document.getElementById("follow"),
-  state: document.getElementById("state"),
-});
+OmniaLog.attach(document.querySelector("#log .console-box"), "{{ prefix }}/api/servers/{{ instance.server }}/{{ instance.role }}/log");
 </script>
 {% endblock %}

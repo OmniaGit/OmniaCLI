@@ -231,12 +231,14 @@ def test_claude_in_its_folder(env, tmp_path, monkeypatch):
 
 
 def test_options_set_the_shell_text_size(env):
-    """The Options page (admin) sets the text size the shell pages open with."""
+    """The Options page (admin) sets the text size every console (shell, log)
+    opens with."""
     settings = env["settings"]
     app = create_app(settings)
     with TestClient(app) as c:
         page = c.get("/servers/srv/test/shell", headers=browser(app, "dev")).text
-        assert "fontSize: 14," in page and 'id="full-screen"' in page and 'id="font-up"' in page
+        assert 'data-console="shell" data-font="14"' in page
+        assert 'class="console-expand"' in page and 'class="console-larger"' in page
         assert c.get("/options", headers=browser(app, "dev")).status_code == 403
         assert c.post("/api/options/save", json={"shell": {"font_size": 18}},
                       headers=browser(app, "dev")).status_code == 403
@@ -248,7 +250,10 @@ def test_options_set_the_shell_text_size(env):
         resp = c.post("/api/options/save", json={"shell": {"font_size": 18}}, headers=browser(app, "admin"))
         assert resp.status_code == 200, resp.text
         assert yaml.safe_load(settings.options_file.read_text())["shell"] == {"font_size": 18}
-        assert "fontSize: 18," in c.get("/servers/srv/test/shell", headers=browser(app, "dev")).text
+        assert 'data-font="18"' in c.get("/servers/srv/test/shell", headers=browser(app, "dev")).text
+        # the logs too: the same widget
+        log = c.get("/servers/srv/test/log", headers=browser(app, "dev")).text
+        assert 'data-console="log" data-font="18"' in log and 'data-tag="ERROR"' in log
     # read back at the next start
     assert load_options(settings.options_file).shell_font_size == 18
 

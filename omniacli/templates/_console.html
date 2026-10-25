@@ -1,0 +1,260 @@
+{# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C · SPDX-License-Identifier: AGPL-3.0-or-later -#}
+{# The consoles: every log and every terminal of the interface is one of
+   these widgets, so they all have the same bar and behave the same.
+
+   {% from "_console.html" import logbox, terminal, console_script %}
+   {{ logbox(key, tags, height) }}   a log: tags to filter by (combined),
+                                     text filter, Follow, text size, Expand
+   {{ terminal(key, height) }}       a terminal (xterm.js) on a WebSocket
+   {{ console_script() }}            once per page, after the widgets
+
+   key names the widget kind ("log", "job", "shell"...): the text size a
+   viewer chooses is kept in this browser for each key. The page then
+   starts each widget: OmniaConsole.log(box, classify) gives add(lines),
+   OmniaLog.attach(widget, url) follows a log file, OmniaConsole.terminal
+   (box, url) connects a terminal. -#}
+
+{# the levels of an Odoo (or OmniaCLI) log record #}
+{% set LOG_TAGS = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] %}
+{# a job's log: its steps and commands, their output, the records of Odoo #}
+{% set JOB_TAGS = ["STEP", "COMMAND", "OUTPUT", "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] %}
+
+{% macro _tools() -%}
+<span class="console-tools">
+  <button type="button" class="console-smaller" title="Smaller text (kept in this browser for this kind of console)">A−</button>
+  <span class="console-size mono muted" title="Text size in pixels"></span>
+  <button type="button" class="console-larger" title="Larger text (kept in this browser for this kind of console)">A+</button>
+  <button type="button" class="console-expand" title="Fill the browser window">Expand</button>
+</span>
+{%- endmacro %}
+
+{% macro _box_attrs(key) -%}
+class="console-box" data-console="{{ key }}" data-font="{{ console_font }}"
+data-font-min="{{ console_font_sizes[0] }}" data-font-max="{{ console_font_sizes[1] }}"
+{%- endmacro %}
+
+{% macro logbox(key, tags=LOG_TAGS, height="70vh") -%}
+<div {{ _box_attrs(key) }}>
+  <div class="console-bar">
+    <span class="console-tags" title="Show only the lines of the chosen tags (none chosen: every line)">
+      {% for tag in tags %}<button type="button" class="console-tag tag-{{ tag }}" data-tag="{{ tag }}" aria-pressed="false">{{ tag }}</button>{% endfor %}
+    </span>
+    <input type="search" class="console-search" placeholder="Filter text" aria-label="Show only the lines with this text">
+    <label><input type="checkbox" class="console-follow" checked> Follow</label>
+    <span class="console-state muted"></span>
+    {{ _tools() }}
+  </div>
+  <pre class="console console-out" style="height: {{ height }}"></pre>
+</div>
+{%- endmacro %}
+
+{% macro terminal(key, height="70vh") -%}
+<link rel="stylesheet" href="{{ prefix }}/static/xterm.css">
+<div {{ _box_attrs(key) }}>
+  <div class="console-bar">
+    <span class="console-state muted">Connecting…</span>
+    <button type="button" class="console-again" hidden>Open a new shell</button>
+    {{ _tools() }}
+  </div>
+  <div class="console-term" style="height: {{ height }}"></div>
+</div>
+<script src="{{ prefix }}/static/xterm.js"></script>
+<script src="{{ prefix }}/static/addon-fit.js"></script>
+{%- endmacro %}
+
+{% macro console_script() -%}
+<script>
+const OmniaConsole = (function () {
+  const store = {
+    get(key) { try { return localStorage.getItem(key); } catch (e) { return null; } },
+    set(key, value) { try { localStorage.setItem(key, value); } catch (e) { /* not kept */ } },
+  };
+  let expanded = null;  // the widget that fills the window
+
+  // the bar's text size and Expand; apply(size) sets the size on the widget,
+  // resized() runs after the widget changed size
+  function tools(box, apply, resized, escape) {
+    const key = "omniacli.console." + box.dataset.console + ".font";
+    const min = Number(box.dataset.fontMin), max = Number(box.dataset.fontMax);
+    const label = box.querySelector(".console-size");
+    let size = Number(store.get(key)) || Number(box.dataset.font);
+    const set = (value, keep) => {
+      size = Math.min(max, Math.max(min, value));
+      label.textContent = size;
+      apply(size);
+      if (keep) store.set(key, size);
+    };
+    set(size, false);
+    box.querySelector(".console-smaller").onclick = () => set(size - 1, true);
+    box.querySelector(".console-larger").onclick = () => set(size + 1, true);
+    const button = box.querySelector(".console-expand");
+    const expand = (on) => {
+      if (on && expanded && expanded !== box) expanded.collapse();
+      box.classList.toggle("expanded", on);
+      document.body.classList.toggle("console-expanded", on);
+      expanded = on ? box : null;
+      button.textContent = on ? "Restore" : "Expand";
+      button.title = on ? "Back to the page" + (escape ? " (Esc)" : "") : "Fill the browser window";
+      requestAnimationFrame(resized);
+    };
+    box.collapse = () => expand(false);
+    button.onclick = () => expand(!box.classList.contains("expanded"));
+    // Esc belongs to the program in a terminal (vi, less): only a log takes it
+    if (escape) document.addEventListener("keydown", (ev) => {
+      if (ev.key === "Escape" && expanded === box) expand(false);
+    });
+  }
+
+  // a log: lines added with add(lines), each with the tag classify(text)
+  // gives it; max lines kept (0: all)
+  function log(box, classify, max) {
+    const out = box.querySelector(".console-out");
+    const follow = box.querySelector(".console-follow");
+    const chosen = new Set();
+    let text = "";
+    const shown = (span) => (!chosen.size || chosen.has(span.dataset.tag))
+      && (!text || span.textContent.toLowerCase().includes(text));
+    const refilter = () => { for (const span of out.children) span.hidden = !shown(span); };
+    for (const button of box.querySelectorAll(".console-tag")) {
+      button.onclick = () => {
+        const on = button.getAttribute("aria-pressed") !== "true";
+        button.setAttribute("aria-pressed", on);
+        if (on) chosen.add(button.dataset.tag); else chosen.delete(button.dataset.tag);
+        refilter();
+      };
+    }
+    box.querySelector(".console-search").addEventListener("input", (ev) => {
+      text = ev.target.value.trim().toLowerCase();
+      refilter();
+    });
+    follow.addEventListener("change", () => { if (follow.checked) out.scrollTop = out.scrollHeight; });
+    tools(box, (size) => { out.style.fontSize = size + "px"; }, () => {
+      if (follow.checked) out.scrollTop = out.scrollHeight;
+    }, true);
+    function add(lines) {
+      for (const line of lines) {
+        const span = document.createElement("span");
+        span.dataset.tag = span.className = classify(line);
+        span.textContent = line + "\n";
+        span.hidden = !shown(span);
+        out.appendChild(span);
+      }
+      while (max && out.childNodes.length > max) out.removeChild(out.firstChild);
+      if (lines.length && follow.checked) out.scrollTop = out.scrollHeight;
+    }
+    return {add, out, follow, state: box.querySelector(".console-state")};
+  }
+
+  // the tag of a log file's line: the level of its record; a line that is
+  // not a record (a traceback) keeps the level of the record above it
+  const RECORD = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d+ \d+ (\w+) /;
+  function levels() {
+    let level = "INFO";
+    return (line) => {
+      const m = RECORD.exec(line);
+      if (m) level = m[1];
+      return level;
+    };
+  }
+
+  // the tag of a job's line ("HH:MM:SS text"): its steps (---), the
+  // commands it runs ($), the records of Odoo; the other lines are the
+  // output of the command, or follow the record above them (a traceback)
+  const LEVELS = new Set(["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]);
+  function jobLines() {
+    let last = "OUTPUT";
+    return (line) => {
+      const text = line.replace(/^\d{2}:\d{2}:\d{2} /, "");
+      const m = RECORD.exec(text);
+      if (m) last = m[1];
+      else if (text.startsWith("--- ")) last = "STEP";
+      else if (text.startsWith("$ ")) last = "COMMAND";
+      else if (/^(FAILED|STOPPED|ERROR|Traceback)\b/.test(text)) last = "ERROR";
+      else if (text.startsWith("WARNING")) last = "WARNING";
+      else if (!LEVELS.has(last)) last = "OUTPUT";
+      return last;
+    };
+  }
+
+  // a terminal on the WebSocket url: what it receives is drawn, what is
+  // typed is sent, with its size
+  function terminal(box, url) {
+    const state = box.querySelector(".console-state");
+    const again = box.querySelector(".console-again");
+    const term = new Terminal({cursorBlink: true, fontSize: Number(box.dataset.font), scrollback: 5000,
+                               fontFamily: getComputedStyle(document.body).getPropertyValue("--mono")});
+    const fit = new FitAddon.FitAddon();
+    term.loadAddon(fit);
+    term.open(box.querySelector(".console-term"));
+    let socket = null;
+    const send = (event) => { if (socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(event)); };
+    const resize = () => send({type: "resize", cols: term.cols, rows: term.rows});
+    term.onData((data) => send({type: "input", data}));
+    term.onResize(resize);
+    window.addEventListener("resize", () => fit.fit());
+    tools(box, (size) => { term.options.fontSize = size; fit.fit(); },
+          () => { fit.fit(); term.focus(); }, false);
+    fit.fit();
+    function connect() {
+      again.hidden = true;
+      state.textContent = "Connecting…";
+      socket = new WebSocket(url);
+      socket.binaryType = "arraybuffer";
+      socket.onopen = () => { state.textContent = "Connected"; resize(); term.focus(); };
+      socket.onmessage = (ev) => term.write(typeof ev.data === "string" ? ev.data : new Uint8Array(ev.data));
+      socket.onclose = (ev) => {
+        // 1006 without a reason: refused at the handshake (login expired, or
+        // a proxy that does not pass WebSockets on) or the connection lost
+        state.textContent = ev.reason ? `Closed: ${ev.reason}`
+          : ev.code === 1006 ? "Closed: refused or connection lost (login expired? a proxy without WebSocket?)"
+          : `Closed (${ev.code})`;
+        again.hidden = false;
+      };
+    }
+    again.onclick = () => { term.reset(); connect(); };
+    connect();
+    return term;
+  }
+  return {log, levels, jobLines, terminal};
+})();
+
+// a log file followed on its widget: it polls url with the position reached,
+// starts only when the log is on screen (lazy) and pauses while the browser
+// tab is hidden. No connection stays open, so pages never wait for a free one.
+const OmniaLog = (function () {
+  const MAX_LINES = 5000, EVERY = 2000;
+  function attach(box, url) {
+    const widget = OmniaConsole.log(box, OmniaConsole.levels(), MAX_LINES);
+    let pos = null, inode = null, timer = null, visible = false, busy = false;
+    async function poll() {
+      timer = null;
+      if (busy || !visible || document.hidden) return;
+      busy = true;
+      let again = EVERY;
+      try {
+        const q = pos === null ? "" : `?pos=${pos}&inode=${inode}`;
+        const resp = await fetch(url + q);
+        const data = await resp.json();
+        if (!resp.ok) { widget.state.textContent = data.error || ("error " + resp.status); again = 10000; }
+        else {
+          widget.add([...(data.rotated ? ["----- log file rotated or truncated -----"] : []), ...data.lines]);
+          pos = data.pos; inode = data.inode;
+          widget.state.textContent = "updated " + new Date().toLocaleTimeString();
+          if (data.more) again = 0;
+        }
+      } catch (e) { widget.state.textContent = "not reachable, retrying…"; again = 5000; }
+      busy = false;
+      schedule(again);
+    }
+    function schedule(ms) { if (!timer && visible && !document.hidden) timer = setTimeout(poll, ms); }
+    new IntersectionObserver((entries) => {
+      visible = entries.some((e) => e.isIntersecting);
+      if (visible) schedule(0);
+    }).observe(widget.out);
+    document.addEventListener("visibilitychange", () => { if (!document.hidden) schedule(0); });
+    widget.state.textContent = "loads when visible";
+  }
+  return {attach};
+})();
+</script>
+{%- endmacro %}

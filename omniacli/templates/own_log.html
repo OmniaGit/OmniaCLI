@@ -8,20 +8,10 @@
 <h1>OmniaCLI log <span class="muted mono">{{ log_file }}</span></h1>
 <p class="muted">What OmniaCLI itself logs: the requests it serves, the calls to the links, its errors.
 Written since this version of OmniaCLI started; past 5 MiB it moves to <span class="mono">omniacli.log.1</span>.</p>
-<div class="panel">
-  <div class="actions" style="margin: 0 0 10px">
-    <label><input type="checkbox" id="errors"> Errors only (ERROR, CRITICAL and their tracebacks)</label>
-    <label><input type="checkbox" id="follow" checked> Follow</label>
-    <span id="state" class="muted"></span>
-  </div>
-  <pre class="console" id="out" style="height: 70vh"></pre>
-</div>
-{% include "_logview.html" %}
+{% from "_console.html" import logbox, console_script with context %}
+<div class="panel" id="log">{{ logbox("omniacli-log") }}</div>
+{{ console_script() }}
 <script>
-OmniaLog.attach(document.getElementById("out"), "{{ prefix }}/api/omniacli/log", {
-  errorsOnly: document.getElementById("errors"),
-  follow: document.getElementById("follow"),
-  state: document.getElementById("state"),
-});
+OmniaLog.attach(document.querySelector("#log .console-box"), "{{ prefix }}/api/omniacli/log");
 </script>
 {% endblock %}

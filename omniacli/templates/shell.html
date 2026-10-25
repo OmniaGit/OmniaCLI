@@ -8,93 +8,15 @@
            (name, None)]) }}
 {% endblock %}
 {% block content %}
-<link rel="stylesheet" href="{{ prefix }}/static/xterm.css">
+{% from "_console.html" import terminal, console_script with context %}
 <h1>{{ name }} {{ instance.key }} <span class="muted mono" style="font-size: 14px">{{ system_user }}@{{ folder or "~" }}</span></h1>
-<style>
-  #shell-box { display: flex; flex-direction: column; }
-  #terminal { height: 70vh; background: var(--code-bg); padding: 6px; }
-  #shell-box:fullscreen { background: var(--bg); padding: 10px; }
-  #shell-box:fullscreen #terminal { flex: 1; height: auto; min-height: 0; }
-  #shell-tools { margin-left: auto; display: flex; gap: 6px; align-items: center; }
-</style>
 <div class="panel">
-  <div id="shell-box">
-  <div class="actions" style="margin: 0 0 10px">
-    <span id="shell-state" class="muted">Connecting…</span>
-    <button type="button" id="shell-again" hidden>Open a new shell</button>
-    <span id="shell-tools">
-      <button type="button" id="font-down" title="Smaller text (this page only; the default is on the Options page)">A−</button>
-      <span id="font-size" class="mono muted" title="Text size in pixels">{{ font_size }}</span>
-      <button type="button" id="font-up" title="Larger text (this page only; the default is on the Options page)">A+</button>
-      <button type="button" id="full-screen" title="Full screen (Esc leaves it)">Full screen</button>
-    </span>
-  </div>
-  <div id="terminal"></div>
-  </div>
+  <div id="shell">{{ terminal(kind) }}</div>
   <p class="muted" style="margin: 8px 0 0">A login shell ({{ shell }}) of the user running OmniaCLI, on this server{% if command and stay %}, that runs <span class="mono">{{ command }}</span> first and stays open after it{% elif command %}, that runs <span class="mono">{{ command }}</span> on the instance's database with the connection settings of its configuration, and ends with it{% endif %}: it ends when this page closes.</p>
 </div>
-<script src="{{ prefix }}/static/xterm.js"></script>
-<script src="{{ prefix }}/static/addon-fit.js"></script>
+{{ console_script() }}
 <script>
-(function () {
-  const state = document.getElementById("shell-state");
-  const again = document.getElementById("shell-again");
-  const term = new Terminal({cursorBlink: true, fontSize: {{ font_size }}, scrollback: 5000,
-                             fontFamily: getComputedStyle(document.body).getPropertyValue("--mono")});
-  const fit = new FitAddon.FitAddon();
-  term.loadAddon(fit);
-  term.open(document.getElementById("terminal"));
-  fit.fit();
-  const url = (location.protocol === "https:" ? "wss://" : "ws://") + location.host
-    + "{{ prefix }}/servers/{{ instance.server }}/{{ instance.role }}/{{ kind }}/ws";
-  let socket = null;
-  const send = (event) => { if (socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(event)); };
-  const resize = () => send({type: "resize", cols: term.cols, rows: term.rows});
-  term.onData((data) => send({type: "input", data}));
-  term.onResize(resize);
-  window.addEventListener("resize", () => fit.fit());
-
-  // text size: for this page only, within the limits of the Options page
-  const sizeLabel = document.getElementById("font-size");
-  const fontStep = (delta) => {
-    const size = Math.min({{ font_sizes[1] }}, Math.max({{ font_sizes[0] }}, term.options.fontSize + delta));
-    term.options.fontSize = size;
-    sizeLabel.textContent = size;
-    fit.fit();
-    term.focus();
-  };
-  document.getElementById("font-down").onclick = () => fontStep(-1);
-  document.getElementById("font-up").onclick = () => fontStep(1);
-
-  // full screen: the terminal and its buttons fill the screen
-  const box = document.getElementById("shell-box");
-  const full = document.getElementById("full-screen");
-  full.hidden = !document.fullscreenEnabled;
-  full.onclick = () => document.fullscreenElement ? document.exitFullscreen() : box.requestFullscreen();
-  document.addEventListener("fullscreenchange", () => {
-    full.textContent = document.fullscreenElement ? "Exit full screen" : "Full screen";
-    // the size changes after the layout: fit on the next frame
-    requestAnimationFrame(() => { fit.fit(); term.focus(); });
-  });
-
-  function connect() {
-    again.hidden = true;
-    state.textContent = "Connecting…";
-    socket = new WebSocket(url);
-    socket.binaryType = "arraybuffer";
-    socket.onopen = () => { state.textContent = "Connected"; resize(); term.focus(); };
-    socket.onmessage = (ev) => term.write(typeof ev.data === "string" ? ev.data : new Uint8Array(ev.data));
-    socket.onclose = (ev) => {
-      // 1006 without a reason: refused at the handshake (login expired, or
-      // a proxy that does not pass WebSockets on) or the connection lost
-      state.textContent = ev.reason ? `Closed: ${ev.reason}`
-        : ev.code === 1006 ? "Closed: refused or connection lost (login expired? a proxy without WebSocket?)"
-        : `Closed (${ev.code})`;
-      again.hidden = false;
-    };
-  }
-  again.onclick = () => { term.reset(); connect(); };
-  connect();
-})();
+OmniaConsole.terminal(document.querySelector("#shell .console-box"), (location.protocol === "https:" ? "wss://" : "ws://")
+  + location.host + "{{ prefix }}/servers/{{ instance.server }}/{{ instance.role }}/{{ kind }}/ws");
 </script>
 {% endblock %}

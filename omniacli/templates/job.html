@@ -18,6 +18,7 @@
 {% endblock %}
 {% block content %}
 {% from "_icons.html" import runner %}
+{% from "_console.html" import logbox, console_script, JOB_TAGS with context %}
 <h1 style="overflow-wrap: anywhere">{{ job.title }}</h1>
 {# the job's state at a glance: a runner while it runs, a thumbs up when it
    succeeds, a danger sign when it fails #}
@@ -105,11 +106,12 @@
     <dt>Error</dt><dd class="error" id="error">{{ job.error or "" }}</dd>
   </dl>
   <p id="download" hidden></p>
-  <pre class="console" id="out"></pre>
+  <div id="log">{{ logbox("job", JOB_TAGS, "60vh") }}</div>
 </div>
+{{ console_script() }}
 <script>
 (function () {
-  const out = document.getElementById("out");
+  const log = OmniaConsole.log(document.querySelector("#log .console-box"), OmniaConsole.jobLines(), 0);
   let next = 0;
   async function poll() {
     let data;
@@ -118,11 +120,7 @@
       if (!resp.ok) throw new Error(resp.status);
       data = await resp.json();
     } catch (e) { setTimeout(poll, 5000); return; }
-    if (data.lines.length) {
-      const stick = out.scrollTop + out.clientHeight >= out.scrollHeight - 20;
-      out.textContent += data.lines.join("\n") + "\n";
-      if (stick) out.scrollTop = out.scrollHeight;
-    }
+    log.add(data.lines);
     next = data.next;
     const st = document.getElementById("status");
     st.textContent = data.status; st.className = "status " + data.status;
