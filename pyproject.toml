@@ -22,6 +22,8 @@ dependencies = [
     "httpx>=0.27",
     # the crontab expressions of the scheduled actions
     "croniter>=6.0",
+    # the encryption of what a puller carries (AES-GCM, HKDF)
+    "cryptography>=42",
     # the MCP interface (/mcp); the SDK needs Python 3.10, older ones run without it
     "mcp>=2.3; python_version >= '3.10'",
 ]

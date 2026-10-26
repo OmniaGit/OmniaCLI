@@ -1102,7 +1102,8 @@ backs up the databases. Without their work this interface would not have
 been possible: thank you.
 
 OmniaCLI also builds on [Odoo](https://www.odoo.com), and on FastAPI,
-Starlette, Uvicorn, websockets, Jinja, HTTPX, PyYAML and the MCP Python SDK.
+Starlette, Uvicorn, websockets, Jinja, HTTPX, PyYAML, croniter, cryptography and
+the MCP Python SDK.
 The terminal of the shell page is [xterm.js](https://github.com/xtermjs/xterm.js)
 with its fit addon (MIT, shipped in `omniacli/static`).
 
