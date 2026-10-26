@@ -976,6 +976,49 @@ same `location` ("directive is duplicate"). And `Host` once: two
 `proxy_set_header Host` lines send two Host headers, and OmniaCLI answers
 400.
 
+The networks in `allow` are those of the clients, not the server's: a PC
+outside them gets 403.
+
+#### The certificate
+
+On a LAN without a CA of its own, a self-signed certificate, made on the
+nginx machine. Its `subjectAltName` lists every name and IP the users type
+in the browser (browsers and Python check only that, not the CN): with no
+DNS name, the IP alone; with one, `DNS:<name>,IP:<ip>`.
+
+```bash
+sudo mkdir -p /etc/nginx/omniacli
+cd /etc/nginx/omniacli
+sudo openssl req -x509 -newkey rsa:3072 -sha256 -days 3650 -nodes \
+  -keyout omniacli.key -out omniacli.crt \
+  -subj "/CN=10.11.1.20" \
+  -addext "subjectAltName=IP:10.11.1.20" \
+  -addext "keyUsage=critical,digitalSignature,keyEncipherment,keyCertSign" \
+  -addext "extendedKeyUsage=serverAuth"
+sudo chmod 600 omniacli.key
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+No `-addext basicConstraints=…`: Debian's openssl config already sets
+`CA:TRUE`, and a second one makes the certificate invalid ("unable to get
+local issuer certificate"). The IP must not change (a static IP or a DHCP
+reservation): a new IP or a new name means a new certificate, copied again
+to every client. Then:
+
+- browsers: import `omniacli.crt` among the trusted authorities, or accept
+  the warning;
+- another OmniaCLI linking to this one: `omniacli.crt` as the link's **CA
+  file** (see "A link or an MCP client to an OmniaCLI behind a self-signed
+  certificate" above);
+- Claude Code: `NODE_EXTRA_CA_CERTS=<path>/omniacli.crt`.
+
+With a customer's own CA, its certificate for the server's name or IP takes
+the place of `omniacli.crt`, and the clients get the CA's certificate.
+
+Tried with OpenSSL 1.1.1w: `openssl verify -x509_strict -purpose sslserver
+-verify_ip <ip>` passes, Python 3.9 accepts it as `cafile`, nginx 1.22 loads
+it and `curl --cacert` goes through.
+
 ## Develop
 
 ```bash
