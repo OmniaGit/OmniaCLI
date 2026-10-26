@@ -253,6 +253,9 @@ class Settings:
     # the options of the system (Options page)
     options_file: Path | None = None
     options: Options = field(default_factory=lambda: Options())
+    # the pullers this instance relays (pullers.yaml, Pullers page)
+    pullers_file: Path | None = None
+    pullers: dict[str, PullerDef] = field(default_factory=dict)
     token_roles: dict[str, str] = field(default_factory=dict)
     fixed: Access = field(default_factory=Access)
     web: Access = field(default_factory=Access)
@@ -814,6 +817,87 @@ def save_options(path: Path, options: Options) -> None:
     os.replace(tmp, path)
 
 
+# the limits of a puller: hours a file and a report are kept, MiB of a file
+PULLER_KEEP_HOURS = 24
+PULLER_KEEP_LIMITS = (1, 720)
+PULLER_FILE_MIB = 10240
+PULLER_FILE_LIMITS = (1, 1 << 20)
+_LINK_NAME = re.compile(r"[A-Za-z0-9._@-]{1,64}")
+
+
+@dataclass
+class PullerDef:
+    """A puller this instance relays (puller.py): the link (Users page) of
+    the producer, the OmniaCLI whose instance it serves, and those of its
+    consumers. The link names are those of auth.links."""
+
+    name: str
+    producer: str
+    consumers: list[str] = field(default_factory=list)
+    keep_hours: int = PULLER_KEEP_HOURS
+    max_file_mib: int = PULLER_FILE_MIB
+
+    def part(self, link: str) -> str | None:
+        """producer, consumer or None: what the link is in this puller."""
+        if link == self.producer:
+            return "producer"
+        return "consumer" if link in self.consumers else None
+
+    def to_dict(self) -> dict:
+        return {"producer": self.producer, "consumers": list(self.consumers),
+                "keep_hours": self.keep_hours, "max_file_mib": self.max_file_mib}
+
+
+def parse_puller(name: str, data) -> PullerDef:
+    where = f"pullers.{name}"
+    if not SERVER_NAME.fullmatch(name) or len(name) > 64:
+        raise ConfigError(f"{where}: a name is letters, digits and . _ - (it is part of URLs)")
+    data = data if isinstance(data, dict) else {}
+    producer = str(data.get("producer") or "").strip()
+    if not _LINK_NAME.fullmatch(producer):
+        raise ConfigError(f"{where}.producer: the name of a link of the Users page")
+    consumers = data.get("consumers") or []
+    if not isinstance(consumers, list):
+        raise ConfigError(f"{where}.consumers: a list of names of links of the Users page")
+    consumers = list(dict.fromkeys(str(c).strip() for c in consumers if str(c).strip()))
+    bad = [c for c in consumers if not _LINK_NAME.fullmatch(c)]
+    if bad:
+        raise ConfigError(f"{where}.consumers: {', '.join(bad)} is not a link name")
+    if not consumers:
+        raise ConfigError(f"{where}.consumers: at least one")
+    if producer in consumers:
+        raise ConfigError(f"{where}: {producer} cannot be the producer and a consumer")
+    keep = _whole(data.get("keep_hours", PULLER_KEEP_HOURS), f"{where}.keep_hours", PULLER_KEEP_LIMITS)
+    size = _whole(data.get("max_file_mib", PULLER_FILE_MIB), f"{where}.max_file_mib", PULLER_FILE_LIMITS)
+    return PullerDef(name, producer, consumers, keep, size)
+
+
+def load_pullers(path: Path) -> dict[str, PullerDef]:
+    """The pullers file; none yet is no pullers."""
+    if not path.exists():
+        return {}
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        raise ConfigError(f"cannot read {path}: {exc}") from exc
+    pullers = data.get("pullers") or {}
+    if not isinstance(pullers, dict):
+        raise ConfigError(f"{path}: pullers must be a mapping")
+    try:
+        return {str(name): parse_puller(str(name), value) for name, value in pullers.items()}
+    except ConfigError as exc:
+        raise ConfigError(f"{path}: {exc}") from exc
+
+
+def save_pullers(path: Path, pullers: dict[str, PullerDef]) -> None:
+    text = yaml.safe_dump({"pullers": {n: p.to_dict() for n, p in pullers.items()}},
+                          sort_keys=False, allow_unicode=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
+
 def parse_settings(data: dict, base_dir: Path = Path(".")) -> Settings:
     fixed = parse_auth(data.get("auth") or {})
     servers_file = Path(data.get("servers_file") or "servers.yaml")
@@ -835,6 +919,9 @@ def parse_settings(data: dict, base_dir: Path = Path(".")) -> Settings:
     options_file = Path(data.get("options_file") or servers_file.parent / "options.yaml")
     if not options_file.is_absolute():
         options_file = base_dir / options_file
+    pullers_file = Path(data.get("pullers_file") or servers_file.parent / "pullers.yaml")
+    if not pullers_file.is_absolute():
+        pullers_file = base_dir / pullers_file
     scripts_dir = Path(data.get("scripts_dir") or servers_file.parent / "scripts")
     if not scripts_dir.is_absolute():
         scripts_dir = base_dir / scripts_dir
@@ -854,6 +941,8 @@ def parse_settings(data: dict, base_dir: Path = Path(".")) -> Settings:
         scripts_dir=scripts_dir,
         options_file=options_file,
         options=load_options(options_file),
+        pullers_file=pullers_file,
+        pullers=load_pullers(pullers_file),
         fixed=fixed,
     )
     settings.set_web_access(load_access(users_file))

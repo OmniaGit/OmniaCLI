@@ -8,6 +8,7 @@ import asyncio
 import contextlib
 import importlib.metadata
 import importlib.util
+import json
 import logging
 import os
 import pwd
@@ -28,12 +29,14 @@ from fastapi.templating import Jinja2Templates
 from starlette.background import BackgroundTask
 from starlette.requests import HTTPConnection
 
-from . import checks, disks, linkcopy, ops, plugins, schedules, selflog, shell, tunnel
+from . import checks, disks, linkcopy, ops, plugins, puller, schedules, selflog, shell, tunnel
 from .accesslog import AccessLog
 from .diskhistory import DiskHistory, DiskRecorder
 from .auth import ROLES as ACCESS_ROLES
 from .auth import Authenticator, Principal, hash_password, hash_token, new_token, verify_password
 from .config import (
+    PULLER_FILE_MIB,
+    PULLER_KEEP_HOURS,
     ROLES,
     SERVER_NAME,
     SHELL_FONT_SIZE,
@@ -51,11 +54,13 @@ from .config import (
     parse_groups,
     parse_link,
     parse_options,
+    parse_puller,
     parse_servers,
     save_access,
     save_groups,
     save_links,
     save_options,
+    save_pullers,
     save_servers,
     server_text,
     server_to_dict,
@@ -231,6 +236,8 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         lambda: settings.options, link_headers,
         lambda user, detail: access_log.record("tunnel", "user", user, "", detail))
     limiter = LoginLimiter()
+    # the pullers this instance relays: their state next to the jobs
+    pullers = puller.PullerHub(settings, settings.jobs_dir.parent / "pullers")
 
     def identify(request: HTTPConnection) -> Principal:
         # a WebSocket has no method: it is checked as a post (no token, same origin)
@@ -315,12 +322,14 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         sampler.start()
         disk_recorder.start()
         tunnels.start()
+        pullers.start()
         # not nullcontext(): it is an async context manager only from Python 3.10
         if mcp_manager:
             async with mcp_manager.run():
                 yield
         else:
             yield
+        await pullers.stop()
         await tunnels.stop()
         await disk_recorder.stop()
         await sampler.stop()
@@ -342,6 +351,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
     app.state.disk_history, app.state.disk_recorder = disk_history, disk_recorder
     app.state.access_log = access_log
     app.state.tunnels = tunnels
+    app.state.pullers = pullers
     app.state.sessions, app.state.authenticator = sessions, authenticator
 
     @app.middleware("http")
@@ -1949,6 +1959,179 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             return refuse(f"Cannot write {settings.groups_file}: {exc}", 500)
         settings.groups = groups
         return {"ok": True}
+
+    # --- pullers this instance relays ----------------------------------
+
+    pullers_lock = asyncio.Lock()
+
+    def puller_answer(exc: puller.PullerRefused) -> JSONResponse:
+        return refuse(str(exc), exc.status)
+
+    def puller_link(me: Principal) -> str:
+        """The link a puller's request comes from: only links take part."""
+        if me.kind != "link":
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "A puller is used by a linked OmniaCLI only")
+        return me.name
+
+    async def puller_message(request: Request, key: str) -> dict | None:
+        """The envelope (a mapping) at key of the JSON body, at most
+        puller.MAX_MESSAGE bytes; None when key is missing or null."""
+        body = bytearray()
+        async for chunk in request.stream():
+            body += chunk
+            if len(body) > puller.MAX_MESSAGE:
+                raise puller.PullerRefused(f"a message is at most {puller.MAX_MESSAGE >> 20} MiB", 413)
+        try:
+            data = json.loads(bytes(body) or b"{}")
+        except ValueError:
+            raise puller.PullerRefused("the body is not JSON") from None
+        if not isinstance(data, dict):
+            raise puller.PullerRefused("the body is not a JSON object")
+        value = data.get(key)
+        if value is not None and not isinstance(value, dict):
+            raise puller.PullerRefused(f"{key} is not an envelope")
+        return value
+
+    def wait_param(request: Request) -> float:
+        try:
+            return float(request.query_params.get("wait", 0))
+        except ValueError:
+            raise puller.PullerRefused("wait is a number of seconds") from None
+
+    @app.get("/api/pullers")
+    async def puller_list(me: Principal = Depends(current_user)):
+        """The pullers the calling link takes part in, and its part."""
+        link = puller_link(me)
+        return {"pullers": [{"name": d.name, "part": d.part(link)}
+                            for d in settings.pullers.values() if d.part(link)]}
+
+    @app.post("/api/pullers/{name}/producer")
+    async def puller_producer(request: Request, name: str, me: Principal = Depends(current_user)):
+        """The producer's poll: its report (if any) is kept, then the
+        commands for it, waiting up to ?wait= seconds for one."""
+        link = puller_link(me)
+        try:
+            pullers.member(name, link, "producer")
+            report = await puller_message(request, "report")
+            return await pullers.producer_poll(name, link, report, wait_param(request))
+        except puller.PullerRefused as exc:
+            return puller_answer(exc)
+
+    @app.put("/api/pullers/{name}/producer/files/{file}")
+    async def puller_upload(request: Request, name: str, file: str, me: Principal = Depends(current_user)):
+        link = puller_link(me)
+        length = request.headers.get("content-length")
+        try:
+            return await pullers.upload(name, link, file, request.stream(),
+                                        int(length) if length and length.isdigit() else None)
+        except puller.PullerRefused as exc:
+            return puller_answer(exc)
+
+    @app.get("/api/pullers/{name}")
+    async def puller_info(name: str, me: Principal = Depends(current_user)):
+        link = puller_link(me)
+        try:
+            definition = pullers.definition(name)
+            if definition.part(link) is None:
+                raise puller.PullerRefused(f"No puller {name}", 404)
+            return pullers.info(name)
+        except puller.PullerRefused as exc:
+            return puller_answer(exc)
+
+    @app.post("/api/pullers/{name}/commands")
+    async def puller_command(request: Request, name: str, me: Principal = Depends(current_user)):
+        """A consumer's command (an envelope), queued for the producer."""
+        link = puller_link(me)
+        try:
+            pullers.member(name, link, "consumer")
+            envelope = await puller_message(request, "command")
+            if envelope is None:
+                raise puller.PullerRefused("command missing")
+            return await pullers.consumer_command(name, link, envelope)
+        except puller.PullerRefused as exc:
+            return puller_answer(exc)
+
+    @app.get("/api/pullers/{name}/reports")
+    async def puller_reports(request: Request, name: str, since: int = 0, me: Principal = Depends(current_user)):
+        """The producer's reports after ?since=, waiting up to ?wait= seconds
+        for one, with what the relay knows of the puller."""
+        link = puller_link(me)
+        try:
+            return await pullers.consumer_reports(name, link, since, wait_param(request))
+        except puller.PullerRefused as exc:
+            return puller_answer(exc)
+
+    @app.get("/api/pullers/{name}/files/{file}")
+    async def puller_download(name: str, file: str, me: Principal = Depends(current_user)):
+        link = puller_link(me)
+        try:
+            path = pullers.download_path(name, link, file)
+        except puller.PullerRefused as exc:
+            return puller_answer(exc)
+        return FileResponse(path, media_type="application/octet-stream", filename=file)
+
+    @app.delete("/api/pullers/{name}/files/{file}")
+    async def puller_taken(name: str, file: str, me: Principal = Depends(current_user)):
+        """The consumer has the file whole: it is deleted here."""
+        link = puller_link(me)
+        try:
+            return pullers.taken(name, link, file)
+        except puller.PullerRefused as exc:
+            return puller_answer(exc)
+
+    @app.get("/pullers", dependencies=[Depends(admin)])
+    async def pullers_page(request: Request):
+        rows = []
+        for name in sorted(settings.pullers):
+            info = pullers.info(name)
+            info["missing"] = [p for p in [info["producer"]["link"]] + [c["link"] for c in info["consumers"]]
+                               if p not in settings.links]
+            rows.append(info)
+        return _TEMPLATES.TemplateResponse(request, "pullers.html", {
+            "pullers": rows, "links": sorted(settings.links), "pullers_file": settings.pullers_file,
+            "keep_hours": PULLER_KEEP_HOURS, "max_file_mib": PULLER_FILE_MIB})
+
+    @app.post("/api/pullers/save", dependencies=[Depends(admin)])
+    async def pullers_save(payload: dict = Body(...)):
+        """Create a puller (new: true) or change it."""
+        name, new = str(payload.get("name") or "").strip(), bool(payload.get("new"))
+        async with pullers_lock:
+            if new and name in settings.pullers:
+                return refuse(f"A puller named {name} already exists")
+            if not new and name not in settings.pullers:
+                return refuse(f"No puller {name}", status.HTTP_404_NOT_FOUND)
+            try:
+                found = parse_puller(name, {k: payload.get(k) for k in
+                                            ("producer", "consumers", "keep_hours", "max_file_mib")
+                                            if payload.get(k) not in (None, "")})
+            except ConfigError as exc:
+                return refuse(str(exc))
+            unknown = [n for n in [found.producer, *found.consumers] if n not in settings.links]
+            if unknown:
+                return refuse(f"No incoming link {', '.join(unknown)}: create it on the Users page")
+            changed = {**settings.pullers, name: found}
+            try:
+                await asyncio.to_thread(save_pullers, settings.pullers_file, changed)
+            except OSError as exc:
+                return refuse(f"Cannot write {settings.pullers_file}: {exc}", 500)
+            settings.pullers = changed
+            return {"ok": True}
+
+    @app.post("/api/pullers/delete", dependencies=[Depends(admin)])
+    async def pullers_delete(payload: dict = Body(...)):
+        """A puller goes, with its commands, reports and files."""
+        name = str(payload.get("name") or "")
+        async with pullers_lock:
+            if name not in settings.pullers:
+                return refuse(f"No puller {name}", status.HTTP_404_NOT_FOUND)
+            changed = {k: v for k, v in settings.pullers.items() if k != name}
+            try:
+                await asyncio.to_thread(save_pullers, settings.pullers_file, changed)
+            except OSError as exc:
+                return refuse(f"Cannot write {settings.pullers_file}: {exc}", 500)
+            settings.pullers = changed
+            pullers.forget(name)
+            return {"ok": True}
 
     # --- options of the system ------------------------------------------
 

@@ -609,6 +609,60 @@ Users page, and a CA file when its certificate is from the customer's own CA.
   longer on the Links page, the button is shown disabled, and its tooltip
   says what to set.
 
+### Pullers
+
+An OmniaCLI that nobody can reach (a production behind a firewall) can still
+be operated through a third OmniaCLI that both sides reach, on a public VPS:
+the **relay**. The unreachable one (the **producer**) and the ones that
+operate it (the **consumers**) each link out to the relay; nothing connects
+to the producer. On the relay a **puller** names the link of the producer
+and those of its consumers:
+
+*Not finished*: this version has the relay only, the producer's and the
+consumers' sides come next.
+
+
+- the **Pullers** page (admins) adds one: a name, the producer and the
+  consumers, among the incoming links of the Users page (the role **user**
+  is enough: a puller's routes check that the link is in it, and that role
+  opens no shell, no backup and no action on the relay's own servers), the
+  hours its files and reports are kept (24) and its largest file (10240 MiB).
+  Saved in `pullers.yaml` next to the servers file;
+- the producer asks for the consumers' commands, holding its request open up
+  to 25 seconds until one comes, and leaves with every request its report
+  (state, disks, load, the progress of its jobs), which every consumer reads
+  from the last one it read. Its backups it uploads, for a consumer to
+  download;
+- a command not taken by the producer in 10 minutes expires; once taken, it
+  is gone from the relay. A file is deleted once a consumer says it has it
+  whole, and every file and report after the hours kept; at most 20 commands
+  wait and 5 files are kept per puller;
+- with a **key** that only the producer and the consumers hold, every
+  message and file is encrypted and signed (AES-256-GCM): the relay can
+  neither read them nor make one up, nor play a command again. Without a key
+  they pass in clear, and the relay is trusted. The page shows only what the
+  relay knows: when each side was last seen, the commands waiting and the
+  files kept.
+
+Their state is kept in `pullers/` next to `jobs_dir`
+(`/var/lib/omniacli/pullers` in the package). A relay behind nginx needs
+`client_max_body_size 0;` (or the largest file) and
+`proxy_request_buffering off;` in its `location`, or nginx refuses an upload
+over 1 MiB; the 25-second requests stay within its read timeout.
+
+The routes, for links in the puller only (a JSON `{"error": ...}` otherwise):
+
+| Who | Route | What |
+|---|---|---|
+| any | `GET /api/pullers` | the pullers the link is in, and its part |
+| any | `GET /api/pullers/<name>` | last contacts, commands waiting and expired, files |
+| producer | `POST /api/pullers/<name>/producer?wait=<s>` | body `{"report": <envelope>}`: keeps the report, answers `{"seq", "commands"}` |
+| producer | `PUT /api/pullers/<name>/producer/files/<file>` | the body is the file |
+| consumer | `POST /api/pullers/<name>/commands` | body `{"command": <envelope>}`: answers `{"qid", "expires"}` |
+| consumer | `GET /api/pullers/<name>/reports?since=<seq>&wait=<s>` | the reports after `since`, with `next`, `first` (the oldest kept), `last` and `reset` |
+| consumer | `GET /api/pullers/<name>/files/<file>` | the file |
+| consumer | `DELETE /api/pullers/<name>/files/<file>` | the consumer has it whole: it goes |
+
 ### Groups
 
 With many servers, **Edit groups** on the Dashboard (admins) puts them

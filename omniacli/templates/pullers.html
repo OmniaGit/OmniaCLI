@@ -1,0 +1,93 @@
+{# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C · SPDX-License-Identifier: AGPL-3.0-or-later -#}
+{% extends "base.html" %}
+{% block title %}Pullers · OmniaCLI{% endblock %}
+{% block crumbs %}{% from "_crumbs.html" import crumbs with context %}
+{{ crumbs([("Dashboard", "/"), ("Pullers", None)]) }}
+{% endblock %}
+{% block content %}
+<h1>Pullers</h1>
+<p class="muted">This instance relays between an OmniaCLI that cannot be reached (the <strong>producer</strong>) and the OmniaCLI that operate it (the <strong>consumers</strong>): both link out to here, with an incoming link of the <a href="{{ prefix }}/users">Users</a> page (the role <strong>user</strong> is enough).
+The producer takes the consumers' commands and leaves its reports and backups here; with a key, which only the two ends hold, this instance cannot read nor change them.
+A command not taken by the producer in 10 minutes expires; a file goes once a consumer has it whole, and every file and report after the hours kept.
+Saved in <span class="mono">{{ pullers_file }}</span>.</p>
+<div id="error" class="banner" hidden></div>
+<div class="panel">
+  <div class="scroll">
+  <table>
+    <tr><th>Puller</th><th>Producer</th><th>Consumers</th><th>Hours kept</th><th>Largest file, MiB</th><th>Now</th><th></th></tr>
+    {% for p in pullers %}
+    <tr data-puller="{{ p.puller }}">
+      <td><strong>{{ p.puller }}</strong>
+        {% if p.missing %}<br><span class="error">no incoming link {{ p.missing | join(", ") }}</span>{% endif %}</td>
+      <td><select class="producer" aria-label="Producer of {{ p.puller }}">
+        {% for l in links %}<option {% if l == p.producer.link %}selected{% endif %}>{{ l }}</option>{% endfor %}
+        {% if p.producer.link not in links %}<option selected>{{ p.producer.link }}</option>{% endif %}
+      </select>
+        <br><span class="muted">seen <span data-time="{{ p.producer.seen or '' }}"></span></span></td>
+      <td><input type="text" class="consumers mono" value="{{ p.consumers | map(attribute='link') | join(', ') }}" aria-label="Consumers of {{ p.puller }}">
+        {% for c in p.consumers %}<br><span class="muted">{{ c.link }} seen <span data-time="{{ c.seen or '' }}"></span></span>{% endfor %}</td>
+      <td><input type="number" class="keep" min="1" max="720" value="{{ p.keep_hours }}" aria-label="Hours kept by {{ p.puller }}" style="width: 6em"></td>
+      <td><input type="number" class="size" min="1" value="{{ p.max_file_mib }}" aria-label="Largest file of {{ p.puller }}" style="width: 8em"></td>
+      <td class="muted">{{ p.pending | length }} command{{ "" if p.pending | length == 1 else "s" }} waiting
+        {% if p.expired %}, {{ p.expired | length }} expired{% endif %}
+        <br>{{ p.files | length }} file{{ "" if p.files | length == 1 else "s" }}{% if p.files %}, {{ ((p.files | sum(attribute='size')) / 1048576) | round(1) }} MiB{% endif %}</td>
+      <td><div class="actions" style="margin: 0">
+        <button type="button" data-save>Save</button>
+        <button type="button" class="danger" data-delete>Delete</button>
+      </div></td>
+    </tr>
+    {% else %}
+    <tr><td colspan="7" class="muted">No pullers yet.</td></tr>
+    {% endfor %}
+    <tr>
+      <td><input type="text" id="new-name" placeholder="api-prod" aria-label="New puller name"></td>
+      <td><select id="new-producer" aria-label="Producer of the new puller">
+        {% for l in links %}<option>{{ l }}</option>{% endfor %}</select></td>
+      <td><input type="text" id="new-consumers" class="mono" placeholder="dev, other" aria-label="Consumers of the new puller"></td>
+      <td><input type="number" id="new-keep" min="1" max="720" value="{{ keep_hours }}" aria-label="Hours kept by the new puller" style="width: 6em"></td>
+      <td><input type="number" id="new-size" min="1" value="{{ max_file_mib }}" aria-label="Largest file of the new puller" style="width: 8em"></td>
+      <td></td>
+      <td><button type="button" id="add" {% if not links %}disabled title="Create the incoming links on the Users page first"{% endif %}>Add puller</button></td>
+    </tr>
+  </table>
+  </div>
+</div>
+<script>
+(function () {
+  const errorBox = document.getElementById("error");
+  for (const span of document.querySelectorAll("[data-time]")) {
+    const at = parseFloat(span.dataset.time);
+    span.textContent = at ? new Date(at * 1000).toLocaleString() : "never";
+  }
+  async function post(url, body) {
+    errorBox.hidden = true;
+    const resp = await fetch("{{ prefix }}/api/pullers/" + url, {method: "POST",
+      headers: {"Content-Type": "application/json"}, body: JSON.stringify(body || {})});
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) { errorBox.textContent = data.error || data.detail || ("Error " + resp.status); errorBox.hidden = false; return null; }
+    return data;
+  }
+  const list = (text) => text.split(/[\s,]+/).filter(Boolean);
+  for (const row of document.querySelectorAll("tr[data-puller]")) {
+    const name = row.dataset.puller;
+    row.querySelector("[data-save]").onclick = async () => {
+      const body = {name, producer: row.querySelector(".producer").value,
+                    consumers: list(row.querySelector(".consumers").value),
+                    keep_hours: parseInt(row.querySelector(".keep").value, 10),
+                    max_file_mib: parseInt(row.querySelector(".size").value, 10)};
+      if (await post("save", body)) location.reload();
+    };
+    row.querySelector("[data-delete]").onclick = async () => {
+      if (!confirm(`Delete puller ${name}? Its waiting commands, reports and files go too.`)) return;
+      if (await post("delete", {name})) location.reload();
+    };
+  }
+  document.getElementById("add").onclick = async () => {
+    const value = (id) => document.getElementById(id).value.trim();
+    const body = {name: value("new-name"), producer: value("new-producer"), consumers: list(value("new-consumers")),
+                  keep_hours: parseInt(value("new-keep"), 10), max_file_mib: parseInt(value("new-size"), 10), new: true};
+    if (await post("save", body)) location.reload();
+  };
+})();
+</script>
+{% endblock %}
