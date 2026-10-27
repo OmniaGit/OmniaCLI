@@ -29,12 +29,13 @@ from fastapi.templating import Jinja2Templates
 from starlette.background import BackgroundTask
 from starlette.requests import HTTPConnection
 
-from . import checks, disks, linkcopy, ops, plugins, puller, schedules, selflog, shell, tunnel
+from . import checks, disks, linkcopy, ops, plugins, puller, publisher, schedules, selflog, shell, tunnel
 from .accesslog import AccessLog
 from .diskhistory import DiskHistory, DiskRecorder
 from .auth import ROLES as ACCESS_ROLES
 from .auth import Authenticator, Principal, hash_password, hash_token, new_token, verify_password
 from .config import (
+    PUBLISHED_COMMANDS,
     PULLER_FILE_MIB,
     PULLER_KEEP_HOURS,
     ROLES,
@@ -54,12 +55,14 @@ from .config import (
     parse_groups,
     parse_link,
     parse_options,
+    parse_publication,
     parse_puller,
     parse_servers,
     save_access,
     save_groups,
     save_links,
     save_options,
+    save_publications,
     save_pullers,
     save_servers,
     server_text,
@@ -67,6 +70,7 @@ from .config import (
 )
 from .jobs import JobManager, filter_jobs
 from .plugin_api import ENTRY_POINT_GROUP, PLUGIN_API, ActionRefused, Host
+from .pullcrypto import new_key
 from .links import LIST_TIMEOUT, LinkClients, describe_error, link_headers, proxy_websocket
 from .logtail import read_since
 from .metrics import Sampler
@@ -239,6 +243,19 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
     # the pullers this instance relays: their state next to the jobs
     pullers = puller.PullerHub(settings, settings.jobs_dir.parent / "pullers")
 
+    async def published_instance(inst: Instance) -> dict:
+        """What the report of a publication says of its instance (publisher.py)."""
+        return {"state": await run_state(inst), "busy": jobs.is_busy(inst.key), "restart": inst.restart.type,
+                "backup_fields": [_field_dict(f) for f in inst.plugin.backup_fields()]}
+
+    def published_backup_options(inst: Instance, params: dict) -> dict:
+        return {f.key: _field_value(f, params.get(f.key)) for f in inst.plugin.backup_fields()}
+
+    # the instances of this one published on a puller of a relay
+    publications = publisher.Publisher(settings, jobs, sampler, disk_history, link_clients,
+                                       settings.jobs_dir.parent / "publications", published_instance,
+                                       published_backup_options, _version())
+
     def identify(request: HTTPConnection) -> Principal:
         # a WebSocket has no method: it is checked as a post (no token, same origin)
         method = request.scope.get("method", "WEBSOCKET")
@@ -323,12 +340,14 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         disk_recorder.start()
         tunnels.start()
         pullers.start()
+        publications.start()
         # not nullcontext(): it is an async context manager only from Python 3.10
         if mcp_manager:
             async with mcp_manager.run():
                 yield
         else:
             yield
+        await publications.stop()
         await pullers.stop()
         await tunnels.stop()
         await disk_recorder.stop()
@@ -351,7 +370,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
     app.state.disk_history, app.state.disk_recorder = disk_history, disk_recorder
     app.state.access_log = access_log
     app.state.tunnels = tunnels
-    app.state.pullers = pullers
+    app.state.pullers, app.state.publications = pullers, publications
     app.state.sessions, app.state.authenticator = sessions, authenticator
 
     @app.middleware("http")
@@ -2087,9 +2106,20 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             info["missing"] = [p for p in [info["producer"]["link"]] + [c["link"] for c in info["consumers"]]
                                if p not in settings.links]
             rows.append(info)
+        published = []
+        for key, pub in settings.publications.items():
+            row = pub.to_dict()
+            row.pop("key", None)
+            published.append({**row, "instance": key, "has_key": bool(pub.key), "status": publications.status(key),
+                              "live": settings.instance(*key.split("/", 1)) is not None,
+                              "link_missing": pub.link not in settings.link_targets})
+        instances = [i.key for srv in settings.servers.values() for i in srv.instances.values()]
         return _TEMPLATES.TemplateResponse(request, "pullers.html", {
             "pullers": rows, "links": sorted(settings.links), "pullers_file": settings.pullers_file,
-            "keep_hours": PULLER_KEEP_HOURS, "max_file_mib": PULLER_FILE_MIB})
+            "keep_hours": PULLER_KEEP_HOURS, "max_file_mib": PULLER_FILE_MIB,
+            "publications": published, "publications_file": settings.publications_file,
+            "instances": [k for k in instances if k not in settings.publications],
+            "link_targets": sorted(settings.link_targets), "commands": PUBLISHED_COMMANDS})
 
     @app.post("/api/pullers/save", dependencies=[Depends(admin)])
     async def pullers_save(payload: dict = Body(...)):
@@ -2132,6 +2162,63 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             settings.pullers = changed
             pullers.forget(name)
             return {"ok": True}
+
+    # --- instances of this one published on a relay's puller -------------
+
+    @app.post("/api/publications/key", dependencies=[Depends(admin)])
+    async def publication_new_key():
+        """A new random key, for the publication and its consumers."""
+        return {"key": new_key()}
+
+    @app.post("/api/publications/save", dependencies=[Depends(admin)])
+    async def publication_save(payload: dict = Body(...)):
+        """Publish an instance (new: true) or change its publication; a blank
+        key keeps the one saved, remove_key drops it."""
+        key, new = str(payload.get("instance") or "").strip(), bool(payload.get("new"))
+        async with pullers_lock:
+            if new and key in settings.publications:
+                return refuse(f"{key} is already published")
+            if not new and key not in settings.publications:
+                return refuse(f"{key} is not published", status.HTTP_404_NOT_FOUND)
+            if not any(key in (i.key for i in srv.instances.values()) for srv in settings.servers.values()):
+                return refuse(f"No instance {key}")
+            data = {k: payload.get(k) for k in ("link", "puller", "key", "commands")}
+            if payload.get("remove_key"):
+                data["key"] = ""
+            elif not str(data["key"] or "").strip() and not new:
+                data["key"] = settings.publications[key].key
+            try:
+                pub = parse_publication(key, data)
+            except ConfigError as exc:
+                return refuse(str(exc))
+            if pub.link not in settings.link_targets:
+                return refuse(f"No link {pub.link}: add the relay on the Links page")
+            changed = {**settings.publications, key: pub}
+            try:
+                await asyncio.to_thread(save_publications, settings.publications_file, changed)
+            except OSError as exc:
+                return refuse(f"Cannot write {settings.publications_file}: {exc}", 500)
+            settings.publications = changed
+            publications.reload()
+        risky = [a for a in ("start", "stop", "restart") if pub.exposed(a).enabled]
+        warning = (f"{', '.join(risky)} exposed without a key: whoever controls the relay can send them"
+                   if risky and not pub.key else "")
+        return {"ok": True, "warning": warning}
+
+    @app.post("/api/publications/delete", dependencies=[Depends(admin)])
+    async def publication_delete(payload: dict = Body(...)):
+        key = str(payload.get("instance") or "")
+        async with pullers_lock:
+            if key not in settings.publications:
+                return refuse(f"{key} is not published", status.HTTP_404_NOT_FOUND)
+            changed = {k: v for k, v in settings.publications.items() if k != key}
+            try:
+                await asyncio.to_thread(save_publications, settings.publications_file, changed)
+            except OSError as exc:
+                return refuse(f"Cannot write {settings.publications_file}: {exc}", 500)
+            settings.publications = changed
+            publications.reload()
+        return {"ok": True}
 
     # --- options of the system ------------------------------------------
 

@@ -41,7 +41,8 @@
     <span class="job-state-text">{{ {"interrupted": "Interrupted: OmniaCLI stopped while it ran", "stopped": "Stopped by an administrator"}.get(job.status, "Failed: see the error and the log below") }}</span>
   </div>
 </div>
-{# the steps of a job that has them (result.progress: a copy from a link),
+{# the steps of a job that has them (result.progress: a copy from a link, a backup for
+   a puller),
    with the bytes of a transfer #}
 <style>
 .steps { display: flex; align-items: stretch; margin: 0 0 14px; }
@@ -164,6 +165,8 @@
         if (i) { const wire = document.createElement("div"); wire.className = "step-wire"; box.appendChild(wire); }
         const card = document.createElement("div");
         card.className = "step"; card.dataset.id = s.id;
+        // a step that moves bytes (a transfer): its bar, done and total
+        if (s.id === "download" || s.bytes) card.dataset.bytes = "1";
         card.innerHTML = '<div class="step-head"><span class="step-mark"></span><span class="step-label"></span></div>'
           + '<div class="step-where muted"></div><div class="step-bar"><div></div></div><div class="step-figures"></div>';
         card.querySelector(".step-label").textContent = s.label;
@@ -184,7 +187,7 @@
       const figures = card.querySelector(".step-figures");
       if (state === "active" && !stepSince[card.dataset.id]) stepSince[card.dataset.id] = now;
       const elapsed = stepSince[card.dataset.id] ? (now - stepSince[card.dataset.id]) / 1000 : 0;
-      if (card.dataset.id === "download" && (state === "active" || (state === "failed" && progress.done))) {
+      if (card.dataset.bytes && (state === "active" || (state === "failed" && progress.done))) {
         const done = progress.done || 0, total = progress.total || 0;
         if (lastBytes) {
           const rate = (done - lastBytes.done) / Math.max(.2, (now - lastBytes.t) / 1000);
@@ -204,7 +207,7 @@
         figures.textContent = clock(elapsed);
       } else if (state === "done") {
         bar.className = "step-bar";
-        if (card.dataset.id === "download" && progress.total) figures.textContent = sizeText(progress.total);
+        if (card.dataset.bytes && progress.total) figures.textContent = sizeText(progress.total);
         else if (stepSince[card.dataset.id] && !card.dataset.took) {
           card.dataset.took = "1"; figures.textContent = clock(elapsed);
         }

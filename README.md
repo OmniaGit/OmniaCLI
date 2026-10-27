@@ -618,8 +618,8 @@ operate it (the **consumers**) each link out to the relay; nothing connects
 to the producer. On the relay a **puller** names the link of the producer
 and those of its consumers:
 
-*Not finished*: this version has the relay only, the producer's and the
-consumers' sides come next.
+*Not finished*: this version has the relay and the producer's side, the
+consumers' side comes next.
 
 
 - the **Pullers** page (admins) adds one: a name, the producer and the
@@ -643,6 +643,34 @@ consumers' sides come next.
   they pass in clear, and the relay is trusted. The page shows only what the
   relay knows: when each side was last seen, the commands waiting and the
   files kept.
+
+On the producer, the **Pullers** page publishes an instance (*Published
+here*): the link to the relay (Links page), the puller's name, its key (*New
+key* makes one: give the same to the consumers) and the commands it takes,
+each with its hours. Saved in `publications.yaml` next to the servers file,
+readable by its owner only:
+
+- **backup**, **start**, **stop** and **restart** are off until enabled. A
+  command sent outside its hours (`HH:MM-HH:MM`, by the producer's clock,
+  may cross midnight; empty: always) is refused at once, the answer saying
+  its hours: to run it within them, schedule it on the consumer. Saving
+  start, stop or restart without a key warns that whoever controls the
+  relay can send them;
+- every command runs as a job recorded as `puller <name> (<who asked>)`;
+  a consumer may stop a job a command started (`stop-job`), and no other;
+- a backup is encrypted with the key before it is uploaded (steps Backup,
+  Encrypt, Upload on its job page), and stays here too, as any backup;
+- every ask carries a report: the instance's state, whether a job runs, its
+  type and its backup's options, the commands exposed and their hours, the
+  disks (and their daily history when it changed), the CPU and memory
+  samples since the report the relay took last (the sampler keeps an hour:
+  a longer gap is lost), and the new log lines, steps and result of the
+  jobs the commands started. Whatever the relay did not take goes again
+  with the next report. While such a job runs it asks every 2 seconds,
+  otherwise every 25;
+- the commands already received are kept in `publications/` next to
+  `jobs_dir`, so a restart does not let one be played again. The page shows
+  when the relay was reached last, or why not.
 
 Their state is kept in `pullers/` next to `jobs_dir`
 (`/var/lib/omniacli/pullers` in the package). A relay behind nginx needs

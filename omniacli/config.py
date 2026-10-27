@@ -69,17 +69,26 @@ class AutoUpdate:
     window_end: datetime.time | None = None
 
     def in_window(self, now: datetime.time) -> bool:
-        if self.window_start is None or self.window_end is None:
-            return True
-        if self.window_start <= self.window_end:
-            return self.window_start <= now < self.window_end
-        # The window crosses midnight, e.g. 20:00-06:00
-        return now >= self.window_start or now < self.window_end
+        return in_window(self.window_start, self.window_end, now)
 
     def window_label(self) -> str:
-        if self.window_start is None or self.window_end is None:
-            return "always"
-        return f"{self.window_start:%H:%M}-{self.window_end:%H:%M}"
+        return window_label(self.window_start, self.window_end)
+
+
+def in_window(start: datetime.time | None, end: datetime.time | None, now: datetime.time) -> bool:
+    """Whether now is in start-end (no window: always)."""
+    if start is None or end is None:
+        return True
+    if start <= end:
+        return start <= now < end
+    # The window crosses midnight, e.g. 20:00-06:00
+    return now >= start or now < end
+
+
+def window_label(start: datetime.time | None, end: datetime.time | None) -> str:
+    if start is None or end is None:
+        return "always"
+    return f"{start:%H:%M}-{end:%H:%M}"
 
 
 @dataclass
@@ -256,6 +265,10 @@ class Settings:
     # the pullers this instance relays (pullers.yaml, Pullers page)
     pullers_file: Path | None = None
     pullers: dict[str, PullerDef] = field(default_factory=dict)
+    # the instances of this one published on a puller of a linked relay
+    # (publications.yaml, readable by its owner only: it holds the keys)
+    publications_file: Path | None = None
+    publications: dict[str, Publication] = field(default_factory=dict)
     token_roles: dict[str, str] = field(default_factory=dict)
     fixed: Access = field(default_factory=Access)
     web: Access = field(default_factory=Access)
@@ -314,15 +327,19 @@ def _parse_auto_update(data: dict | None, where: str) -> AutoUpdate:
     )
     if auto.interval_minutes < 1:
         raise ConfigError(f"{where}: interval_minutes must be >= 1")
-    window = data.get("window")
-    if window:
-        try:
-            start, end = str(window).split("-")
-        except ValueError as exc:
-            raise ConfigError(f"{where}: window must be 'HH:MM-HH:MM'") from exc
-        auto.window_start = _parse_time(start.strip(), where)
-        auto.window_end = _parse_time(end.strip(), where)
+    auto.window_start, auto.window_end = _parse_window(data.get("window"), where)
     return auto
+
+
+def _parse_window(window, where: str) -> tuple[datetime.time | None, datetime.time | None]:
+    """'HH:MM-HH:MM' (it may cross midnight); empty: none."""
+    if not window:
+        return None, None
+    try:
+        start, end = str(window).split("-")
+    except ValueError as exc:
+        raise ConfigError(f"{where}: window must be 'HH:MM-HH:MM'") from exc
+    return _parse_time(start.strip(), where), _parse_time(end.strip(), where)
 
 
 def _parse_instance(server: str, role: str, data: dict, logs_dir: Path | None, plugin) -> Instance:
@@ -898,6 +915,118 @@ def save_pullers(path: Path, pullers: dict[str, PullerDef]) -> None:
     os.replace(tmp, path)
 
 
+# what a publication may let its consumers do, each off unless enabled
+PUBLISHED_COMMANDS = ("backup", "start", "stop", "restart")
+
+
+@dataclass
+class Exposed:
+    """A command a publication lets the consumers send: enabled, and the
+    hours it is taken in (AutoUpdate's window: none is always)."""
+
+    enabled: bool = False
+    window_start: datetime.time | None = None
+    window_end: datetime.time | None = None
+
+    def in_window(self, now: datetime.time) -> bool:
+        return in_window(self.window_start, self.window_end, now)
+
+    def window_label(self) -> str:
+        return window_label(self.window_start, self.window_end)
+
+
+@dataclass
+class Publication:
+    """An instance of this OmniaCLI published as the producer of a puller of
+    a relay this one links to (publisher.py). key: the puller's key (text
+    opk1-...), empty for none."""
+
+    instance: str  # server/role
+    link: str
+    puller: str
+    key: str = ""
+    commands: dict[str, Exposed] = field(default_factory=dict)
+
+    def exposed(self, action: str) -> Exposed:
+        return self.commands.get(action) or Exposed()
+
+    def to_dict(self) -> dict:
+        data = {"link": self.link, "puller": self.puller}
+        if self.key:
+            data["key"] = self.key
+        data["commands"] = {}
+        for action in PUBLISHED_COMMANDS:
+            rule = self.exposed(action)
+            entry = {"enabled": rule.enabled}
+            if rule.window_start is not None and rule.window_end is not None:
+                entry["window"] = rule.window_label()
+            data["commands"][action] = entry
+        return data
+
+
+def parse_publication(instance: str, data) -> Publication:
+    where = f"publications.{instance}"
+    server, _, role = instance.partition("/")
+    if not SERVER_NAME.fullmatch(server) or role not in ROLES:
+        raise ConfigError(f"{where}: an instance is server/role (production or test)")
+    data = data if isinstance(data, dict) else {}
+    link, name = str(data.get("link") or "").strip(), str(data.get("puller") or "").strip()
+    for key, value in (("link", link), ("puller", name)):
+        if not SERVER_NAME.fullmatch(value):
+            raise ConfigError(f"{where}.{key}: {value!r} is not a name of letters, digits and . _ -")
+    key = str(data.get("key") or "").strip()
+    if key:
+        from .pullcrypto import PullerCryptoError, parse_key  # it imports cryptography
+
+        try:
+            parse_key(key)
+        except PullerCryptoError as exc:
+            raise ConfigError(f"{where}.key: {exc}") from None
+    commands = data.get("commands") or {}
+    if not isinstance(commands, dict):
+        raise ConfigError(f"{where}.commands: a mapping of {', '.join(PUBLISHED_COMMANDS)}")
+    unknown = [str(c) for c in commands if c not in PUBLISHED_COMMANDS]
+    if unknown:
+        raise ConfigError(f"{where}.commands: {', '.join(unknown)} is not one of {', '.join(PUBLISHED_COMMANDS)}")
+    exposed = {}
+    for action in PUBLISHED_COMMANDS:
+        entry = commands.get(action) or {}
+        if not isinstance(entry, dict):
+            raise ConfigError(f"{where}.commands.{action}: a mapping of enabled and window")
+        start, end = _parse_window(entry.get("window"), f"{where}.commands.{action}")
+        exposed[action] = Exposed(bool(entry.get("enabled", False)), start, end)
+    return Publication(instance, link, name, key, exposed)
+
+
+def load_publications(path: Path) -> dict[str, Publication]:
+    """The publications file; none yet is no publications."""
+    if not path.exists():
+        return {}
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        raise ConfigError(f"cannot read {path}: {exc}") from exc
+    found = data.get("publications") or {}
+    if not isinstance(found, dict):
+        raise ConfigError(f"{path}: publications must be a mapping")
+    try:
+        return {str(k): parse_publication(str(k), v) for k, v in found.items()}
+    except ConfigError as exc:
+        raise ConfigError(f"{path}: {exc}") from exc
+
+
+def save_publications(path: Path, publications: dict[str, Publication]) -> None:
+    """Write the publications file atomically, readable by its owner only: it holds the keys."""
+    text = yaml.safe_dump({"publications": {k: p.to_dict() for k, p in publications.items()}},
+                          sort_keys=False, allow_unicode=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    os.replace(tmp, path)
+
+
 def parse_settings(data: dict, base_dir: Path = Path(".")) -> Settings:
     fixed = parse_auth(data.get("auth") or {})
     servers_file = Path(data.get("servers_file") or "servers.yaml")
@@ -922,6 +1051,9 @@ def parse_settings(data: dict, base_dir: Path = Path(".")) -> Settings:
     pullers_file = Path(data.get("pullers_file") or servers_file.parent / "pullers.yaml")
     if not pullers_file.is_absolute():
         pullers_file = base_dir / pullers_file
+    publications_file = Path(data.get("publications_file") or servers_file.parent / "publications.yaml")
+    if not publications_file.is_absolute():
+        publications_file = base_dir / publications_file
     scripts_dir = Path(data.get("scripts_dir") or servers_file.parent / "scripts")
     if not scripts_dir.is_absolute():
         scripts_dir = base_dir / scripts_dir
@@ -943,6 +1075,8 @@ def parse_settings(data: dict, base_dir: Path = Path(".")) -> Settings:
         options=load_options(options_file),
         pullers_file=pullers_file,
         pullers=load_pullers(pullers_file),
+        publications_file=publications_file,
+        publications=load_publications(publications_file),
         fixed=fixed,
     )
     settings.set_web_access(load_access(users_file))

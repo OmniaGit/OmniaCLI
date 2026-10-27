@@ -11,6 +11,7 @@ The producer takes the consumers' commands and leaves its reports and backups he
 A command not taken by the producer in 10 minutes expires; a file goes once a consumer has it whole, and every file and report after the hours kept.
 Saved in <span class="mono">{{ pullers_file }}</span>.</p>
 <div id="error" class="banner" hidden></div>
+<h2>Relayed here</h2>
 <div class="panel">
   <div class="scroll">
   <table>
@@ -52,6 +53,60 @@ Saved in <span class="mono">{{ pullers_file }}</span>.</p>
   </table>
   </div>
 </div>
+
+<h2 style="margin-top: 24px">Published here</h2>
+<p class="muted">Instances of this OmniaCLI published as the producer of a puller of a relay, reached through a link of the <a href="{{ prefix }}/links">Links</a> page: this instance asks the relay for commands and sends it its reports (state, disks, load, the progress of its jobs) and its backups.
+Every command is off until you enable it; one sent outside its hours (HH:MM-HH:MM by this machine's clock, empty: always) is refused at once.
+With a key, give the same key to the consumers: without one, whoever controls the relay can read what passes and send the commands enabled.
+Saved in <span class="mono">{{ publications_file }}</span>, readable by its owner only: it holds the keys.</p>
+<div id="key-box" class="panel" hidden style="margin-bottom: 16px">
+  <p><strong>The new key.</strong> Copy it now into the consumers' connection to this puller; it is saved with the publication.</p>
+  <pre class="console mono" id="key-value" style="white-space: pre-wrap; word-break: break-all"></pre>
+</div>
+<div class="panel">
+  <div class="scroll">
+  <table>
+    <tr><th>Instance</th><th>Relay link</th><th>Puller</th><th>Key</th><th>Commands and their hours</th><th>Now</th><th></th></tr>
+    {% for p in publications %}
+    <tr data-publication="{{ p.instance }}">
+      <td><strong>{{ p.instance }}</strong>{% if not p.live %}<br><span class="error">not live: nothing is sent</span>{% endif %}</td>
+      <td><select class="link" aria-label="Relay link of {{ p.instance }}">
+        {% for l in link_targets %}<option {% if l == p.link %}selected{% endif %}>{{ l }}</option>{% endfor %}
+        {% if p.link_missing %}<option selected>{{ p.link }}</option>{% endif %}</select>
+        {% if p.link_missing %}<br><span class="error">no link {{ p.link }}</span>{% endif %}</td>
+      <td><input type="text" class="puller mono" value="{{ p.puller }}" aria-label="Puller of {{ p.instance }}"></td>
+      <td><input type="text" class="key mono" autocomplete="off" placeholder="{{ 'unchanged' if p.has_key else 'none' }}" aria-label="Key of {{ p.instance }}">
+        <div class="actions" style="margin: 4px 0 0"><button type="button" data-new-key>New key</button>
+        {% if p.has_key %}<button type="button" data-remove-key>Remove key</button>{% endif %}</div>
+        {% if not p.has_key %}<span class="muted">no key: in clear</span>{% endif %}</td>
+      <td>{% for c in commands %}<div><label><input type="checkbox" class="cmd" data-cmd="{{ c }}" {% if p.commands[c].enabled %}checked{% endif %}> {{ c }}</label>
+        <input type="text" class="window mono" data-cmd="{{ c }}" value="{{ p.commands[c].window or '' }}" placeholder="always" aria-label="Hours of {{ c }}" style="width: 9em"></div>{% endfor %}</td>
+      <td class="muted">{% if p.status.ok %}<span class="ok">relay reached</span> <span data-time="{{ p.status.at }}"></span>, report {{ p.status.seq }}
+        {% elif p.status.ok is sameas false %}<span class="error">{{ p.status.error }}</span> <span data-time="{{ p.status.at }}"></span>
+        {% else %}not reached yet{% endif %}
+        {% if p.status.commands %}<br>{{ p.status.commands }} command{{ "" if p.status.commands == 1 else "s" }} taken{% endif %}</td>
+      <td><div class="actions" style="margin: 0">
+        <button type="button" data-save>Save</button>
+        <button type="button" class="danger" data-delete>Delete</button>
+      </div></td>
+    </tr>
+    {% else %}
+    <tr><td colspan="7" class="muted">No instance published.</td></tr>
+    {% endfor %}
+    <tr data-publication="" data-new>
+      <td><select class="instance" aria-label="Instance to publish">{% for i in instances %}<option>{{ i }}</option>{% endfor %}</select></td>
+      <td><select class="link" aria-label="Relay link">{% for l in link_targets %}<option>{{ l }}</option>{% endfor %}</select></td>
+      <td><input type="text" class="puller mono" placeholder="api-prod" aria-label="Puller"></td>
+      <td><input type="text" class="key mono" autocomplete="off" placeholder="none" aria-label="Key">
+        <div class="actions" style="margin: 4px 0 0"><button type="button" data-new-key>New key</button></div></td>
+      <td>{% for c in commands %}<div><label><input type="checkbox" class="cmd" data-cmd="{{ c }}"> {{ c }}</label>
+        <input type="text" class="window mono" data-cmd="{{ c }}" placeholder="always" aria-label="Hours of {{ c }}" style="width: 9em"></div>{% endfor %}</td>
+      <td></td>
+      <td><button type="button" data-save {% if not instances or not link_targets %}disabled title="An instance not published yet and a link to the relay are needed"{% endif %}>Publish</button></td>
+    </tr>
+  </table>
+  </div>
+</div>
 <script>
 (function () {
   const errorBox = document.getElementById("error");
@@ -80,6 +135,49 @@ Saved in <span class="mono">{{ pullers_file }}</span>.</p>
     row.querySelector("[data-delete]").onclick = async () => {
       if (!confirm(`Delete puller ${name}? Its waiting commands, reports and files go too.`)) return;
       if (await post("delete", {name})) location.reload();
+    };
+  }
+  async function postPublication(url, body) {
+    errorBox.hidden = true;
+    const resp = await fetch("{{ prefix }}/api/publications/" + url, {method: "POST",
+      headers: {"Content-Type": "application/json"}, body: JSON.stringify(body || {})});
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) { errorBox.textContent = data.error || data.detail || ("Error " + resp.status); errorBox.hidden = false; return null; }
+    return data;
+  }
+  for (const row of document.querySelectorAll("tr[data-publication]")) {
+    const isNew = "new" in row.dataset;
+    const instance = () => isNew ? row.querySelector(".instance").value : row.dataset.publication;
+    const commands = () => {
+      const found = {};
+      for (const box of row.querySelectorAll(".cmd")) {
+        const windowBox = row.querySelector(`.window[data-cmd="${box.dataset.cmd}"]`);
+        found[box.dataset.cmd] = {enabled: box.checked, window: windowBox.value.trim()};
+      }
+      return found;
+    };
+    row.querySelector("[data-new-key]").onclick = async () => {
+      const data = await postPublication("key");
+      if (!data) return;
+      row.querySelector(".key").value = data.key;
+      document.getElementById("key-value").textContent = data.key;
+      document.getElementById("key-box").hidden = false;
+    };
+    const save = async (extra) => {
+      const body = {instance: instance(), link: row.querySelector(".link").value, puller: row.querySelector(".puller").value.trim(),
+                    key: row.querySelector(".key").value.trim(), commands: commands(), new: isNew, ...extra};
+      const data = await postPublication("save", body);
+      if (!data) return;
+      if (data.warning && !confirm("Saved. Warning: " + data.warning + ".")) return;
+      location.reload();
+    };
+    row.querySelector("[data-save]").onclick = () => save({});
+    const remove = row.querySelector("[data-remove-key]");
+    if (remove) remove.onclick = () => { if (confirm("Remove the key? Everything then passes in clear.")) save({remove_key: true}); };
+    const del = row.querySelector("[data-delete]");
+    if (del) del.onclick = async () => {
+      if (!confirm(`Stop publishing ${instance()}?`)) return;
+      if (await postPublication("delete", {instance: instance()})) location.reload();
     };
   }
   document.getElementById("add").onclick = async () => {
