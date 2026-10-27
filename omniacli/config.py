@@ -119,6 +119,30 @@ class LinkSource:
 
 
 @dataclass
+class Package:
+    """A Debian package an instance is installed from (packages.py): url
+    publishes the .deb, url.json its manifest (version, sha256, size) and
+    url.json.sig the Ed25519 signature of that manifest, made with the
+    private key of public_key. folder holds the downloaded file at a fixed
+    path, the one sudoers allows to install."""
+    url: str
+    name: str
+    public_key: str
+    folder: Path
+    server: str
+    role: str
+
+    @property
+    def deb_path(self) -> Path:
+        return self.folder / f"{self.server}_{self.role}.deb"
+
+    @property
+    def state_path(self) -> Path:
+        """What was installed last: its checksum and version."""
+        return self.folder / f"{self.server}_{self.role}.json"
+
+
+@dataclass
 class Instance:
     server: str
     role: str
@@ -141,6 +165,8 @@ class Instance:
     # the folder the Claude button of the server page opens a shell in, to
     # run claude there; None: no button
     claude_dir: Path | None = None
+    # installed from a published Debian package, besides or instead of git
+    package: Package | None = None
 
     @property
     def type(self) -> str:
@@ -212,7 +238,8 @@ def server_text(server: Server) -> str:
     (Odoo: the database)."""
     parts = [server.name]
     for inst in server.instances.values():
-        parts += [*inst.plugin.search_text(inst), inst.restart.service, inst.domain or ""]
+        parts += [*inst.plugin.search_text(inst), inst.restart.service, inst.domain or "",
+                  inst.package.name if inst.package else ""]
         parts += [f"{r.name} {r.branch}" for r in inst.repositories]
     return " ".join(parts)
 
@@ -408,6 +435,7 @@ def _parse_instance(server: str, role: str, data: dict, logs_dir: Path | None, p
     if claude_dir is not None and not claude_dir.startswith("/"):
         raise ConfigError(f"{where}.claude_dir: {claude_dir!r} is not an absolute path")
     options = plugin.parse_options(data, where, restart_type)
+    package = _parse_package(data.get("package"), f"{where}.package", server, role, logs_dir)
     return Instance(
         server=server,
         role=role,
@@ -425,7 +453,44 @@ def _parse_instance(server: str, role: str, data: dict, logs_dir: Path | None, p
         from_link=from_link,
         domain=domain,
         claude_dir=Path(claude_dir) if claude_dir else None,
+        package=package,
     )
+
+
+# a Debian package name (Debian Policy 5.6.1)
+PACKAGE_NAME = re.compile(r"[a-z0-9][a-z0-9+.-]+")
+
+
+def _parse_package(data, where: str, server: str, role: str, logs_dir: Path | None) -> Package | None:
+    """{url, name, public_key}; empty or no url: none. The url is https (http
+    only to this computer); the downloads go next to the logs folder."""
+    from .packagesign import SigningError, parse_public_key
+
+    if not data:
+        return None
+    if not isinstance(data, dict):
+        raise ConfigError(f"{where}: a mapping of url, name and public_key")
+    url = str(data.get("url") or "").strip()
+    if not url:
+        return None
+    parts = urlsplit(url)
+    local = parts.hostname in ("localhost", "127.0.0.1", "::1")
+    if (parts.scheme not in ("https", "http") or (parts.scheme == "http" and not local)
+            or not parts.hostname or parts.query or parts.fragment or parts.username
+            or not parts.path.endswith(".deb")):
+        raise ConfigError(f"{where}.url: {url!r} is not an https:// URL of a .deb")
+    name = str(data.get("name") or "").strip()
+    if not PACKAGE_NAME.fullmatch(name):
+        raise ConfigError(f"{where}.name: {name!r} is not a Debian package name (api-server)")
+    public_key = str(data.get("public_key") or "").strip()
+    try:
+        parse_public_key(public_key)
+    except SigningError as exc:
+        raise ConfigError(f"{where}.public_key: {exc}") from None
+    if logs_dir is None:
+        raise ConfigError(f"{where}: a package needs OmniaCLI's data folder")
+    return Package(url=url, name=name, public_key=public_key, folder=logs_dir.parent / "packages",
+                   server=server, role=role)
 
 
 def _parse_domain(value, where: str) -> str | None:
@@ -552,6 +617,9 @@ def instance_to_dict(instance: Instance) -> dict:
         data["claude_dir"] = str(instance.claude_dir)
     if instance.from_link is not None:
         data["from_link"] = instance.from_link.to_dict()
+    if instance.package is not None:
+        pkg = instance.package
+        data["package"] = {"url": pkg.url, "name": pkg.name, "public_key": pkg.public_key}
     if instance.restart.type == "process":
         # both follow from the type: the log is OmniaCLI's, there is no service
         del data["log_file"], data["restart"]["service"], data["restart"]["sudo"]

@@ -279,6 +279,77 @@ wait_job "${LOCATION##*/}" || fail "pip requirements as odoo"
 echo "update, backup ($(stat -c '%U %a' "/var/lib/omniacli/backups/runas/test/$BACKUP")) and pip ran as odoo"
 # purge keeps the backups, and only them: this one stays for the purge below
 
+step "a server installed from a signed package: Test, update, nothing new, an unsigned one refused"
+# demo-server: a conffile edited here (as API_SERVER.py is) and a postinst
+mk_deb() {
+    local d="/tmp/demo-$1"
+    rm -rf "$d" && mkdir -p "$d/DEBIAN" "$d/etc/demo"
+    printf 'Package: demo-server\nVersion: %s\nArchitecture: all\nMaintainer: t <t@t>\nDescription: demo\n' "$1" > "$d/DEBIAN/control"
+    echo /etc/demo/demo.conf > "$d/DEBIAN/conffiles"
+    echo "conf $1" > "$d/etc/demo/demo.conf"
+    dpkg-deb -b --root-owner-group "$d" /srv/www/demo-server.deb >/dev/null
+}
+mkdir -p /srv/www /srv/sign
+mk_deb 1.0 && dpkg -i /srv/www/demo-server.deb >/dev/null && echo "edited here" >> /etc/demo/demo.conf
+mk_deb 2.0
+export OMNIACLI_KEY_PASSPHRASE=test-passphrase
+PUB="$(/opt/omniacli/venv/bin/omniacli package-key /srv/sign/key 2>/dev/null)" || fail "package-key"
+/opt/omniacli/venv/bin/omniacli package-sign --key /srv/sign/key /srv/www/demo-server.deb >/dev/null || fail "package-sign"
+(cd /srv/www && sha256sum -c demo-server.deb.sha256 >/dev/null) || fail "the .sha256 is not what sha256sum checks"
+/opt/omniacli/venv/bin/omniacli package-verify --public-key "$PUB" /srv/www/demo-server.deb | grep -q "version 2.0" \
+  || fail "package-verify"
+(cd /srv/www && exec python3 -m http.server 8099 --bind 127.0.0.1 >/tmp/www.log 2>&1) &
+WWW_PID=$!
+for i in $(seq 30); do curl -s -o /dev/null http://127.0.0.1:8099/ && break; sleep 1; done
+printf '[Service]\nExecStart=/bin/sleep infinity\n' > /etc/systemd/system/demo-pkg.service
+systemctl daemon-reload && systemctl start demo-pkg
+echo "omniacli ALL=(root) NOPASSWD: $SYSTEMCTL --no-ask-password restart demo-pkg" >> /etc/sudoers.d/omniacli
+curl "${API[@]}" localhost:8090/api/servers/save -d "{\"original\": null, \"name\": \"pkg\", \"server\": {\"type\": \"generic\",
+  \"production\": {\"log_file\": \"/srv/odoo.log\", \"restart\": {\"type\": \"systemd\", \"service\": \"demo-pkg\", \"sudo\": true},
+  \"repositories\": [], \"package\": {\"url\": \"http://127.0.0.1:8099/demo-server.deb\", \"name\": \"demo-server\",
+  \"public_key\": \"$PUB\"}}}}" | grep -q '"ok":true' || fail "package server not saved"
+# without its sudoers line the Test says which one: added as it says
+curl "${API[@]}" -X POST localhost:8090/api/servers/pkg/test > /tmp/checks.json
+python3 - <<'PY' > /tmp/sudoers-line || fail "package checks"
+import json
+data = json.load(open("/tmp/checks.json"))
+checks = {c["name"]: c for c in data["checks"]}
+for name in ("Package", "Package tools", "Package folder", "Installed package"):
+    assert checks[name]["ok"], (name, checks[name]["detail"])
+perm = checks["Package install permission"]
+assert not perm["ok"] and data["status"] == "draft", perm
+print(perm["detail"].split("/etc/sudoers.d/omniacli: ", 1)[1])
+PY
+cat /tmp/sudoers-line >> /etc/sudoers.d/omniacli
+visudo -cf /etc/sudoers.d/omniacli >/dev/null || fail "sudoers invalid with the line the Test printed"
+curl "${API[@]}" -X POST localhost:8090/api/servers/pkg/test | grep -q '"status":"active"' || fail "package server not activated"
+PID_BEFORE="$(systemctl show -p MainPID --value demo-pkg)"
+LOCATION="$(curl "${API[@]}" -o /dev/null -w '%{redirect_url}' -X POST localhost:8090/servers/pkg/production/pull-restart)"
+wait_job "${LOCATION##*/}" || fail "package update job"
+[ "$(dpkg-query -W -f='${Version}' demo-server)" = 2.0 ] || fail "demo-server 2.0 not installed"
+grep -q "edited here" /etc/demo/demo.conf || fail "the conffile edited here was replaced"
+[ "$(systemctl show -p MainPID --value demo-pkg)" != "$PID_BEFORE" ] || fail "demo-pkg not restarted"
+[ ! -e /var/lib/omniacli/packages/pkg_production.deb ] || fail "the download was kept"
+LOCATION="$(curl "${API[@]}" -o /dev/null -w '%{redirect_url}' -X POST localhost:8090/servers/pkg/production/pull)"
+{ wait_job "${LOCATION##*/}" && grep -q "already installed" /tmp/job.log; } || fail "nothing new not seen"
+grep -q "published 2.0 (signed" /tmp/job.log || fail "the signed version not read from the manifest"
+# whoever writes on the download server, without the private key: a new
+# .deb and its manifest, the old signature
+mk_deb 3.0
+python3 - <<'PY'
+import hashlib, json, os
+deb = "/srv/www/demo-server.deb"
+data = json.load(open(deb + ".json"))
+data.update(version="3.0", size=os.path.getsize(deb), sha256=hashlib.sha256(open(deb, "rb").read()).hexdigest())
+open(deb + ".json", "w").write(json.dumps(data, indent=2) + "\n")
+PY
+LOCATION="$(curl "${API[@]}" -o /dev/null -w '%{redirect_url}' -X POST localhost:8090/servers/pkg/production/pull)"
+wait_job "${LOCATION##*/}" && fail "an unsigned manifest was accepted"
+grep -q "does not verify" /tmp/job.log || fail "no reason for the refused manifest"
+[ "$(dpkg-query -W -f='${Version}' demo-server)" = 2.0 ] || fail "the unsigned .deb was installed"
+kill "$WWW_PID" 2>/dev/null || true
+echo "demo-server 2.0 installed, conffile kept, restarted; an unsigned 3.0 refused"
+
 step "OMNIACLI_USER: the service as a workstation user, kept by an upgrade, then omniacli again"
 wait_up() { for i in $(seq 30); do curl -s -o /dev/null localhost:8090 && return 0; sleep 1; done; return 1; }
 service_user() { stat -c %U "/proc/$(systemctl show -p MainPID --value omniacli)"; }

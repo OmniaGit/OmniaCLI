@@ -1267,3 +1267,29 @@ async def test_the_footer_says_the_version(client):
     # not to who has not logged in
     login = await client.get("/login")
     assert _version() not in login.text.replace("OmniaCLI", "")
+
+
+async def test_package_update_is_confirmed_with_its_scripts_named(client, env):
+    """A package's own scripts may start a stopped service: the update buttons
+    and the server page say it before anything is installed."""
+    from omniacli.config import Package
+
+    test = env["settings"].instance("srv", "test")
+    test.package = Package(url="https://download.example.com/api-server.deb", name="api-server",
+                           public_key="ed25519:" + "A" * 43 + "=", folder=env["tmp"] / "packages",
+                           server="srv", role="test")
+    page = (await client.get("/servers/srv?view=test", headers={"Authorization": AUTH})).text
+    warning = ("A new api-server is installed with its own scripts: they may stop and start "
+               "the service odoo-test by themselves, also if it is stopped now.")
+    # in both confirms, as JSON in the onsubmit attribute
+    assert page.count(warning) == 2
+    assert 'return confirm("Git pull srv/test?\\n\\n' + warning in page
+    assert "its own scripts may stop and start odoo-test during an update, also a stopped one" in page
+    # the Dashboard and the Servers page with such an instance
+    for path in ("/", "/dashboard/servers", "/config"):
+        resp = await client.get(path, headers={"Authorization": AUTH})
+        assert resp.status_code == 200 and "srv" in resp.text, path
+    test.package = None
+    page = (await client.get("/servers/srv?view=test", headers={"Authorization": AUTH})).text
+    # without a package the pull asks nothing, as before
+    assert "its own scripts" not in page and 'confirm("Git pull srv/test?' not in page

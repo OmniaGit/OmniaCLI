@@ -945,6 +945,83 @@ kept next to it (`.pid`).
   `data_dir` (filestore, sessions).
 - Odoo is not started at boot: a Restart starts it.
 
+## A service installed from a signed Debian package
+
+An instance of any type may be installed from a Debian package published at
+a URL, besides or instead of its git repositories: **Package URL**, **Package
+name** and **Package public key** in the server form (`package: {url, name,
+public_key}` in the servers file). Next to every file it publishes (a .deb,
+an installer) the publisher puts its manifest and the manifest's signature:
+
+| File | Holds |
+|---|---|
+| `<file>.json` | `file`, `version`, `sha256`, `size`, `built`, and `package` for a .deb: what is published, readable without downloading it |
+| `<file>.json.sig` | the Ed25519 signature of the exact bytes of the manifest, in base64 |
+| `<file>.sha256` | the line `sha256sum` writes, for a check by hand (not signed: the manifest holds the same checksum, signed) |
+
+Every pull (the buttons, the auto update, a schedule's pull, `update_test`)
+then:
+
+1. reads the manifest and its signature, and refuses a manifest that does
+   not verify with the public key, or that is the manifest of another file
+   (one key signs them all); compares its version with the installed one
+   (`dpkg-query`): the same means nothing new, an older one is refused (a
+   server that offers an old signed package cannot downgrade), both without
+   downloading anything;
+2. downloads a newer .deb to `/var/lib/omniacli/packages/<server>_<role>.deb`
+   (through `.part`) and refuses it unless its sha256 and size are the
+   signed ones, its `Package` the instance's name and its `Version` the
+   manifest's;
+3. installs it with `apt-get install -y -o Dpkg::Options::=--force-confdef -o
+   Dpkg::Options::=--force-confold <that file>`, as root through `sudo -n`:
+   the configuration files changed on the machine are kept (without these
+   options dpkg asks, and with no terminal it fails), the package's
+   dependencies are installed; then the restart, as after a git pull.
+
+**A package's own scripts run during the install** (`prerm`, `postinst`),
+as root, and OmniaCLI does not control them: many stop and start their
+service by themselves. So a service stopped by hand may be running again
+after an update (the API server's `api-server` does it: its `prerm` stops and
+disables `api`, its `postinst` enables and restarts it), even though OmniaCLI
+itself never starts a stopped service again. The confirm of the update
+buttons and the server page say it; to keep such a service stopped, turn its
+auto update off.
+
+The download server can withhold a package, not make one up nor change its
+version: the private key never leaves the machine that builds the package.
+The URL is `https://` (`http://` only to this computer). **Test** reads the
+signed manifest (it shows the published version), and prints the sudoers
+line the install needs:
+
+```
+omniacli ALL=(root) NOPASSWD: /usr/bin/apt-get install -y -o Dpkg\:\:Options\:\:\=--force-confdef -o Dpkg\:\:Options\:\:\=--force-confold /var/lib/omniacli/packages/<server>_<role>.deb
+```
+
+(`:` and `=` escaped, as sudoers wants them in arguments). OmniaCLI's user
+may then install, as root, whatever it writes in that file: it checks the
+signature first, so give that user to nobody else.
+
+The key, once, on the build machine (the passphrase is asked, or taken from
+`OMNIACLI_KEY_PASSPHRASE`):
+
+```bash
+omniacli package-key ~/.config/omniasolutions/package-signing.key   # prints ed25519:<public key>
+# a .deb gives its own version and name; any other file needs --version
+omniacli package-sign --key ~/.config/omniasolutions/package-signing.key dist/api-server.deb
+omniacli package-sign --key ~/.config/omniasolutions/package-signing.key --version 0.2.156 dist/ApiClient.exe
+```
+
+Anyone with the public key checks a downloaded file against the manifest
+next to it (the file is the original, and its version):
+
+```bash
+omniacli package-verify --public-key ed25519:... ApiClient.exe   # with ApiClient.exe.json and .json.sig beside it
+```
+
+The public key goes in the instances' form; the private one stays on the
+build machine, with a copy offline. A lost private key means a new key and
+the new public key on every instance; a stolen one, the same at once.
+
 ## MCP interface
 
 OmniaCLI serves an MCP endpoint at `/mcp` (streamable HTTP) for AI clients.

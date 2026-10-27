@@ -15,8 +15,9 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from . import ops
+from . import ops, packages
 from .config import Instance, Server
+from .jobs import JobFailed
 from .plugin_api import ERROR, WARNING, Check, system_user
 
 GIT_TIMEOUT = 30
@@ -95,6 +96,9 @@ async def _instance_checks(instance: Instance) -> list[Check]:
             "; ".join(problems) if problems else
             f"{repo.path} on {repo.branch}, clean, {repo.remote}/{repo.branch} reachable")
 
+    if instance.package is not None:
+        await _package_checks(instance, add)
+
     # service and the right to restart it
     restart = instance.restart
     if process:
@@ -145,6 +149,39 @@ async def _instance_checks(instance: Instance) -> list[Check]:
             f"runs '{' '.join(command)}' without sudo: not tried, it would restart the service",
             WARNING)
     return checks
+
+
+async def _package_checks(instance: Instance, add) -> None:
+    """The signed manifest is published, the tools are there, the folder is
+    writable, sudo allows the install."""
+    package = instance.package
+    try:
+        manifest = await packages.published(package)
+        add("Package", True, f"{package.url}: version {manifest['version']}, built {manifest.get('built')}, "
+                             "manifest signed by the public key")
+    except JobFailed as exc:
+        add("Package", False, str(exc))
+    missing = [tool for tool in ("dpkg-deb", "dpkg-query", "dpkg") if not shutil.which(tool)]
+    if not os.access(packages.APT_GET, os.X_OK):
+        missing.append(packages.APT_GET)
+    add("Package tools", not missing,
+        "dpkg-deb, dpkg-query, dpkg and apt-get found" if not missing else f"{', '.join(missing)} not found")
+    try:
+        package.folder.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=package.folder):
+            pass
+        add("Package folder", True, f"{package.folder} writable")
+    except OSError as exc:
+        add("Package folder", False, f"{package.folder}: {exc}")
+    version = await packages.installed_version(package.name)
+    add("Installed package", version is not None,
+        f"{package.name} {version}" if version else
+        f"{package.name} is not installed: the first update installs it", WARNING)
+    code, _ = await ops.capture(["sudo", "-n", "-l", *packages.install_command(package)[2:]])
+    add("Package install permission", code == 0,
+        "sudo allows apt-get to install it without a password" if code == 0 else
+        "sudo refuses it or asks a password; add to /etc/sudoers.d/omniacli: "
+        + packages.sudoers_line(package, system_user()))
 
 
 async def check_server(server: Server, backup_dir: Path) -> list[Check]:

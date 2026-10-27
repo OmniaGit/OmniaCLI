@@ -16,6 +16,7 @@ import signal
 import subprocess
 from pathlib import Path
 
+from . import packages
 from .config import Instance, Repository, Server
 from .jobs import Job, JobFailed
 
@@ -254,8 +255,9 @@ async def update_submodules(job: Job, repo: Repository, check: bool = True) -> N
 
 
 async def pull(job: Job, instance: Instance) -> bool:
-    """Fast-forward every repository of the instance and its submodules.
-    Return True if any repository moved."""
+    """Fast-forward every repository of the instance and its submodules,
+    then install its package if a new one is published (packages.py).
+    Return True if any repository moved or the package was installed."""
     changed = False
     for repo in instance.repositories:
         job.log(f"--- [{repo.name}] pull {repo.remote}/{repo.branch}")
@@ -269,11 +271,14 @@ async def pull(job: Job, instance: Instance) -> bool:
             job.log(await git(repo, "log", "--oneline", f"{before}..{after}"))
         else:
             job.log(f"[{repo.name}] already up to date")
+    if instance.package is not None and await packages.update(job, instance):
+        changed = True
     return changed
 
 
 async def pending_updates(instance: Instance) -> dict[str, int]:
-    """Fetch every repository; return {repository: commits not yet pulled}."""
+    """Fetch every repository; return {repository: commits not yet pulled},
+    and {"package <name>": 1} when a new package is published."""
     pending = {}
     for repo in instance.repositories:
         code, out = await capture(["git", "fetch", repo.remote, repo.branch], cwd=repo.path)
@@ -284,6 +289,7 @@ async def pending_updates(instance: Instance) -> dict[str, int]:
             raise JobFailed(f"[{repo.name}] git rev-list failed: {out}")
         if int(out):
             pending[repo.name] = int(out)
+    pending.update(await packages.pending(instance))
     return pending
 
 

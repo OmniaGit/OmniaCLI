@@ -30,7 +30,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.background import BackgroundTask
 from starlette.requests import HTTPConnection
 
-from . import checks, consumer, disks, linkcopy, ops, plugins, puller, publisher, schedules, selflog, shell, tunnel
+from . import checks, consumer, disks, linkcopy, ops, packages, plugins, puller, publisher, schedules, selflog, shell, tunnel
 from .accesslog import AccessLog
 from .diskhistory import DiskHistory, DiskRecorder
 from .auth import ROLES as ACCESS_ROLES
@@ -673,6 +673,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
                 # the plugin's settings of each instance, as its fields name them
                 "settings_rows": {i.key: settings_rows(i) for i in shown},
                 "repo_status": {i.key: s for i, s in zip(shown, statuses)},
+                "package_state": {i.key: packages.installed_state(i.package) for i in shown if i.package},
                 "auto_state": updater.state,
                 "busy": {i.key: jobs.is_busy(i.key) for i in srv.instances.values()},
                 "busy_job": {i.key: jobs.running_on(i.key) for i in shown},

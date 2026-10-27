@@ -20,4 +20,9 @@
 #
 # omniacli ALL=(odoo) NOPASSWD:SETENV: /usr/bin/psql
 #
+# An instance installed from a signed Debian package needs its install, with
+# ':' and '=' escaped (the "Package install permission" check prints it):
+#
+# omniacli ALL=(root) NOPASSWD: /usr/bin/apt-get install -y -o Dpkg\:\:Options\:\:\=--force-confdef -o Dpkg\:\:Options\:\:\=--force-confold /var/lib/omniacli/packages/api_production.deb
+#
 # Check the file after every change: visudo -cf /etc/sudoers.d/omniacli

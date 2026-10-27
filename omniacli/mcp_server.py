@@ -38,8 +38,8 @@ _RECORD = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d+ \d+ (\w+) ")
 INSTRUCTIONS = """OmniaCLI deploys services (Odoo and the other types of its plugins) from git:
 each server has a production and a test instance. Read with list_servers,
 server_status, read_log, list_jobs, get_job, pending_updates. The only action
-is update_test (git pull, what the server's type does after a pull, restart
-of the test instance). dev_setup describes an instance (repositories,
+is update_test (git pull and the install of a new signed package, what the
+server's type does after a pull, restart of the test instance). dev_setup describes an instance (repositories,
 branches, commits, backups, and what its type tells) so that you can rebuild
 it locally; for the data, download a backup zip with an HTTP GET to the
 server's base URL + its path, with the same Authorization: Bearer header.
@@ -219,7 +219,8 @@ def create_mcp(settings: Settings, jobs: JobManager, updater: AutoUpdater, sampl
 
     @server.tool()
     async def pending_updates(server_name: str, role: str = "test") -> dict:
-        """Commits on the remotes not yet pulled, per repository (runs git fetch)."""
+        """Commits on the remotes not yet pulled, per repository (runs git fetch),
+        and "package <name> <version>": 1 when a newer signed package is published."""
         try:
             return await ops.pending_updates(instance(server_name, role))
         except JobFailed as exc:
@@ -258,8 +259,8 @@ def create_mcp(settings: Settings, jobs: JobManager, updater: AutoUpdater, sampl
 
     @server.tool()
     async def update_test(server_name: str, ctx: Context, wait_seconds: int = 0) -> dict:
-        """Update the test instance: git pull of every repository, update of
-        the changed modules, restart. Waits up to wait_seconds (max 600) for
+        """Update the test instance: git pull of every repository and the
+        install of a new published package, update of the changed modules, restart. Waits up to wait_seconds (max 600) for
         the job; follow it with get_job otherwise."""
         need(ctx, "update_test")
         inst = instance(server_name, "test")

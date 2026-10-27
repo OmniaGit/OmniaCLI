@@ -81,11 +81,19 @@
       {% if can_act or buttons[inst.key].git %}
       <div class="action-group">
       {% if can_act %}
-      <form method="post" action="{{ base }}/pull">
-        <button {{ off }}>{{ icon("github") }}Git pull</button></form>
+      {# an instance installed from a package only: the same pull, which installs it #}
+      {% set pull_label = "Update package" if inst.package and not inst.repositories else "Git pull" %}
+      {# a package's own scripts (prerm, postinst) may stop and start its
+         service: OmniaCLI cannot keep a stopped one stopped, so it says so #}
+      {% set package_note = ("\n\nA new " ~ inst.package.name ~ " is installed with its own scripts: they may stop and "
+                             "start the service " ~ inst.restart.service ~ " by themselves, also if it is stopped now.")
+                            if inst.package else "" %}
+      <form method="post" action="{{ base }}/pull"
+            {% if inst.package %}onsubmit='return confirm({{ (pull_label ~ " " ~ inst.key ~ "?" ~ package_note) | tojson }})'{% endif %}>
+        <button {{ off }}{% if inst.package %} title="Also installs the package {{ inst.package.name }} when a newer signed version is published"{% endif %}>{{ icon("github") }}{{ pull_label }}</button></form>
       <form method="post" action="{{ base }}/pull-restart"
-            onsubmit='return confirm({{ ("Pull, deploy and restart " ~ inst.key ~ "?") | tojson }})'>
-        <button {{ off }}>{{ icon("github") }}Git pull + restart</button></form>
+            onsubmit='return confirm({{ ("Pull, deploy and restart " ~ inst.key ~ "?" ~ package_note) | tojson }})'>
+        <button {{ off }}>{{ icon("github") }}{{ pull_label }} + restart</button></form>
       {% endif %}
       {% for b in buttons[inst.key].git %}{{ action_button(b, off) }}{% endfor %}
       </div>
@@ -164,6 +172,14 @@
         <dt>{{ inst.plugin.label }}</dt><dd>started by OmniaCLI: {% if running.get(inst.key) %}running, pid <span class="mono">{{ running[inst.key] }}</span>{% else %}<span class="muted">stopped</span>{% endif %}</dd>
         {% else %}
         <dt>Service</dt><dd class="mono">{{ inst.restart.type }}: {{ inst.restart.service }}</dd>
+        {% endif %}
+        {% if inst.package %}
+        {% set pkg = package_state[inst.key] %}
+        <dt>Package</dt>
+        <dd><span class="mono">{{ inst.package.name }}</span>{% if pkg.version %} {{ pkg.version }}{% endif %}
+          <span class="muted">from</span> <span class="mono">{{ inst.package.url }}</span>
+          {% if pkg.installed %}<br><span class="muted">installed by OmniaCLI {{ pkg.installed }}</span>{% endif %}
+          <br><span class="muted">its own scripts may stop and start {{ inst.restart.service }} during an update, also a stopped one{% if inst.auto_update.enabled %}, and the auto update installs it{% endif %}</span></dd>
         {% endif %}
         <dt>Auto update</dt>
         <dd>

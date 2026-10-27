@@ -45,6 +45,9 @@
         <label>Run as (system user)</label><input type="text" data-k="run_as" class="mono" placeholder="empty: the user running OmniaCLI" title="The type's programs (for Odoo: update, backup, pip, checks) run as this user through sudo -n -u: the user of the service. Not with restart type process.">
         <label>Domain name</label><input type="text" data-k="domain" class="mono" placeholder="empty: localhost at the instance's port" title="Where the instance is opened, the link of the server page and of the Dashboard: erp.example.com (opened with https) or a whole http(s):// URL">
         <label>Claude folder</label><input type="text" data-k="claude_dir" class="mono" placeholder="empty: no Claude button" title="A folder of this computer: the Claude button of the server page opens a shell there and runs claude, as the user running OmniaCLI">
+        <label>Package URL</label><input type="text" data-k="package.url" class="mono" placeholder="empty: no package" title="https:// URL of a Debian package (…/api-server.deb), next to its signed manifest .json and .json.sig: a pull installs it when a newer version is published and signed by the public key. Its own scripts may stop and start the service during the install, also a stopped one">
+        <label>Package name</label><input type="text" data-k="package.name" class="mono" placeholder="the Package of the .deb, e.g. api-server" title="The name dpkg knows it by: a .deb of another package is refused">
+        <label>Package public key</label><input type="text" data-k="package.public_key" class="mono" placeholder="ed25519:… (omniacli package-key prints it)" title="The key the checksum file must be signed with: an unsigned or otherwise signed package is not installed">
         <label>Restart with</label>
         <select data-k="restart.type"><option value="systemd">systemd</option><option value="initd">init.d</option><option value="process" class="process-option">OmniaCLI starts it itself</option></select>
         <label>Service name</label><input type="text" data-k="restart.service">
@@ -80,6 +83,7 @@ const ROLES = ["production", "test"];
 // the core's settings of an instance; the plugin's come from its fields
 const DEFAULTS = {
   log_file: "", run_as: "", domain: "", claude_dir: "", from_link: {link: "", server: "", role: "production"},
+  package: {url: "", name: "", public_key: ""},
   restart: {type: "systemd", service: "", sudo: true},
   auto_update: {enabled: false, interval_minutes: 10, window: ""},
   repositories: [{name: "", path: "", remote: "origin", branch: ""}],
@@ -352,6 +356,8 @@ function roleValues(box) {
   }
   if (!data.from_link || !data.from_link.link || !currentType().has_restore) delete data.from_link;
   else if (data.from_link.link.startsWith("puller:")) data.from_link = {puller: data.from_link.link.slice(7)};
+  // no URL: no package
+  if (!data.package || !data.package.url) delete data.package;
   data.repositories = [];
   for (const tr of box.querySelectorAll("tbody tr")) {
     const repo = {};

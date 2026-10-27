@@ -1,6 +1,7 @@
 # Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Command line: serve the web application, hash passwords, check a config."""
+"""Command line: serve the web application, hash passwords, check a config,
+sign the Debian packages instances install."""
 
 from __future__ import annotations
 
@@ -8,10 +9,13 @@ import argparse
 import asyncio
 import getpass
 import os
+import subprocess
 import sys
+from pathlib import Path
 
 from .auth import ROLES, hash_password, hash_token, new_token
 from .config import ConfigError, load_settings
+from .packagesign import SigningError, load_private_key, new_private_key, sign_file, verify_local
 
 
 def _serve(args) -> int:
@@ -72,6 +76,64 @@ def _check_config(args) -> int:
     return 1 if failed else 0
 
 
+def _passphrase(prompt: str, repeat: bool) -> bytes:
+    first = os.environ.get("OMNIACLI_KEY_PASSPHRASE") or getpass.getpass(prompt)
+    if repeat and "OMNIACLI_KEY_PASSPHRASE" not in os.environ and first != getpass.getpass("Repeat: "):
+        raise SigningError("the passphrases do not match")
+    return first.encode()
+
+
+def _package_key(args) -> int:
+    """A new signing key: the private one, encrypted, to args.private_key
+    (never overwritten), the public one printed for the instances."""
+    path = Path(args.private_key)
+    if path.exists():
+        print(f"{path} exists: not overwritten", file=sys.stderr)
+        return 1
+    pem, public = new_private_key(_passphrase("Passphrase of the new key: ", repeat=True))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(pem)
+    print(f"private key: {path} (keep it on the build machine, and a copy offline)", file=sys.stderr)
+    print(public)
+    return 0
+
+
+def _deb_field(path: Path, name: str) -> str:
+    try:
+        return subprocess.run(["dpkg-deb", "-f", str(path), name], capture_output=True, text=True,
+                              check=True).stdout.strip()
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise SigningError(f"{path}: dpkg-deb cannot read its {name}: {exc}") from None
+
+
+def _package_sign(args) -> int:
+    """The signed manifest of each file: a .deb's version and name from
+    itself, any other file's version from --version."""
+    files = [Path(f) for f in args.files]
+    for path in files:
+        if not path.is_file():
+            raise SigningError(f"{path}: no such file")
+        if path.suffix != ".deb" and not args.version:
+            raise SigningError(f"{path}: not a .deb, give its version with --version")
+    key = load_private_key(Path(args.private_key).read_bytes(), _passphrase("Passphrase: ", repeat=False))
+    for path in files:
+        deb = path.suffix == ".deb"
+        version = args.version or _deb_field(path, "Version")
+        for written in sign_file(key, path, version, _deb_field(path, "Package") if deb else None):
+            print(written)
+    return 0
+
+
+def _package_verify(args) -> int:
+    """A downloaded file against the signed manifest next to it."""
+    data = verify_local(args.public_key, Path(args.file))
+    print(f"{data['file']}: version {data['version']}, built {data.get('built')}, "
+          f"sha256 {data['sha256']}: signed by the key, the file is the original")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="omniacli")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -99,6 +161,23 @@ def main(argv: list[str] | None = None) -> int:
                       help="user: monitors only; developer: acts on the servers; admin: everything")
     link.set_defaults(func=_new_link_token)
 
+    key = sub.add_parser("package-key", help="create the key that signs published Debian packages")
+    key.add_argument("private_key", help="where the private key goes (encrypted with a passphrase)")
+    key.set_defaults(func=_package_key)
+
+    sign = sub.add_parser("package-sign",
+                          help="write next to each file its signed manifest (.json, .json.sig) and .sha256")
+    sign.add_argument("--key", dest="private_key", required=True, help="the private key of package-key")
+    sign.add_argument("--version", help="the version of files that are not .deb (a .deb gives its own)")
+    sign.add_argument("files", nargs="+")
+    sign.set_defaults(func=_package_sign)
+
+    verify = sub.add_parser("package-verify",
+                            help="check a downloaded file against its signed manifest (.json, .json.sig next to it)")
+    verify.add_argument("--public-key", required=True, help="ed25519:... as package-key printed it")
+    verify.add_argument("file")
+    verify.set_defaults(func=_package_verify)
+
     check = sub.add_parser("check-config", help="run the Test & activate checks on every server")
     check.add_argument("-c", "--config", default="omniacli.yaml")
     check.set_defaults(func=_check_config)
@@ -108,6 +187,9 @@ def main(argv: list[str] | None = None) -> int:
         return args.func(args)
     except ConfigError as exc:
         print(f"Configuration error: {exc}", file=sys.stderr)
+        return 2
+    except SigningError as exc:
+        print(f"Signing error: {exc}", file=sys.stderr)
         return 2
 
 
