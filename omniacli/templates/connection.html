@@ -1,0 +1,184 @@
+{# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C · SPDX-License-Identifier: AGPL-3.0-or-later -#}
+{% extends "base.html" %}
+{% block title %}{{ name }} · OmniaCLI{% endblock %}
+{% block crumbs %}{% from "_crumbs.html" import crumbs with context %}
+{{ crumbs([("Dashboard", "/"), ("Pullers", "/pullers" if is_admin else None), (name, None)]) }}
+{% endblock %}
+{% block content %}
+<div class="server-head" style="padding: 0 0 14px; border: 0">
+  <h1 style="margin: 0">{{ name }} <span class="muted" style="font-weight: 400; font-size: 15px">puller <span class="mono">{{ connection.puller }}</span> on <span class="mono">{{ connection.link }}</span></span></h1>
+</div>
+<p class="muted">The instance the producer of this puller publishes, as its reports tell it: they come through the relay, so what is shown may be some seconds old.
+A command waits on the relay until the producer takes it (10 minutes at most), and runs only if the producer exposes it, within its hours.
+<span id="key-note"></span></p>
+<div id="error" class="banner" hidden></div>
+<section class="panel">
+  <div class="server-head" style="padding: 0 0 8px; border: 0">
+    <h2 id="title">Waiting for the first report…</h2>
+  </div>
+  <p id="facts" class="muted" style="margin-top: 0"></p>
+  <div class="actions" id="buttons">
+    {% for c in commands %}<button type="button" data-command="{{ c }}" disabled>{{ c | capitalize }}</button>{% endfor %}
+  </div>
+  <div id="backup-options" hidden style="margin: 4px 0 8px"></div>
+</section>
+
+<div class="instance-grid" style="--cols: 2; margin-top: 16px">
+  <section class="panel">
+    <h3 class="chart-title">CPU of the instance, % of one core</h3>
+    <div class="chart-box"><svg class="chart" data-chart="cpu" role="img" aria-label="CPU of the instance"></svg><div class="chart-tip" hidden></div></div>
+    <h3 class="chart-title">Memory of the instance, MiB resident</h3>
+    <div class="chart-box"><svg class="chart" data-chart="mem" role="img" aria-label="Memory of the instance"></svg><div class="chart-tip" hidden></div></div>
+    <h3 class="chart-title">CPU of the machine, % of all cores</h3>
+    <div class="chart-box"><svg class="chart" data-chart="machine" role="img" aria-label="CPU of the machine"></svg><div class="chart-tip" hidden></div></div>
+    <label class="muted">Shown: <select id="range" aria-label="Time shown">
+      <option value="3600">the last hour</option><option value="86400">the last day</option>
+      <option value="604800">the last 7 days</option></select></label>
+  </section>
+  <section class="panel">
+    <h3 class="chart-title">Disks</h3>
+    <div class="scroll"><table id="disks"><tr><th>Mount</th><th>Used</th><th>Free</th><th>Size</th><th>Full on</th></tr></table></div>
+    <h3 class="chart-title" style="margin-top: 16px">Commands sent from here</h3>
+    <div class="scroll"><table id="sent"><tr><th>When</th><th>Command</th><th>By</th><th>Answer</th></tr></table></div>
+  </section>
+</div>
+
+<section class="panel" style="margin-top: 16px">
+  <h3 class="chart-title">Jobs there</h3>
+  <div class="scroll"><table id="jobs"><tr><th>Job</th><th>Status</th><th>Started by</th><th>Started</th><th></th></tr></table></div>
+  <div id="job-box" hidden style="margin-top: 12px">
+    <h3 class="chart-title" id="job-title"></h3>
+    <pre class="console mono" id="job-log" style="max-height: 50vh; overflow: auto; white-space: pre-wrap"></pre>
+  </div>
+</section>
+{% include "_charts.html" %}
+<script>
+(function () {
+  const base = "{{ prefix }}/api/connections/{{ name | urlencode }}";
+  const $ = (id) => document.getElementById(id);
+  const canAct = {{ can_act | tojson }}, isAdmin = {{ is_admin | tojson }}, account = {{ account | tojson }};
+  const sizeText = (b) => b >= 1073741824 ? (b / 1073741824).toFixed(1) + " GiB" : (b / 1048576).toFixed(0) + " MiB";
+  const when = (t) => t ? new Date(t * 1000).toLocaleString() : "never";
+  let latest = {}, shownJob = null, jobNext = 0;
+
+  function showError(message) { $("error").textContent = message; $("error").hidden = !message; }
+  function cell(row, text, cls) { const td = row.insertCell(); td.textContent = text; if (cls) td.className = cls; return td; }
+  function clear(table) { while (table.rows.length > 1) table.deleteRow(1); }
+
+  async function refresh() {
+    let data;
+    try {
+      const resp = await fetch(base, {headers: {Accept: "application/json"}});
+      data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || data.detail || "HTTP " + resp.status);
+    } catch (e) { showError("Cannot read the connection: " + e.message); return; }
+    showError(data.status.ok === false ? `${data.status.error} (${when(data.status.at)})` : "");
+    $("key-note").textContent = data.has_key ? "With the puller's key: the relay cannot read nor change what passes."
+      : "No key: what passes is in clear on the relay.";
+    latest = data.latest || {};
+    const seen = data.relay.producer ? data.relay.producer.seen : null;
+    if (latest.instance) {
+      $("title").textContent = `${latest.instance} · ${latest.label || latest.type} · ${latest.state}${latest.busy ? " · job running" : ""}`;
+      $("facts").textContent = `Report of ${when(latest.at)}; producer last seen by the relay ${when(seen)}; `
+        + `OmniaCLI ${latest.omniacli || "?"} there` + (latest.encrypted ? ", encrypted" : ", in clear");
+    } else {
+      $("facts").textContent = `Producer last seen by the relay: ${when(seen)}.`;
+    }
+    for (const button of document.querySelectorAll("[data-command]")) {
+      const c = button.dataset.command, rule = (latest.commands || {})[c];
+      const allowed = account && (c === "backup" ? canAct : true);
+      button.disabled = !rule || !rule.enabled || !allowed;
+      button.title = !rule ? "No report yet" : !rule.enabled ? `${c} is not exposed by the producer`
+        : !allowed ? (account ? "The developer role is needed" : "Only a user who logs in here sends commands")
+        : `Taken ${rule.window} by the producer's clock`;
+    }
+    const options = $("backup-options");
+    if (!options.dataset.filled && (latest.backup_fields || []).length) {
+      options.dataset.filled = "1";
+      for (const f of latest.backup_fields.filter((f) => f.kind === "checkbox")) {
+        const label = document.createElement("label"), box = document.createElement("input");
+        box.type = "checkbox"; box.dataset.option = f.key; box.checked = !!f.default;
+        label.append(box, " backup " + f.label.toLowerCase()); label.style.marginRight = "12px";
+        options.appendChild(label);
+      }
+      options.hidden = false;
+    }
+    const disks = $("disks"); clear(disks);
+    for (const d of latest.disks || []) {
+      const row = disks.insertRow();
+      cell(row, d.mount, "mono"); cell(row, sizeText(d.used)); cell(row, sizeText(d.free)); cell(row, sizeText(d.total));
+      cell(row, d.forecast && d.forecast.full ? d.forecast.full : "—");
+    }
+    const sent = $("sent"); clear(sent);
+    for (const c of data.sent) {
+      const row = sent.insertRow();
+      cell(row, when(c.at)); cell(row, c.action, "mono"); cell(row, c.by);
+      const a = c.answer;
+      cell(row, !a ? "waiting for the producer" : a.ok ? (a.job ? `started job ${a.job}` : "done") : a.error,
+           !a ? "muted" : a.ok ? "ok" : "error");
+    }
+    const jobs = $("jobs"); clear(jobs);
+    for (const j of data.jobs) {
+      const row = jobs.insertRow();
+      cell(row, j.title || j.id); cell(row, j.status || "?", j.status === "success" ? "ok" : ["failed", "stopped", "interrupted"].includes(j.status) ? "error" : "");
+      cell(row, j.source || ""); cell(row, j.started || "");
+      const td = row.insertCell();
+      const show = document.createElement("button"); show.type = "button"; show.textContent = "Log";
+      show.onclick = () => { shownJob = j.id; jobNext = 0; $("job-log").textContent = ""; $("job-box").hidden = false;
+                             $("job-title").textContent = j.title || j.id; readJob(); };
+      td.appendChild(show);
+      if (isAdmin && account && ["running", "queued"].includes(j.status)) {
+        const stop = document.createElement("button"); stop.type = "button"; stop.className = "danger"; stop.textContent = "Stop";
+        stop.onclick = () => { if (confirm(`Ask the producer to stop ${j.title || j.id}?`)) send("stop-job", {job: j.id}); };
+        td.appendChild(stop);
+      }
+    }
+    if (shownJob) readJob();
+  }
+
+  async function readJob() {
+    const resp = await fetch(`${base}/jobs/${encodeURIComponent(shownJob)}?since=${jobNext}`);
+    if (!resp.ok) return;
+    const data = await resp.json();
+    const log = $("job-log"), atEnd = log.scrollTop + log.clientHeight >= log.scrollHeight - 4;
+    if (data.lines.length) log.textContent += data.lines.join("\n") + "\n";
+    jobNext = data.next;
+    if (atEnd) log.scrollTop = log.scrollHeight;
+  }
+
+  async function send(action, params) {
+    showError("");
+    const resp = await fetch(`${base}/commands`, {method: "POST", headers: {"Content-Type": "application/json"},
+                                                  body: JSON.stringify({action, params: params || {}})});
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) { showError(data.error || data.detail || "Error " + resp.status); return; }
+    refresh();
+  }
+  for (const button of document.querySelectorAll("[data-command]")) {
+    button.onclick = () => {
+      const c = button.dataset.command;
+      if (!confirm(`${c} ${latest.instance || "{{ name }}"} through the puller?`)) return;
+      const params = {};
+      if (c === "backup") for (const box of $("backup-options").querySelectorAll("[data-option]")) params[box.dataset.option] = box.checked;
+      send(c, params);
+    };
+  }
+
+  async function charts() {
+    const since = Math.floor(Date.now() / 1000) - parseInt($("range").value, 10);
+    const resp = await fetch(`${base}/metrics?since=${since}`);
+    if (!resp.ok) return;
+    const data = await resp.json();
+    const fmt = (v) => v.toFixed(0);
+    OmniaCharts.draw(document.querySelector('[data-chart="cpu"]'), data.instance, "cpu", {unit: "%", minMax: 10, format: fmt});
+    OmniaCharts.draw(document.querySelector('[data-chart="mem"]'), data.instance, "mem", {unit: " MiB", format: fmt});
+    OmniaCharts.draw(document.querySelector('[data-chart="machine"]'), data.machine, "cpu",
+                     {unit: "%", minMax: 10, format: fmt, tip: (p) => `${p.cpu}%`});
+  }
+  $("range").onchange = charts;
+  refresh(); charts();
+  setInterval(refresh, 5000);
+  setInterval(charts, 30000);
+})();
+</script>
+{% endblock %}

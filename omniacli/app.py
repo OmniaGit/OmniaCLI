@@ -29,7 +29,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.background import BackgroundTask
 from starlette.requests import HTTPConnection
 
-from . import checks, disks, linkcopy, ops, plugins, puller, publisher, schedules, selflog, shell, tunnel
+from . import checks, consumer, disks, linkcopy, ops, plugins, puller, publisher, schedules, selflog, shell, tunnel
 from .accesslog import AccessLog
 from .diskhistory import DiskHistory, DiskRecorder
 from .auth import ROLES as ACCESS_ROLES
@@ -54,11 +54,13 @@ from .config import (
     matches,
     parse_groups,
     parse_link,
+    parse_connection,
     parse_options,
     parse_publication,
     parse_puller,
     parse_servers,
     save_access,
+    save_connections,
     save_groups,
     save_links,
     save_options,
@@ -95,6 +97,8 @@ def _page_context(request: Request) -> dict:
         "is_admin": bool(user and user.can("admin")),
         # a user who logged in with a password (not a token or a link)
         "account": user.name if user and user.kind == "user" else None,
+        # the instances operated through a relay (consumer.py), in the menu
+        "puller_connections": sorted(settings.connections) if settings else [],
     }
 
 
@@ -222,10 +226,13 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
     disk_history = DiskHistory(settings.jobs_dir.parent / "disk_history.json")
     disk_recorder = DiskRecorder(settings, disk_history)
     link_clients = LinkClients(link_transport)
+    # the pullers of relays this one is a consumer of: their state next to the jobs
+    consumers = consumer.Consumers(settings, link_clients, settings.jobs_dir.parent / "connections")
     # the scheduled actions; a schedules file that cannot be read is shown on
     # their page, and OmniaCLI starts without them
     scheduler = schedules.Scheduler(settings, jobs, link_clients,
-                                    schedules.ScheduleHistory(settings.jobs_dir.parent / "schedule_history.json"))
+                                    schedules.ScheduleHistory(settings.jobs_dir.parent / "schedule_history.json"),
+                                    consumers)
     schedules_error = ""
     try:
         scheduler.load()
@@ -341,12 +348,14 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         tunnels.start()
         pullers.start()
         publications.start()
+        consumers.start()
         # not nullcontext(): it is an async context manager only from Python 3.10
         if mcp_manager:
             async with mcp_manager.run():
                 yield
         else:
             yield
+        await consumers.stop()
         await publications.stop()
         await pullers.stop()
         await tunnels.stop()
@@ -370,7 +379,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
     app.state.disk_history, app.state.disk_recorder = disk_history, disk_recorder
     app.state.access_log = access_log
     app.state.tunnels = tunnels
-    app.state.pullers, app.state.publications = pullers, publications
+    app.state.pullers, app.state.publications, app.state.consumers = pullers, publications, consumers
     app.state.sessions, app.state.authenticator = sessions, authenticator
 
     @app.middleware("http")
@@ -630,12 +639,15 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
                                    "in the server's form (Edit)"))
                 from_link[i.key] = {"disabled": missing}
                 continue
+            known = src.link in (settings.connections if src.is_puller else settings.link_targets)
             from_link[i.key] = {
                 "url": f"{base}/{i.role}/from-link", "link": src.link, "server": src.server,
-                "role": src.role, "label": src.label,
-                "known": src.link in settings.link_targets,
+                "role": src.role, "label": src.label, "puller": src.is_puller, "known": known,
                 "database": str(i.plugin.describe(i).get("database") or i.key) if i.role == "production" else ""}
-            if src.link not in settings.link_targets:
+            if src.is_puller and not known:
+                from_link[i.key]["disabled"] = (f"No puller connection {src.link} here: add it on the Pullers "
+                                                "page, or change 'Database from link' in the server's form (Edit)")
+            elif not known:
                 from_link[i.key]["disabled"] = (f"No link {src.link} here: add it on the Links page, "
                                                 "or change 'Database from link' in the server's form (Edit)")
         return _TEMPLATES.TemplateResponse(
@@ -890,11 +902,15 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         if not user.can(from_link_role(instance)):
             raise HTTPException(status.HTTP_403_FORBIDDEN,
                                 f"The {from_link_role(instance)} role is required for a production")
-        link = settings.link_targets.get(src.link)
-        if link is None:
+        link = None if src.is_puller else settings.link_targets.get(src.link)
+        if src.is_puller and src.link not in settings.connections:
+            return refuse(f"No puller connection {src.link}: add it on the Pullers page, or change the server")
+        if not src.is_puller and link is None:
             return refuse(f"No link {src.link}: add it on the Links page, or change the server")
         raw, _ = await posted_params(request)
         backup = str(raw.get("backup") or "").strip()
+        if backup and src.is_puller:
+            return refuse("A puller brings a new backup only")
         if backup and not linkcopy.BACKUP_NAME.fullmatch(backup):
             return refuse(f"{backup!r} is not the name of a backup zip")
         if instance.role == "production":
@@ -912,6 +928,21 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             return refuse(str(exc))
         chosen = [f.label.lower() for f in instance.plugin.backup_fields()
                   if f.kind == "checkbox" and backup_options.get(f.key)]
+        what = backup or "new backup" + (f" {', '.join(chosen)}" if chosen else "")
+        if src.is_puller:
+            connection = settings.connections[src.link]
+
+            async def from_puller(job):
+                progress = job.result["progress"] = {"steps": consumer.copy_steps(connection, instance.key),
+                                                     "step": "backup", "done": 0, "total": 0}
+                dest = await consumers.fetch_backup(job, connection.name, backup_folder(instance), progress,
+                                                    backup_options, user.name)
+                progress["step"] = "restore"
+                await instance.plugin.restore(job, instance, dest, options)
+
+            job = jobs.submit(f"Copy from {src.label} to {instance.key} ({what})",
+                              [instance.key], f"manual: {user}", from_puller)
+            return {"job": job.id}
         headers = link_headers(link, user.name, user.role)
 
         async def action(job):
@@ -928,7 +959,6 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             progress["step"] = "restore"
             await instance.plugin.restore(job, instance, dest, options)
 
-        what = backup or "new backup" + (f" {', '.join(chosen)}" if chosen else "")
         job = jobs.submit(f"Copy from {src.label} to {instance.key} ({what})",
                           [instance.key], f"manual: {user}", action)
         return {"job": job.id}
@@ -1206,6 +1236,8 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
                     "default_type": plugins.DEFAULT_TYPE,
                     # where a database may come from (Copy from link)
                     "links": sorted(settings.link_targets),
+                    # or a puller connection (Pullers page)
+                    "connections": sorted(settings.connections),
                 },
             },
         )
@@ -2119,7 +2151,12 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             "keep_hours": PULLER_KEEP_HOURS, "max_file_mib": PULLER_FILE_MIB,
             "publications": published, "publications_file": settings.publications_file,
             "instances": [k for k in instances if k not in settings.publications],
-            "link_targets": sorted(settings.link_targets), "commands": PUBLISHED_COMMANDS})
+            "link_targets": sorted(settings.link_targets), "commands": PUBLISHED_COMMANDS,
+            "connections": [{**c.to_dict(), "name": c.name, "key": "", "has_key": bool(c.key),
+                             "status": consumers.conn(c.name).status,
+                             "link_missing": c.link not in settings.link_targets}
+                            for c in settings.connections.values()],
+            "connections_file": settings.connections_file})
 
     @app.post("/api/pullers/save", dependencies=[Depends(admin)])
     async def pullers_save(payload: dict = Body(...)):
@@ -2220,6 +2257,122 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             publications.reload()
         return {"ok": True}
 
+    # --- puller connections: instances operated through a relay ---------
+
+    def a_connection(name: str):
+        try:
+            return consumers.conn(name)
+        except consumer.ConsumerError as exc:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from None
+
+    @app.post("/api/connections/save", dependencies=[Depends(admin)])
+    async def connection_save(payload: dict = Body(...)):
+        """Create a puller connection (new: true) or change it; a blank key
+        keeps the one saved, remove_key drops it."""
+        name, new = str(payload.get("name") or "").strip(), bool(payload.get("new"))
+        async with pullers_lock:
+            if new and name in settings.connections:
+                return refuse(f"A puller connection named {name} already exists")
+            if not new and name not in settings.connections:
+                return refuse(f"No puller connection {name}", status.HTTP_404_NOT_FOUND)
+            data = {k: payload.get(k) for k in ("link", "puller", "key")}
+            if payload.get("remove_key"):
+                data["key"] = ""
+            elif not str(data["key"] or "").strip() and not new:
+                data["key"] = settings.connections[name].key
+            try:
+                found = parse_connection(name, data)
+            except ConfigError as exc:
+                return refuse(str(exc))
+            if found.link not in settings.link_targets:
+                return refuse(f"No link {found.link}: add the relay on the Links page")
+            changed = {**settings.connections, name: found}
+            try:
+                await asyncio.to_thread(save_connections, settings.connections_file, changed)
+            except OSError as exc:
+                return refuse(f"Cannot write {settings.connections_file}: {exc}", 500)
+            settings.connections = changed
+            consumers.reload()
+        return {"ok": True}
+
+    @app.post("/api/connections/delete", dependencies=[Depends(admin)])
+    async def connection_delete(payload: dict = Body(...)):
+        """A connection goes; what it received stays on disk until purged."""
+        name = str(payload.get("name") or "")
+        async with pullers_lock:
+            if name not in settings.connections:
+                return refuse(f"No puller connection {name}", status.HTTP_404_NOT_FOUND)
+            changed = {k: v for k, v in settings.connections.items() if k != name}
+            try:
+                await asyncio.to_thread(save_connections, settings.connections_file, changed)
+            except OSError as exc:
+                return refuse(f"Cannot write {settings.connections_file}: {exc}", 500)
+            settings.connections = changed
+            consumers.reload()
+        return {"ok": True}
+
+    @app.get("/pullers/connections/{name}")
+    async def connection_page(request: Request, name: str):
+        """The instance a puller connection reaches: its state, disks, load,
+        commands and jobs, as its reports told them."""
+        run = a_connection(name)
+        return _TEMPLATES.TemplateResponse(request, "connection.html", {
+            "name": name, "connection": run.connection, "commands": PUBLISHED_COMMANDS})
+
+    @app.get("/api/connections/{name}")
+    async def connection_json(name: str):
+        run = a_connection(name)
+        return {"name": name, "puller": run.connection.puller, "link": run.connection.link,
+                "has_key": bool(run.connection.key), "status": run.status, "relay": run.relay,
+                "latest": run.latest, "disk_history": run.disk_history,
+                "jobs": sorted(({k: v for k, v in j.items() if k not in ("lines", "dropped", "next")}
+                                for j in run.jobs.values()), key=lambda j: j.get("created") or "", reverse=True),
+                "sent": sorted(run.sent.values(), key=lambda c: c["at"], reverse=True)}
+
+    @app.get("/api/connections/{name}/metrics")
+    async def connection_metrics(name: str, since: float = 0):
+        """The samples received after since: the last hour from memory, older from the files."""
+        run = a_connection(name)
+        if since >= time.time() - 3600:
+            return {"machine": [p for p in run.machine if p["t"] > since],
+                    "instance": [p for p in run.instance if p["t"] > since]}
+        found = await asyncio.to_thread(run.metrics, since)
+        return {"machine": [i["p"] for i in found if i["s"] == "m"],
+                "instance": [i["p"] for i in found if i["s"] == "i"]}
+
+    @app.get("/api/connections/{name}/jobs/{job_id}")
+    async def connection_job(name: str, job_id: str, since: int = 0):
+        try:
+            return a_connection(name).job_lines(job_id, since)
+        except consumer.ConsumerError as exc:
+            return refuse(str(exc), status.HTTP_404_NOT_FOUND)
+
+    @app.post("/api/connections/{name}/commands")
+    async def connection_command(name: str, payload: dict = Body(...), me: Principal = Depends(current_user)):
+        """A command to the instance there: backup (developer), start, stop and
+        restart (every role, as here), stop-job (admin, as here)."""
+        run = a_connection(name)
+        action = str(payload.get("action") or "")
+        params = payload.get("params") or {}
+        needed = {"backup": "developer", "stop-job": "admin"}.get(action, "user")
+        if action not in (*PUBLISHED_COMMANDS, "stop-job") or not isinstance(params, dict):
+            return refuse(f"{action!r} is not a command of a puller")
+        if me.kind != "user":
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Only a user who logs in here sends commands")
+        if not me.can(needed):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, f"The {needed} role is required")
+        if action == "backup":
+            fields = (run.latest.get("backup_fields") or [])
+            params = {f["key"]: params.get(f["key"]) for f in fields if isinstance(f, dict) and f.get("key") in params}
+        elif action == "stop-job":
+            params = {"job": str(params.get("job") or "")}
+        else:
+            params = {}
+        try:
+            return await run.send(action, params, me.name)
+        except consumer.ConsumerError as exc:
+            return refuse(str(exc), status.HTTP_502_BAD_GATEWAY)
+
     # --- options of the system ------------------------------------------
 
     @app.get("/options", dependencies=[Depends(admin)])
@@ -2268,12 +2421,13 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
                     "has_restore": bool(plugin and plugin.has_restore),
                     "backup_fields": [_field_dict(f) for f in plugin.backup_fields()] if plugin else [],
                     "restore_fields": [_field_dict(f) for f in plugin.restore_fields()] if plugin else [],
-                    "from_link": {"link": src.link, "server": src.server, "role": src.role} if src else None,
+                    "from_link": src.to_dict() if src else None,
                 }
         return _TEMPLATES.TemplateResponse(
             request, "schedules.html",
             {"schedules": [schedule_view(s) for s in scheduler.schedules.values()], "targets": targets,
-             "links": list(settings.link_targets), "scripts": schedules.list_scripts(settings.scripts_dir),
+             "links": list(settings.link_targets), "connections": list(settings.connections),
+             "scripts": schedules.list_scripts(settings.scripts_dir),
              "scripts_dir": settings.scripts_dir, "schedules_file": settings.schedules_file,
              "load_error": schedules_error, "default_user": schedules.DEFAULT_USER},
         )

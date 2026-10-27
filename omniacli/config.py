@@ -94,14 +94,28 @@ def window_label(start: datetime.time | None, end: datetime.time | None) -> str:
 @dataclass
 class LinkSource:
     """Where an instance's database may be copied from: an instance of a
-    server of a linked OmniaCLI (links file), backed up there and restored here."""
+    server of a linked OmniaCLI (links file), backed up there and restored
+    here; or (kind puller) the instance a puller connection reaches, link
+    then naming the connection, server and role empty."""
     link: str
     server: str
     role: str
+    kind: str = "link"
+
+    @property
+    def is_puller(self) -> bool:
+        return self.kind == "puller"
 
     @property
     def label(self) -> str:
+        if self.is_puller:
+            return f"puller {self.link}"
         return f"{self.link} › {self.server}/{self.role}"
+
+    def to_dict(self) -> dict:
+        if self.is_puller:
+            return {"puller": self.link}
+        return {"link": self.link, "server": self.server, "role": self.role}
 
 
 @dataclass
@@ -269,6 +283,10 @@ class Settings:
     # (publications.yaml, readable by its owner only: it holds the keys)
     publications_file: Path | None = None
     publications: dict[str, Publication] = field(default_factory=dict)
+    # the pullers of linked relays this one is a consumer of (connections.yaml,
+    # readable by its owner only: it holds the keys)
+    connections_file: Path | None = None
+    connections: dict[str, PullerConnection] = field(default_factory=dict)
     token_roles: dict[str, str] = field(default_factory=dict)
     fixed: Access = field(default_factory=Access)
     web: Access = field(default_factory=Access)
@@ -384,7 +402,7 @@ def _parse_instance(server: str, role: str, data: dict, logs_dir: Path | None, p
             # OmniaCLI stops its own process with a signal, which it may not
             # send to another user's process
             raise ConfigError(f"{where}.run_as: not available with restart type process")
-    from_link = _parse_from_link(data.get("from_link"), f"{where}.from_link")
+    from_link = parse_link_source(data.get("from_link"), f"{where}.from_link")
     domain = _parse_domain(data.get("domain"), f"{where}.domain")
     claude_dir = str(data.get("claude_dir") or "").strip() or None
     if claude_dir is not None and not claude_dir.startswith("/"):
@@ -429,12 +447,18 @@ def _parse_domain(value, where: str) -> str | None:
     return url
 
 
-def _parse_from_link(data, where: str) -> LinkSource | None:
-    """{link, server, role}; empty or no link: none."""
+def parse_link_source(data, where: str) -> LinkSource | None:
+    """{link, server, role}, or {puller} (a puller connection); empty or no
+    link: none."""
     if not data:
         return None
     if not isinstance(data, dict):
-        raise ConfigError(f"{where}: a mapping of link, server and role")
+        raise ConfigError(f"{where}: a mapping of link, server and role, or of puller")
+    connection = str(data.get("puller") or "").strip()
+    if connection:
+        if not SERVER_NAME.fullmatch(connection):
+            raise ConfigError(f"{where}.puller: {connection!r} is not a name of letters, digits and . _ -")
+        return LinkSource(link=connection, server="", role="", kind="puller")
     link = str(data.get("link") or "").strip()
     if not link:
         return None
@@ -527,8 +551,7 @@ def instance_to_dict(instance: Instance) -> dict:
     if instance.claude_dir is not None:
         data["claude_dir"] = str(instance.claude_dir)
     if instance.from_link is not None:
-        src = instance.from_link
-        data["from_link"] = {"link": src.link, "server": src.server, "role": src.role}
+        data["from_link"] = instance.from_link.to_dict()
     if instance.restart.type == "process":
         # both follow from the type: the log is OmniaCLI's, there is no service
         del data["log_file"], data["restart"]["service"], data["restart"]["sudo"]
@@ -1027,6 +1050,73 @@ def save_publications(path: Path, publications: dict[str, Publication]) -> None:
     os.replace(tmp, path)
 
 
+@dataclass
+class PullerConnection:
+    """This OmniaCLI as a consumer of a puller of a relay it links to
+    (consumer.py): the instance the puller's producer publishes, operated from
+    here. key: the puller's key (text opk1-...), empty for none."""
+
+    name: str
+    link: str
+    puller: str
+    key: str = ""
+
+    def to_dict(self) -> dict:
+        data = {"link": self.link, "puller": self.puller}
+        if self.key:
+            data["key"] = self.key
+        return data
+
+
+def parse_connection(name: str, data) -> PullerConnection:
+    where = f"connections.{name}"
+    if not SERVER_NAME.fullmatch(name) or len(name) > 64:
+        raise ConfigError(f"{where}: a name is letters, digits and . _ - (it is part of URLs)")
+    data = data if isinstance(data, dict) else {}
+    link, puller = str(data.get("link") or "").strip(), str(data.get("puller") or "").strip()
+    for key, value in (("link", link), ("puller", puller)):
+        if not SERVER_NAME.fullmatch(value):
+            raise ConfigError(f"{where}.{key}: {value!r} is not a name of letters, digits and . _ -")
+    key = str(data.get("key") or "").strip()
+    if key:
+        from .pullcrypto import PullerCryptoError, parse_key  # it imports cryptography
+
+        try:
+            parse_key(key)
+        except PullerCryptoError as exc:
+            raise ConfigError(f"{where}.key: {exc}") from None
+    return PullerConnection(name, link, puller, key)
+
+
+def load_connections(path: Path) -> dict[str, PullerConnection]:
+    """The connections file; none yet is no connections."""
+    if not path.exists():
+        return {}
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        raise ConfigError(f"cannot read {path}: {exc}") from exc
+    found = data.get("connections") or {}
+    if not isinstance(found, dict):
+        raise ConfigError(f"{path}: connections must be a mapping")
+    try:
+        return {str(k): parse_connection(str(k), v) for k, v in found.items()}
+    except ConfigError as exc:
+        raise ConfigError(f"{path}: {exc}") from exc
+
+
+def save_connections(path: Path, connections: dict[str, PullerConnection]) -> None:
+    """Write the connections file atomically, readable by its owner only: it holds the keys."""
+    text = yaml.safe_dump({"connections": {k: c.to_dict() for k, c in connections.items()}},
+                          sort_keys=False, allow_unicode=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    os.replace(tmp, path)
+
+
 def parse_settings(data: dict, base_dir: Path = Path(".")) -> Settings:
     fixed = parse_auth(data.get("auth") or {})
     servers_file = Path(data.get("servers_file") or "servers.yaml")
@@ -1054,6 +1144,9 @@ def parse_settings(data: dict, base_dir: Path = Path(".")) -> Settings:
     publications_file = Path(data.get("publications_file") or servers_file.parent / "publications.yaml")
     if not publications_file.is_absolute():
         publications_file = base_dir / publications_file
+    connections_file = Path(data.get("connections_file") or servers_file.parent / "connections.yaml")
+    if not connections_file.is_absolute():
+        connections_file = base_dir / connections_file
     scripts_dir = Path(data.get("scripts_dir") or servers_file.parent / "scripts")
     if not scripts_dir.is_absolute():
         scripts_dir = base_dir / scripts_dir
@@ -1077,6 +1170,8 @@ def parse_settings(data: dict, base_dir: Path = Path(".")) -> Settings:
         pullers=load_pullers(pullers_file),
         publications_file=publications_file,
         publications=load_publications(publications_file),
+        connections_file=connections_file,
+        connections=load_connections(connections_file),
         fixed=fixed,
     )
     settings.set_web_access(load_access(users_file))

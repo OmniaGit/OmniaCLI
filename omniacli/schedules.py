@@ -24,7 +24,7 @@ import yaml
 from croniter import croniter
 
 from . import linkcopy, ops
-from .config import ROLES, SERVER_NAME, ConfigError, LinkSource
+from .config import ROLES, SERVER_NAME, ConfigError, LinkSource, parse_link_source
 from .jobs import FINISHED, Job, JobFailed, JobManager
 from .links import link_headers
 
@@ -133,15 +133,10 @@ def parse_schedule(name: str, data: dict) -> Schedule:
         raw = data["copy"]
         if not isinstance(raw, dict):
             raise ConfigError(f"{where}.copy: a mapping")
-        link = str(raw.get("link") or "").strip()
-        src_server = str(raw.get("server") or "").strip()
-        src_role = str(raw.get("role") or "production").strip()
-        for key, value in (("link", link), ("server", src_server)):
-            if not SERVER_NAME.fullmatch(value):
-                raise ConfigError(f"{where}.copy.{key}: {value!r} is not a name of letters, digits and . _ -")
-        if src_role not in ROLES:
-            raise ConfigError(f"{where}.copy.role: one of {', '.join(ROLES)}")
-        copy = CopyStep(LinkSource(link, src_server, src_role),
+        source = parse_link_source(raw, f"{where}.copy")
+        if source is None:
+            raise ConfigError(f"{where}.copy.link: '' is not a name of letters, digits and . _ -")
+        copy = CopyStep(source,
                         _options(raw.get("backup_options"), f"{where}.copy.backup_options"),
                         _options(raw.get("restore_options"), f"{where}.copy.restore_options"),
                         _positive(raw.get("keep_backups"), DEFAULT_KEEP_BACKUPS, f"{where}.copy.keep_backups"))
@@ -175,8 +170,7 @@ def schedule_to_dict(schedule: Schedule) -> dict:
         data["user"] = schedule.user
     data["pull"] = schedule.pull
     if schedule.copy:
-        src = schedule.copy.source
-        data["copy"] = {"link": src.link, "server": src.server, "role": src.role,
+        data["copy"] = {**schedule.copy.source.to_dict(),
                         "backup_options": schedule.copy.backup_options,
                         "restore_options": schedule.copy.restore_options,
                         "keep_backups": schedule.copy.keep_backups}
@@ -330,11 +324,13 @@ class Scheduler:
     missed while OmniaCLI was stopped is not made up; one that finds a job
     on its instance is skipped."""
 
-    def __init__(self, settings, jobs: JobManager, link_clients, history: ScheduleHistory):
+    def __init__(self, settings, jobs: JobManager, link_clients, history: ScheduleHistory, consumers=None):
         self.settings = settings
         self.jobs = jobs
         self.link_clients = link_clients
         self.history = history
+        # the puller connections (consumer.Consumers): a copy from a puller
+        self.consumers = consumers
         self.schedules: dict[str, Schedule] = {}
         self._task: asyncio.Task | None = None
 
@@ -386,6 +382,9 @@ class Scheduler:
             problem = "skipped: another job is running on the instance"
         elif schedule.copy and not instance.plugin.has_restore:
             problem = f"{instance.plugin.label} cannot restore a database"
+        elif schedule.copy and schedule.copy.source.is_puller:
+            if schedule.copy.source.link not in self.settings.connections:
+                problem = f"no puller connection {schedule.copy.source.link}: add it on the Pullers page"
         elif schedule.copy and schedule.copy.source.link not in self.settings.link_targets:
             problem = f"no link {schedule.copy.source.link}: add it on the Links page"
         if problem:
@@ -413,6 +412,9 @@ class Scheduler:
             await run_script(job, instance, self.settings.scripts_dir, schedule.script)
 
     async def _copy(self, job: Job, step: CopyStep, instance, user: str) -> None:
+        if step.source.is_puller:
+            await self._copy_puller(job, step, instance, user)
+            return
         link = self.settings.link_targets.get(step.source.link)
         if link is None:
             raise JobFailed(f"no link {step.source.link}: add it on the Links page")
@@ -428,5 +430,21 @@ class Scheduler:
         }
         dest = await linkcopy.fetch_backup(job, self.link_clients.client(link), link, headers, step.source,
                                            "", folder, progress, step.backup_options)
+        progress["step"] = "restore"
+        await instance.plugin.restore(job, instance, dest, step.restore_options)
+
+    async def _copy_puller(self, job: Job, step: CopyStep, instance, user: str) -> None:
+        """The copy from a puller connection: a backup there, through the relay."""
+        from .consumer import copy_steps
+
+        connection = self.settings.connections.get(step.source.link)
+        if connection is None or self.consumers is None:
+            raise JobFailed(f"no puller connection {step.source.link}: add it on the Pullers page")
+        folder = self.settings.backup_dir / instance.server / instance.role
+        if folder.is_dir():
+            prune_backups(job, folder, connection.name, step.keep_backups)
+        progress = job.result["progress"] = {"steps": copy_steps(connection, instance.key), "step": "backup",
+                                             "done": 0, "total": 0}
+        dest = await self.consumers.fetch_backup(job, connection.name, folder, progress, step.backup_options, user)
         progress["step"] = "restore"
         await instance.plugin.restore(job, instance, dest, step.restore_options)

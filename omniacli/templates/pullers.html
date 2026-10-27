@@ -107,6 +107,48 @@ Saved in <span class="mono">{{ publications_file }}</span>, readable by its owne
   </table>
   </div>
 </div>
+
+<h2 style="margin-top: 24px">Connected here</h2>
+<p class="muted">Pullers of a relay this OmniaCLI is a consumer of, reached through a link of the <a href="{{ prefix }}/links">Links</a> page: their instance is operated from here, and its reports kept (the load 7 days).
+Give the key the producer's publication has (none: in clear). In a server's form, <strong>Database from link</strong> may name a connection: <em>Copy from link</em> and the scheduled copies then bring a new backup through the relay.
+Saved in <span class="mono">{{ connections_file }}</span>, readable by its owner only: it holds the keys.</p>
+<div class="panel">
+  <div class="scroll">
+  <table>
+    <tr><th>Connection</th><th>Relay link</th><th>Puller</th><th>Key</th><th>Now</th><th></th></tr>
+    {% for c in connections %}
+    <tr data-connection="{{ c.name }}">
+      <td><strong><a href="{{ prefix }}/pullers/connections/{{ c.name }}">{{ c.name }}</a></strong></td>
+      <td><select class="link" aria-label="Relay link of {{ c.name }}">
+        {% for l in link_targets %}<option {% if l == c.link %}selected{% endif %}>{{ l }}</option>{% endfor %}
+        {% if c.link_missing %}<option selected>{{ c.link }}</option>{% endif %}</select>
+        {% if c.link_missing %}<br><span class="error">no link {{ c.link }}</span>{% endif %}</td>
+      <td><input type="text" class="puller mono" value="{{ c.puller }}" aria-label="Puller of {{ c.name }}"></td>
+      <td><input type="text" class="key mono" autocomplete="off" placeholder="{{ 'unchanged' if c.has_key else 'none' }}" aria-label="Key of {{ c.name }}">
+        {% if c.has_key %}<div class="actions" style="margin: 4px 0 0"><button type="button" data-remove-key>Remove key</button></div>
+        {% else %}<br><span class="muted">no key: in clear</span>{% endif %}</td>
+      <td class="muted">{% if c.status.ok %}<span class="ok">reports read</span> <span data-time="{{ c.status.at }}"></span>
+        {% elif c.status.ok is sameas false %}<span class="error">{{ c.status.error }}</span> <span data-time="{{ c.status.at }}"></span>
+        {% else %}not read yet{% endif %}</td>
+      <td><div class="actions" style="margin: 0">
+        <button type="button" data-save>Save</button>
+        <button type="button" class="danger" data-delete>Delete</button>
+      </div></td>
+    </tr>
+    {% else %}
+    <tr><td colspan="6" class="muted">No puller connections.</td></tr>
+    {% endfor %}
+    <tr data-connection="" data-new>
+      <td><input type="text" class="name" placeholder="api-prod" aria-label="New connection name"></td>
+      <td><select class="link" aria-label="Relay link">{% for l in link_targets %}<option>{{ l }}</option>{% endfor %}</select></td>
+      <td><input type="text" class="puller mono" placeholder="api-prod" aria-label="Puller"></td>
+      <td><input type="text" class="key mono" autocomplete="off" placeholder="the publication's key, or none" aria-label="Key"></td>
+      <td></td>
+      <td><button type="button" data-save {% if not link_targets %}disabled title="Add the relay on the Links page first"{% endif %}>Connect</button></td>
+    </tr>
+  </table>
+  </div>
+</div>
 <script>
 (function () {
   const errorBox = document.getElementById("error");
@@ -178,6 +220,30 @@ Saved in <span class="mono">{{ publications_file }}</span>, readable by its owne
     if (del) del.onclick = async () => {
       if (!confirm(`Stop publishing ${instance()}?`)) return;
       if (await postPublication("delete", {instance: instance()})) location.reload();
+    };
+  }
+  for (const row of document.querySelectorAll("tr[data-connection]")) {
+    const isNew = "new" in row.dataset;
+    const name = () => isNew ? row.querySelector(".name").value.trim() : row.dataset.connection;
+    const save = async (extra) => {
+      errorBox.hidden = true;
+      const body = {name: name(), link: row.querySelector(".link").value, puller: row.querySelector(".puller").value.trim(),
+                    key: row.querySelector(".key").value.trim(), new: isNew, ...extra};
+      const resp = await fetch("{{ prefix }}/api/connections/save", {method: "POST",
+        headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) { errorBox.textContent = data.error || data.detail || ("Error " + resp.status); errorBox.hidden = false; return; }
+      location.reload();
+    };
+    row.querySelector("[data-save]").onclick = () => save({});
+    const remove = row.querySelector("[data-remove-key]");
+    if (remove) remove.onclick = () => { if (confirm("Remove the key? Reports sealed with it are then refused.")) save({remove_key: true}); };
+    const del = row.querySelector("[data-delete]");
+    if (del) del.onclick = async () => {
+      if (!confirm(`Delete the connection ${name()}?`)) return;
+      const resp = await fetch("{{ prefix }}/api/connections/delete", {method: "POST",
+        headers: {"Content-Type": "application/json"}, body: JSON.stringify({name: name()})});
+      if (resp.ok) location.reload();
     };
   }
   document.getElementById("add").onclick = async () => {

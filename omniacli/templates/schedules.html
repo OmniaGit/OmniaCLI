@@ -79,7 +79,8 @@ Saved in <span class="mono">{{ schedules_file }}</span>.</p>
   <p class="muted" id="copy-off" hidden style="margin: 4px 0 0"></p>
   <div id="copy-box" class="form-grid" style="margin-top: 8px">
     <label for="f-link">Link</label>
-    <select id="f-link">{% for l in links %}<option value="{{ l }}">{{ l }}</option>{% endfor %}</select>
+    <select id="f-link">{% for l in links %}<option value="{{ l }}">{{ l }}</option>{% endfor %}
+      {% for c in connections %}<option value="puller:{{ c }}">{{ c }} (puller)</option>{% endfor %}</select>
     <label for="f-src-server">Server there</label>
     <div><select id="f-src-server" title="A server of the instance's type there, with its databases"></select>
       <p class="muted" id="f-src-note" hidden style="margin: 4px 0 0"></p></div>
@@ -115,7 +116,9 @@ Saved in <span class="mono">{{ schedules_file }}</span>.</p>
   const SCHEDULES = {{ schedules | map(attribute="data") | list | tojson }};
   const NAMES = {{ schedules | map(attribute="name") | list | tojson }};
   const TARGETS = {{ targets | tojson }};
-  const LINKS = {{ links | tojson }};
+  // the links, and the puller connections as "puller:<name>"
+  const LINKS = {{ links | tojson }}.concat({{ connections | tojson }}.map((c) => "puller:" + c));
+  const sourceOf = (src) => src.puller ? "puller:" + src.puller : src.link;
   const prefix = "{{ prefix }}";
   const $ = (id) => document.getElementById(id);
   const form = $("form"), errorBox = $("error");
@@ -168,15 +171,15 @@ Saved in <span class="mono">{{ schedules_file }}</span>.</p>
     if (!canCopy) $("f-copy").checked = false;
     $("copy-off").hidden = canCopy;
     $("copy-off").textContent = !target.has_restore ? "This instance's type cannot restore a database."
-      : "No link here: add one on the Links page.";
+      : "No link nor puller connection here: add one on the Links or the Pullers page.";
     $("copy-box").hidden = !$("f-copy").checked;
     $("script-box").hidden = !$("f-script").checked;
   }
   function fillCopy(copy) {
     const target = TARGETS[$("f-instance").value] || {};
     const src = copy || target.from_link || {};
-    $("f-link").value = LINKS.includes(src.link) ? src.link : (LINKS[0] || "");
-    offerServers($("f-link").value === src.link ? src : {});
+    $("f-link").value = LINKS.includes(sourceOf(src)) ? sourceOf(src) : (LINKS[0] || "");
+    offerServers($("f-link").value === sourceOf(src) ? src : {});
     $("f-keep").value = copy ? copy.keep_backups : 3;
     optionBoxes($("f-backup-options"), target.backup_fields || [], copy && copy.backup_options);
     optionBoxes($("f-restore-options"), target.restore_fields || [], copy && copy.restore_options);
@@ -232,8 +235,10 @@ Saved in <span class="mono">{{ schedules_file }}</span>.</p>
       instance: $("f-instance").value, cron: $("f-cron").value.trim(), enabled: $("f-enabled").checked,
       user: $("f-user").value.trim(), pull: $("f-pull").checked, history: $("f-history").value,
     };
+    const source = $("f-link").value;
     if ($("f-copy").checked) schedule.copy = {
-      link: $("f-link").value, server: $("f-src-server").value, role: $("f-src-role").value,
+      ...(source.startsWith("puller:") ? {puller: source.slice(7)}
+          : {link: source, server: $("f-src-server").value, role: $("f-src-role").value}),
       backup_options: optionValues($("f-backup-options")), restore_options: optionValues($("f-restore-options")),
       keep_backups: $("f-keep").value,
     };

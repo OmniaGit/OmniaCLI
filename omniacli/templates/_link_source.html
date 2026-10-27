@@ -1,6 +1,8 @@
 {# fillLinkSource(): the instances of a linked OmniaCLI as two selects, the
    server there and its role, read from its /api/servers through the link
-   proxy. Included by server_form.html and schedules.html. #}
+   proxy. Included by server_form.html and schedules.html. A puller
+   connection is a choice of the link select too, valued "puller:<name>": it
+   reaches one instance, so the two selects are only a label. #}
 <script>
 // Fill the selects server and role with the servers of type (all: empty) the
 // link answers, each named with its databases, and the roles of the chosen
@@ -8,6 +10,14 @@
 // lists (or one it cannot be asked about) stays, marked, and note says why.
 async function fillLinkSource({prefix, link, type, server, role, current, note}) {
   const seq = server._seq = (server._seq || 0) + 1;
+  if (link && link.startsWith("puller:")) {
+    server.replaceChildren(new Option("the instance the puller serves", ""));
+    role.replaceChildren();
+    server.disabled = role.disabled = true;
+    if (note) note.hidden = true;
+    return;
+  }
+  server.disabled = role.disabled = !link;
   current = current || {};
   let servers = [], problem = "";
   if (link) {

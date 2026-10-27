@@ -87,7 +87,13 @@
       document.getElementById("from-link-db").textContent = target.database;
       typed.value = ""; errorBox.textContent = "";
       dialog.showModal();
-      if (target.known) load();
+      if (target.puller) {
+        // a puller brings a new backup only: the relay keeps none
+        document.getElementById("from-link-sub").textContent =
+          `${target.label}: a new backup there comes through the relay into the backups of ${key}, then is `
+          + "restored here (its database is dropped first).";
+        list.innerHTML = '<span class="muted">A puller brings a new backup only.</span>';
+      } else if (target.known) load();
       else list.textContent = `There is no link ${target.link} here: add it on the Links page.`;
     };
   }

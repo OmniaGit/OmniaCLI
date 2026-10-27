@@ -231,13 +231,15 @@ typeSelect.onchange = () => {
 // the servers of this type the link answers (fillLinkSource).
 function linkFields(box, saved) {
   const select = box.querySelector(".from-link-link");
-  const current = saved.link || "";
+  const current = saved.puller ? "puller:" + saved.puller : saved.link || "";
   for (const name of MODEL.links) select.add(new Option(name, name));
-  if (current && !MODEL.links.includes(current)) select.add(new Option(current + " (no such link)", current));
+  for (const name of MODEL.connections) select.add(new Option(name + " (puller)", "puller:" + name));
+  if (current && ![...select.options].some(o => o.value === current)) {
+    select.add(new Option(current.replace(/^puller:/, "") + (saved.puller ? " (no such puller connection)" : " (no such link)"), current));
+  }
   select.value = current;
   const server = box.querySelector(".from-link-server"), role = box.querySelector(".from-link-role");
   box.offerLinkServers = () => {
-    server.disabled = role.disabled = !select.value;
     // the saved choice on its link; on another link nothing is chosen yet
     fillLinkSource({prefix: "{{ prefix }}", link: select.value, type: typeSelect.value, server, role,
                     current: select.value && select.value === current ? saved : {},
@@ -349,6 +351,7 @@ function roleValues(box) {
     set(data, input.dataset.k, value);
   }
   if (!data.from_link || !data.from_link.link || !currentType().has_restore) delete data.from_link;
+  else if (data.from_link.link.startsWith("puller:")) data.from_link = {puller: data.from_link.link.slice(7)};
   data.repositories = [];
   for (const tr of box.querySelectorAll("tbody tr")) {
     const repo = {};

@@ -343,6 +343,12 @@ summary { cursor: pointer; color: var(--muted); }
   <strong><a class="brand" href="{{ prefix }}/"><img src="/icon-180.png" alt=""><span class="brand-name">Omnia<span>CLI</span></span></a></strong>
   <a href="{{ prefix }}/">Dashboard</a>
   <a href="{{ prefix }}/jobs">Jobs</a>
+  {% if puller_connections and not prefix %}<div class="menu">
+    <button type="button" class="menu-label" aria-haspopup="true" title="Instances operated through a relay">Pullers ▾</button>
+    <div class="menu-items">
+      {% for c in puller_connections %}<a href="/pullers/connections/{{ c }}">{{ c }}</a>{% endfor %}
+    </div>
+  </div>{% endif %}
   {% if is_admin or (can_act and account and not prefix) %}<div class="menu">
     <button type="button" class="menu-label" aria-haspopup="true">Configure ▾</button>
     <div class="menu-items">

@@ -618,9 +618,6 @@ operate it (the **consumers**) each link out to the relay; nothing connects
 to the producer. On the relay a **puller** names the link of the producer
 and those of its consumers:
 
-*Not finished*: this version has the relay and the producer's side, the
-consumers' side comes next.
-
 
 - the **Pullers** page (admins) adds one: a name, the producer and the
   consumers, among the incoming links of the Users page (the role **user**
@@ -671,6 +668,31 @@ readable by its owner only:
 - the commands already received are kept in `publications/` next to
   `jobs_dir`, so a restart does not let one be played again. The page shows
   when the relay was reached last, or why not.
+
+On a consumer, the **Pullers** page connects to a puller (*Connected
+here*): a name, the link to the relay, the puller's name and the key of the
+producer's publication (none: in clear). Saved in `connections.yaml` next
+to the servers file, readable by its owner only. Then:
+
+- the **Pullers** menu (every role) opens each connection's page: the
+  instance there with its state, disks, CPU and memory (the last hour, day
+  or 7 days), the buttons of the commands it exposes, the commands sent with
+  the producer's answers, and its jobs with their log. Backup needs the
+  developer role, Start, Stop and Restart every role, stopping a job there
+  the admin role, as for the same actions here; only users who log in send
+  commands. What is shown comes with the reports: some seconds old;
+- **Database from link** in a server's form may name a connection
+  (`from_link: {puller: <name>}`): *Copy from link* and the scheduled copies
+  (`copy: {puller: <name>}`) then ask a new backup there, follow its job,
+  download it from the relay, decrypt it, delete it from the relay and
+  restore it here (steps Backup, Transfer, Decrypt, Restore). A backup
+  already there cannot be chosen: the relay keeps none. Stopping the job
+  here asks the producer to stop its backup;
+- the reports are read from the last one read, kept in `connections/` next
+  to `jobs_dir`: the last state, the producer's last 30 jobs (5000 lines
+  each), the last 50 commands sent, and the samples, one file a day, for 7
+  days. A report that does not open with the key is refused and said on the
+  page, and a copy then fails at once.
 
 Their state is kept in `pullers/` next to `jobs_dir`
 (`/var/lib/omniacli/pullers` in the package). A relay behind nginx needs
