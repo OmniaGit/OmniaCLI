@@ -1257,3 +1257,13 @@ async def test_job_running_links_to_the_job(client, env):
     await wait_job(client, job.id)
     page = (await client.get("/servers/srv", headers={"Authorization": AUTH})).text
     assert "job running" not in page.split('class="instance-grid"', 1)[1].split("<script", 1)[0]
+
+
+async def test_the_footer_says_the_version(client):
+    from omniacli.app import _version
+
+    page = await client.get("/", headers={"Authorization": AUTH})
+    assert f'<footer class="site-foot muted">OmniaCLI {_version()} ·' in page.text
+    # not to who has not logged in
+    login = await client.get("/login")
+    assert _version() not in login.text.replace("OmniaCLI", "")

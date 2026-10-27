@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import importlib.metadata
 import importlib.util
 import json
@@ -97,6 +98,8 @@ def _page_context(request: Request) -> dict:
         "is_admin": bool(user and user.can("admin")),
         # a user who logged in with a password (not a token or a link)
         "account": user.name if user and user.kind == "user" else None,
+        # in the footer of every page after the login
+        "version": _version(),
         # the instances operated through a relay (consumer.py), in the menu
         "puller_connections": sorted(settings.connections) if settings else [],
     }
@@ -189,7 +192,10 @@ def _field_dict(field) -> dict:
                          "only_with_value": b.only_with_value} for b in field.buttons]}
 
 
+@functools.lru_cache(maxsize=1)
 def _version() -> str:
+    """The installed package's version (read once: it changes only with a
+    new install, which restarts OmniaCLI)."""
     try:
         return importlib.metadata.version("omniacli")
     except importlib.metadata.PackageNotFoundError:
