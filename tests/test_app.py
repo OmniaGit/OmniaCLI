@@ -167,6 +167,27 @@ async def test_log_api(client, env):
     assert (await client.get(url, headers={"Authorization": AUTH})).status_code == 404
 
 
+async def test_log_api_of_a_compose_instance(client, env, monkeypatch):
+    from omniacli import ops
+
+    asked = []
+
+    async def compose_log(instance, pos=None, initial=300):
+        asked.append(pos)
+        if pos == 1:
+            raise ops.LogUnavailable("not safe")
+        return {"lines": ["x"], "pos": 2, "inode": 0, "rotated": False, "more": False}
+
+    monkeypatch.setattr(ops, "compose_log", compose_log)
+    env["settings"].instance("srv", "test").log_file = None
+    url = "/api/servers/srv/test/log"
+    assert (await client.get(url, headers={"Authorization": AUTH})).json()["pos"] == 2
+    assert (await client.get(f"{url}?pos=2&inode=0", headers={"Authorization": AUTH})).json()["lines"] == ["x"]
+    failed = await client.get(f"{url}?pos=1&inode=0", headers={"Authorization": AUTH})
+    assert failed.status_code == 404 and "not safe" in failed.json()["error"]
+    assert asked == [None, 2, 1]
+
+
 POST = {"Authorization": AUTH, "Origin": f"http://{HOST}"}
 
 

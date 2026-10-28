@@ -233,14 +233,21 @@ def create_mcp(settings: Settings, jobs: JobManager, updater: AutoUpdater, sampl
         ERROR and CRITICAL records with their tracebacks."""
         inst = instance(server_name, role)
         count = min(max(lines, 1), 5000)
-        try:
-            # read more when filtering, so that errors_only still finds some
-            read, _, _ = await asyncio.to_thread(last_lines, inst.log_file, count * (10 if errors_only else 1))
-        except OSError as exc:
-            raise ToolError(f"Cannot read {inst.log_file}: {exc.strerror}") from exc
+        # read more when filtering, so that errors_only still finds some
+        wanted = count * (10 if errors_only else 1)
+        if inst.log_file is None:
+            try:
+                read = (await ops.compose_log(inst, None, min(wanted, 10000)))["lines"]
+            except ops.LogUnavailable as exc:
+                raise ToolError(f"Cannot read {inst.log_label}: {exc}") from exc
+        else:
+            try:
+                read, _, _ = await asyncio.to_thread(last_lines, inst.log_file, wanted)
+            except OSError as exc:
+                raise ToolError(f"Cannot read {inst.log_file}: {exc.strerror}") from exc
         if errors_only:
             read = _errors_only(read)
-        return {"log_file": str(inst.log_file), "lines": read[-count:]}
+        return {"log_file": inst.log_label, "lines": read[-count:]}
 
     @server.tool()
     def list_jobs(server_name: str = "", query: str = "", limit: int = 20) -> list[dict]:

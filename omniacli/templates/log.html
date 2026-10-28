@@ -7,7 +7,7 @@
            ("Log", None)]) }}
 {% endblock %}
 {% block content %}
-<h1>Log {{ instance.key }} <span class="muted mono">{{ instance.log_file }}</span></h1>
+<h1>Log {{ instance.key }} <span class="muted mono">{{ instance.log_label }}</span></h1>
 {% from "_console.html" import logbox, console_script with context %}
 <div class="panel" id="log">{{ logbox("log") }}</div>
 {{ console_script() }}

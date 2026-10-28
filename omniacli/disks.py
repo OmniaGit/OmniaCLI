@@ -54,7 +54,8 @@ def known_paths(settings: Settings) -> list[tuple[str, str]]:
     for inst in settings.all_instances():
         # what the instance's type writes to (Odoo: the filestore)
         paths += [(f"{inst.key} {what}", path) for what, path in inst.plugin.disk_paths(inst)]
-        paths.append((f"{inst.key} log", str(inst.log_file)))
+        if inst.log_file is not None:
+            paths.append((f"{inst.key} log", str(inst.log_file)))
     return paths
 
 

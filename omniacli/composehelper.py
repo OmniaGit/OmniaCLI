@@ -28,7 +28,12 @@ through the group or other write bit that applies to the user. ACLs are not
 read: a project secured with chown root and chmod go-w has none that matter.
 
 The helper takes a fixed set of actions with checked arguments, never a
-command of the caller's, and runs docker with an environment of its own.
+command of the caller's, and runs docker with an environment of its own:
+
+    start, stop, restart, state          up -d; stop; up -d then restart; ps -a
+    logs <service> --tail <N>            the last N lines (1 to 10000) of the
+    logs <service> --since <time>        service, or those since a UTC time,
+                                         each with its time
 """
 
 from __future__ import annotations
@@ -59,6 +64,11 @@ ACTIONS = {
     "state": [["ps", "-a", "--format", "json"]],
 }
 _ENV_LINE = re.compile(r"\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=")
+# logs: a service's output with the time of each line, the last N lines or
+# those since a time (UTC, as docker writes it)
+LOGS = ["logs", "--no-color", "--no-log-prefix", "--timestamps"]
+MAX_TAIL = 10000
+SINCE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?Z")
 
 
 class HelperError(Exception):
@@ -154,19 +164,52 @@ def compose(project: Path, *args: str) -> list[str]:
     return [docker, "compose", "--project-directory", str(project), *args]
 
 
+def services(project: Path) -> list[str]:
+    """The services of the project, as docker compose reads them."""
+    done = subprocess.run(compose(project, "config", "--services"), env=ENV, cwd=project,
+                          capture_output=True, text=True)
+    if done.returncode:
+        raise HelperError(f"docker compose cannot read {project}: {done.stderr.strip()}")
+    return done.stdout.split()
+
+
+def service(project: Path, name: str) -> str:
+    if name not in services(project):
+        raise HelperError(f"{project} has no service {name!r}")
+    return name
+
+
+def commands(project: Path, action: str, args: list[str]) -> list[list[str]]:
+    """The docker compose commands of an action, its arguments checked."""
+    if action in ACTIONS:
+        if args:
+            raise HelperError(f"{action} takes no arguments")
+        return ACTIONS[action]
+    if action == "logs":
+        # logs <service> --tail <N> | --since <time>
+        if len(args) != 3 or args[1] not in ("--tail", "--since"):
+            raise HelperError("usage: logs <service> --tail <lines> | --since <time>")
+        if args[1] == "--tail" and not (args[2].isdigit() and 1 <= int(args[2]) <= MAX_TAIL):
+            raise HelperError(f"--tail takes 1 to {MAX_TAIL} lines")
+        if args[1] == "--since" and not SINCE.fullmatch(args[2]):
+            raise HelperError("--since takes a UTC time, as 2026-10-28T16:48:50.380582551Z")
+        return [[*LOGS, args[1], args[2], service(project, args[0])]]
+    raise HelperError(f"unknown action {action!r}: {', '.join([*ACTIONS, 'logs'])}")
+
+
 def run(argv: list[str]) -> int:
-    """compose-helper <project> <action>: the exit code of the action."""
-    if len(argv) != 2:
-        raise HelperError("usage: compose-helper <project folder> <action>")
-    project, action = Path(argv[0]), argv[1]
-    if action not in ACTIONS:
-        raise HelperError(f"unknown action {action!r}: {', '.join(ACTIONS)}")
+    """compose-helper <project> <action> [arguments]: the exit code of the action."""
+    if len(argv) < 2:
+        raise HelperError("usage: compose-helper <project folder> <action> [arguments]")
+    project, action, args = Path(argv[0]), argv[1], argv[2:]
+    if action not in (*ACTIONS, "logs"):
+        raise HelperError(f"unknown action {action!r}: {', '.join([*ACTIONS, 'logs'])}")
     name, uid, groups = caller()
     found = problems(project, uid, groups)
     if found:
         raise HelperError(f"{project} is not safe from user {name}:\n  " + "\n  ".join(found))
-    for args in ACTIONS[action]:
-        code = subprocess.run(compose(project, *args), env=ENV, cwd=project).returncode
+    for cmd in commands(project, action, args):
+        code = subprocess.run(compose(project, *cmd), env=ENV, cwd=project).returncode
         if code:
             return code
     return 0

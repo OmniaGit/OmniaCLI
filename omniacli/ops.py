@@ -12,6 +12,7 @@ import contextlib
 import datetime
 import json
 import os
+import re
 import shlex
 import signal
 import subprocess
@@ -344,6 +345,58 @@ def compose_state(ps_json: str) -> str | None:
     if running and all(running):
         return "active"
     return "partial" if any(running) else "inactive"
+
+
+class LogUnavailable(Exception):
+    """The log of a compose instance cannot be read: the message says why."""
+
+
+# a line of docker compose logs --timestamps: its UTC time, then the line
+_LOG_LINE = re.compile(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,9}))?Z ?(.*)")
+LOG_TIMEOUT = 60
+
+
+def _micros(date: str, fraction: str | None) -> int:
+    """Microseconds since the epoch: a JavaScript number keeps them exact
+    (nanoseconds would not fit in its 53 bits)."""
+    seconds = datetime.datetime.strptime(date, "%Y-%m-%dT%H:%M:%S").replace(
+        tzinfo=datetime.timezone.utc).timestamp()
+    return int(seconds) * 1_000_000 + int((fraction or "").ljust(6, "0")[:6])
+
+
+def _since(micros: int) -> str:
+    moment = datetime.datetime.fromtimestamp(micros // 1_000_000, datetime.timezone.utc)
+    return f"{moment:%Y-%m-%dT%H:%M:%S}.{micros % 1_000_000:06d}Z"
+
+
+async def compose_log(instance: Instance, pos: int | None = None, initial: int = 300) -> dict:
+    """The log of a compose instance, as logtail.read_since gives a file's:
+    the last `initial` lines when pos is None, else those written after pos
+    (the time of the last line read, in microseconds). docker compose logs
+    gives them through the helper; a container made again starts a new
+    log, read on from the same time."""
+    service = instance.plugin.log_service(instance)
+    if not service:
+        raise LogUnavailable(f"{instance.plugin.label} names no service whose output is its log")
+    args = ["--tail", str(initial)] if pos is None else ["--since", _since(pos)]
+    code, out = await capture(instance.restart.command("logs", service, *args), timeout=LOG_TIMEOUT)
+    if code:
+        raise LogUnavailable(out.splitlines()[-1] if out else f"docker compose logs ended with {code}")
+    lines, last = [], pos
+    for raw in out.splitlines():
+        found = _LOG_LINE.match(raw)
+        if not found:
+            continue  # a warning of docker compose, not a line of the log
+        moment = _micros(found.group(1), found.group(2))
+        # --since includes the line at that time, already given
+        if pos is not None and moment <= pos:
+            continue
+        lines.append(found.group(3))
+        last = moment if last is None else max(last, moment)
+    if last is None:
+        # nothing yet: what is written from now on
+        last = int(datetime.datetime.now(datetime.timezone.utc).timestamp() * 1_000_000)
+    return {"lines": lines, "pos": last, "inode": 0, "rotated": False, "more": False}
 
 
 def _service(instance: Instance) -> str:

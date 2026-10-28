@@ -55,15 +55,16 @@ class Restart:
     service: str
     sudo: bool = True
 
-    def command(self, action: str = "restart") -> list[str]:
+    def command(self, action: str = "restart", *args: str) -> list[str]:
         """The restart command of a systemd or init.d service (a systemd
         service is also started and stopped: action start or stop), or of a
-        compose project, through the root helper (also action state)."""
+        compose project, through the root helper (also actions state and
+        logs, whose arguments follow)."""
         if self.type == "systemd":
             # without --no-ask-password systemctl waits on a polkit prompt
             cmd = ["systemctl", "--no-ask-password", action, self.service]
         elif self.type == "compose":
-            cmd = [str(OMNIACLI_COMMAND), "compose-helper", self.service, action]
+            cmd = [str(OMNIACLI_COMMAND), "compose-helper", self.service, action, *args]
         else:
             cmd = [f"/etc/init.d/{self.service}", action]
         return (["sudo", "-n"] + cmd) if self.sudo else cmd
@@ -155,7 +156,9 @@ class Instance:
     server: str
     role: str
     repositories: list[Repository]
-    log_file: Path
+    # None with restart type compose: the log is docker compose's
+    # (plugin.log_service)
+    log_file: Path | None
     restart: Restart
     # the plugin of the server's type (plugin_api.ServicePlugin), and its
     # settings of this instance (what its parse_options returned)
@@ -198,6 +201,14 @@ class Instance:
     @property
     def key(self) -> str:
         return f"{self.server}/{self.role}"
+
+    @property
+    def log_label(self) -> str:
+        """Where its log is read from, as the pages show it."""
+        if self.log_file is not None:
+            return str(self.log_file)
+        service = self.plugin.log_service(self)
+        return f"docker compose logs {service}" if service else "no log"
 
     @property
     def pid_file(self) -> Path:
@@ -432,7 +443,8 @@ def _parse_instance(server: str, role: str, data: dict, logs_dir: Path | None, p
         log_file = logs_dir / f"{server}_{role}.log"
         service = ""
     else:
-        log_file = Path(_require(data, "log_file", where))
+        # compose: the log is docker compose's, read through the helper
+        log_file = None if restart_type == "compose" else Path(_require(data, "log_file", where))
         service = str(_require(restart, "service", f"{where}.restart"))
         if restart_type == "compose" and not service.startswith("/"):
             raise ConfigError(f"{where}.restart.service: {service!r} is not the absolute path "
@@ -639,6 +651,8 @@ def instance_to_dict(instance: Instance) -> dict:
     if instance.restart.type == "process":
         # both follow from the type: the log is OmniaCLI's, there is no service
         del data["log_file"], data["restart"]["service"], data["restart"]["sudo"]
+    if instance.log_file is None:
+        del data["log_file"]
     return data
 
 

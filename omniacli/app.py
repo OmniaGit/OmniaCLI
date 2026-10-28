@@ -1144,6 +1144,12 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
     ):
         """The log lines after pos (the last 300 when pos is missing)."""
         instance = get_instance(server, role)
+        if instance.log_file is None:
+            # compose: docker compose logs, pos is the time of the last line
+            try:
+                return await ops.compose_log(instance, pos)
+            except ops.LogUnavailable as exc:
+                return JSONResponse({"error": f"Cannot read {instance.log_label}: {exc}"}, status_code=404)
         try:
             return await asyncio.to_thread(read_since, instance.log_file, pos, inode)
         except OSError as exc:

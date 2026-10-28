@@ -226,7 +226,8 @@ fields.</p>
   <tr><td>Odoo config file</td><td>the <span class="mono">odoo.conf</span> the instance runs with, for example
     <span class="mono">/etc/odoo/customer-test.conf</span>.</td></tr>
   <tr><td>Log file</td><td>the Odoo log shown on the Log page and read by <span class="mono">read_log</span>. With
-    restart type <em>process</em> it is set by OmniaCLI (Odoo's output, in its logs folder).</td></tr>
+    restart type <em>process</em> it is set by OmniaCLI (Odoo's output, in its logs folder). With Docker Compose
+    there is none: the log is the output of the type's service, see below.</td></tr>
   <tr><td>Venv bin</td><td>the <span class="mono">bin</span> folder of the virtualenv that runs this Odoo, for example
     <span class="mono">/opt/odoo/venvs/odoo18/bin</span>. OmniaCLI runs <span class="mono">click-odoo-update</span> and
     <span class="mono">click-odoo-backupdb</span> from it; <strong>pip requirements</strong> and <strong>pip
@@ -321,6 +322,21 @@ problem, the command that fixes it. Secure a project so:</p>
 chmod -R go-w /srv/odooplm-19</pre>
 <p>The folders the project mounts (<span class="mono">./config</span>, <span class="mono">./addons-extra</span>...) are
 not checked: who writes them controls Odoo inside its container, not the machine.</p>
+<h3>Docker Compose: the log</h3>
+<p>An Odoo in a container writes its log to its output, which docker keeps: the Log page, the
+<span class="mono">read_log</span> tool and the <strong>Log</strong> check read it with
+<span class="mono">docker compose logs</span> of the service the type names (for Odoo, its service), through the
+helper: the last 300 lines, then every 2 seconds the lines written since the last one read, by their time. How much
+log there is, docker decides: with its default driver (<span class="mono">json-file</span>) and no limit the log
+grows for ever, and when its container is made again (a changed <span class="mono">.env</span> or image,
+<span class="mono">down</span>) the lines before are gone; the page keeps showing the ones it has and goes on with
+the new container's. Limit it in the compose file:</p>
+<pre class="console mono">services:
+  odoo:
+    logging:
+      options:
+        max-size: "50m"
+        max-file: "5"</pre>
 <p>The sudoers lines go in <span class="mono">/etc/sudoers.d/omniacli</span> (the package installs it with examples,
 all commented); a failed check prints the exact lines. Examples, with your service names and paths:</p>
 <pre class="console mono">omniacli ALL=(root) NOPASSWD: /usr/bin/systemctl --no-ask-password restart odoo-customer-test

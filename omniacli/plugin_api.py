@@ -23,8 +23,10 @@ follows a pull, the backup, and the command of the process OmniaCLI starts.
 A plugin may also give: the fields of its settings in the server form
 (fields), buttons of its own on the server page (actions), routes of its own
 under /x/<plugin>/ (router, with templates and static files of its own),
-its part of what the MCP tool dev_setup tells (dev_setup), and the instances
-of its type it finds on the machine (discover).
+its part of what the MCP tool dev_setup tells (dev_setup), the instances
+of its type it finds on the machine (discover), and, for a type that runs in
+Docker Compose (has_compose), the service whose output is its log
+(log_service).
 """
 
 from __future__ import annotations
@@ -442,6 +444,12 @@ class ServicePlugin(ABC):
     @property
     def has_process(self) -> bool:
         return type(self).process_command is not ServicePlugin.process_command
+
+    def log_service(self, instance: Instance) -> str | None:
+        """With restart type compose: the compose service whose output is
+        the instance's log (docker compose logs, through the helper); None:
+        no log."""
+        return None
 
     @property
     def has_compose(self) -> bool:

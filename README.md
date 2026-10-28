@@ -114,7 +114,7 @@ stopped with *Stop job*.
 | Merge test to production | | ✓ | backup production, merge, push, update modules, restart production |
 | Copy production to test | ✓ → | ✓ | a popup asks which backup of production: a new one (with the filestore; without it, test has no attachments; or **shared with production**, see below) or one already made; then stop test, `click-odoo-restoredb --copy --force --neutralize` into the test database (drops it and its filestore first; `--neutralize` from Odoo 16: no scheduled actions, no outgoing mail), `click-odoo-update`, start test. **Filestore shared with production**: the backup is made without filestore, and after the restore test's filestore (`<data_dir>/filestore/<db>`) is a tree of hard links to production's files, made by the test's venv python as its `run_as` user: no extra disk space, test reads every attachment, and what test writes or deletes does not touch production's files (Odoo never rewrites a filestore file, it only writes new ones and unlinks). Refused, before anything is touched, when an Odoo config sets no `data_dir` or the two filestores are not on the same filesystem, or the test user may not link production's files (`fs.protected_hardlinks`). Refused when production and test run different Odoo versions, and on Odoo 20+ (click-odoo-restoredb refuses it). A systemd test needs its Start/Stop sudoers lines; an init.d one is not stopped, it is restarted at the end |
 | Copy from link | ✓ (admin) | ✓ | for an instance with a **Database from link**: a popup asks which backup of that instance of the linked OmniaCLI: a new one, made there now (with or without the filestore; an OmniaCLI there older than 2026.1.12 makes it with the filestore), or one already there; whether to neutralize; whether to set every user's password to `admin` (on by default: after the restore `click-odoo` runs `odoo/reset_passwords.py`, which writes the pbkdf2_sha512 hash in SQL, so no password policy refuses it; in `password` from Odoo 12, in `password_crypt` on Odoo 10 and 11 with auth_crypt; refused before anything is touched when the Odoo version is unknown); whether to **only load the database** (off by default, for development: the instance is not stopped, its modules are not updated and it is not restarted; Odoo's drop of the database ends its connections); and for a production its database name, typed. The zip is downloaded into this instance's backups as `<link>_<file>` (through `<file>.part`: a cut download leaves nothing), then restored as above: stop, `click-odoo-restoredb --copy --force [--neutralize]`, the passwords, `click-odoo-update`, start. Refused, before anything is touched, when the backup's `manifest.json` names another Odoo version than the instance's |
-| Log | ✓ | ✓ | `tail -F` of the Odoo log in the browser, with an "errors only" filter |
+| Log | ✓ | ✓ | `tail -F` of the Odoo log in the browser, with an "errors only" filter; of a compose instance, `docker compose logs` of its service (see below) |
 
 The two pip buttons are also next to the **Venv bin** field of the server
 form (admins), as soon as it is set: they run on the venv, odoo-bin and
@@ -853,6 +853,30 @@ sudo chmod -R go-w /srv/odooplm-19
 The folders the project mounts (`./config`, `./addons-extra`...) are not
 checked: who writes them controls Odoo inside its container, not the
 machine.
+
+#### Docker Compose: the log
+
+An Odoo in a container writes its log to its output, which docker keeps. A
+compose instance has no log file: the Log page, the `read_log` tool and the
+**Log** check read the output of the service its type names
+(`plugin.log_service`; for Odoo, its service) with `docker compose logs
+--timestamps`, through the helper (`logs <service> --tail <N>` or `--since
+<time>`). The page gets the last 300 lines, then every 2 seconds the lines
+written since the time of the last one read (its `pos` is that time in
+microseconds, which a JavaScript number keeps exact). How much log there is,
+docker decides: with its default driver (`json-file`) and no limit it grows
+for ever, and when the container is made again (a changed `.env` or image,
+`down`) the lines before are gone; the page keeps the ones it shows and goes
+on with the new container's. Limit it in the compose file:
+
+```yaml
+services:
+  odoo:
+    logging:
+      options:
+        max-size: "50m"
+        max-file: "5"
+```
 
 ### Configuration cases
 

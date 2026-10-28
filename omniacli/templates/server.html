@@ -167,7 +167,7 @@
         {% elif value is none or value == "" %}<dd class="muted">–</dd>
         {% else %}<dd class="{{ 'mono' if kind in ('path', 'number') }}">{{ value }}</dd>{% endif %}
         {% endfor %}
-        <dt>Log file</dt><dd class="mono">{{ inst.log_file }}</dd>
+        <dt>Log</dt><dd class="mono">{{ inst.log_label }}</dd>
         {% if inst.restart.type == "process" %}
         <dt>{{ inst.plugin.label }}</dt><dd>started by OmniaCLI: {% if running.get(inst.key) %}running, pid <span class="mono">{{ running[inst.key] }}</span>{% else %}<span class="muted">stopped</span>{% endif %}</dd>
         {% else %}
@@ -211,7 +211,7 @@
     </details>
     {% endif %}
 
-    <h3 class="chart-title" style="margin-top: 16px">Log <span class="muted mono" style="font-weight: 400">{{ inst.log_file }}</span></h3>
+    <h3 class="chart-title" style="margin-top: 16px">Log <span class="muted mono" style="font-weight: 400">{{ inst.log_label }}</span></h3>
     <div class="log-panel" data-log="{{ prefix }}/api/servers/{{ server.name }}/{{ inst.role }}/log">
       {{ logbox("server-log", height="45vh" if instances | length == 1 else "38vh") }}</div>
   </section>

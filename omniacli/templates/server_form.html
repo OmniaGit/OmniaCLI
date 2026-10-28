@@ -272,6 +272,12 @@ function processFields(box) {
   for (const key of ["restart.service", "restart.sudo", "log_file", "run_as"]) {
     box.querySelector(`[data-k="${key}"]`).disabled = process;
   }
+  // compose: the log is docker compose's, read through the helper
+  const compose = restartType.value === "compose";
+  if (compose) {
+    box.querySelector('[data-k="log_file"]').disabled = true;
+    box.querySelector('[data-k="log_file"]').value = "";
+  }
   for (const field of type.fields) {
     if (!field.restart_types.length) continue;
     const input = box.querySelector(`[data-plugin][data-k="${field.key}"]`);
@@ -280,7 +286,8 @@ function processFields(box) {
     input.placeholder = on ? field.placeholder || "" : field.disabled_placeholder || "";
     if (!on) { if (input.type === "checkbox") input.checked = false; else input.value = ""; }
   }
-  box.querySelector('[data-k="log_file"]').placeholder = process ? `${type.label}'s output, in ` + MODEL.logs_dir : "";
+  box.querySelector('[data-k="log_file"]').placeholder = process ? `${type.label}'s output, in ` + MODEL.logs_dir
+    : compose ? "docker compose logs of the service" : "";
   if (process) box.querySelector('[data-k="log_file"]').value = "";
   // OmniaCLI stops its own process with a signal, which it may not send to another user
   box.querySelector('[data-k="run_as"]').placeholder = process ? "not with restart type process" : "empty: the user running OmniaCLI";

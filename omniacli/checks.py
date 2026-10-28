@@ -57,7 +57,7 @@ async def _instance_checks(instance: Instance) -> list[Check]:
             add("Log folder", True, f"{folder} writable: {label}'s output goes to {instance.log_file}")
         except OSError as exc:
             add("Log folder", False, f"{folder}: {exc}")
-    else:
+    elif instance.log_file is not None:
         readable = os.access(instance.log_file, os.R_OK)
         add("Log file", readable,
             f"{instance.log_file} readable" if readable
@@ -157,6 +157,8 @@ async def _instance_checks(instance: Instance) -> list[Check]:
                 "sudo allows the compose-helper without a password" if code == 0 else
                 "sudo refuses the compose-helper or asks a password; add to /etc/sudoers.d/omniacli: "
                 f"{system_user()} ALL=(root) NOPASSWD: {command[2]} compose-helper {restart.service} *")
+            if code == 0:
+                await _compose_log_check(instance, add)
             return checks
         missing = await refused(("restart",))
         add("Restart permission", not missing,
@@ -174,6 +176,18 @@ async def _instance_checks(instance: Instance) -> list[Check]:
             f"runs '{' '.join(command)}' without sudo: not tried, it would restart the service",
             WARNING)
     return checks
+
+
+async def _compose_log_check(instance: Instance, add) -> None:
+    """The log page can read the service's output (a warning: not needed to
+    deploy)."""
+    if not instance.plugin.log_service(instance):
+        return
+    try:
+        await ops.compose_log(instance, None, 1)
+        add("Log", True, f"{instance.log_label} answers")
+    except ops.LogUnavailable as exc:
+        add("Log", False, f"{instance.log_label}: {exc}: the log page cannot show it", WARNING)
 
 
 async def _package_checks(instance: Instance, add) -> None:

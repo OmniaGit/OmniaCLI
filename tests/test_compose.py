@@ -244,3 +244,79 @@ async def test_checks(with_compose, monkeypatch, tmp_path):
     monkeypatch.setattr(checks.composehelper, "problems", lambda project, uid, groups: [])
     result = {c.name: c for c in await checks._instance_checks(instance)}
     assert result["Service"].ok and result["Restart permission"].ok
+
+
+class LoggedDummy(ComposeDummy):
+    name = "logged"
+
+    def log_service(self, instance):
+        return "odoo"
+
+
+@pytest.fixture
+def with_logged():
+    plugins.set_registry(plugins.load(entry_points=[FakeEntryPoint("logged", LoggedDummy)]))
+    yield plugins.registry().get("logged")
+    plugins.set_registry(None)
+
+
+def test_a_compose_instance_has_no_log_file(with_logged):
+    srv = _server("logged")
+    assert srv.test.log_file is None and srv.test.log_label == "docker compose logs odoo"
+    assert "log_file" not in server_to_dict(srv)["test"]
+
+
+T1 = "2026-10-28T16:48:49.379628995Z"
+T2 = "2026-10-28T16:48:50.380582551Z"
+P2 = ops._micros("2026-10-28T16:48:50", "380582551")
+
+
+async def test_compose_log(with_logged, monkeypatch):
+    answers, asked = [], []
+
+    async def capture(cmd, **kwargs):
+        asked.append(cmd)
+        return answers.pop(0)
+
+    monkeypatch.setattr(ops, "capture", capture)
+    instance = _server("logged").test
+    answers.append((0, f'level=warning msg="obsolete"\n{T1} line 4\n{T2} 2026-10-28 16:48:50,380 INFO db: line 5'))
+    first = await ops.compose_log(instance)
+    assert asked[-1] == ["sudo", "-n", *HELPER, "logs", "odoo", "--tail", "300"]
+    assert first["lines"] == ["line 4", "2026-10-28 16:48:50,380 INFO db: line 5"]
+    assert first["pos"] == P2 == 1793206130380582 and first["inode"] == 0
+    # --since gives again the line at that time
+    answers.append((0, f"{T2} line 5\n2026-10-28T16:48:51.000001Z line 6"))
+    nxt = await ops.compose_log(instance, first["pos"])
+    assert asked[-1][-2:] == ["--since", "2026-10-28T16:48:50.380582Z"]
+    assert nxt["lines"] == ["line 6"] and nxt["pos"] == P2 + 619419
+    answers.append((0, ""))
+    assert (await ops.compose_log(instance, nxt["pos"]))["pos"] == nxt["pos"]
+    # nothing written yet: what comes from now on
+    answers.append((0, ""))
+    assert (await ops.compose_log(instance))["pos"] > P2
+    answers.append((2, "compose-helper: /srv/odooplm-19 is not safe from user omniacli:\n  x is writable"))
+    with pytest.raises(ops.LogUnavailable, match="x is writable"):
+        await ops.compose_log(instance, P2)
+
+
+async def test_no_log_service_no_log(with_compose):
+    instance = _server().test
+    assert instance.log_label == "no log"
+    with pytest.raises(ops.LogUnavailable, match="names no service"):
+        await ops.compose_log(instance)
+
+
+def test_the_logs_action(tmp_path, monkeypatch):
+    project = tmp_path
+    monkeypatch.setattr(composehelper, "services", lambda project: ["odoo", "db"])
+    assert composehelper.commands(project, "logs", ["odoo", "--tail", "5"]) == [
+        ["logs", "--no-color", "--no-log-prefix", "--timestamps", "--tail", "5", "odoo"]]
+    assert composehelper.commands(project, "logs", ["db", "--since", T2])[0][-3:] == ["--since", T2, "db"]
+    for args, message in ((["odoo", "--tail", "0"], "1 to 10000"), (["odoo", "--tail", "x"], "1 to 10000"),
+                          (["odoo", "--since", "yesterday"], "UTC time"), (["web", "--tail", "5"], "no service"),
+                          (["odoo", "--follow", "5"], "usage"), (["odoo"], "usage")):
+        with pytest.raises(composehelper.HelperError, match=message):
+            composehelper.commands(project, "logs", args)
+    with pytest.raises(composehelper.HelperError, match="takes no arguments"):
+        composehelper.commands(project, "stop", ["--timeout", "0"])
