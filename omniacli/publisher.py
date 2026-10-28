@@ -333,8 +333,9 @@ class _Run:
         if not rule.in_window(now.time()):
             raise _Refused(f"{cmd.action} is taken {rule.window_label()} only, it is {now:%H:%M} on "
                            f"{instance.key}: schedule it in its hours")
-        if cmd.action in ("start", "stop") and instance.restart.type not in ("systemd", "process"):
-            raise _Refused(f"{cmd.action} is for a systemd service or an instance OmniaCLI starts itself")
+        if cmd.action in ("start", "stop") and instance.restart.type not in ("systemd", "compose", "process"):
+            raise _Refused(f"{cmd.action} is for a systemd service, a compose project or an instance "
+                           "OmniaCLI starts itself")
         jobs = self.p.jobs
         if cmd.action == "backup":
             try:

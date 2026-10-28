@@ -41,12 +41,12 @@
           <span class="run-state {{ st }}" title="Odoo {{ st if st != 'unknown' else 'state unknown' }}">{{ {"running": "running", "stopped": "stopped"}.get(st, "?") }}</span>
           {% if can_restart %}
           <span class="run-buttons">
-            {% if st != "running" and rt in ("process", "systemd") %}
+            {% if st != "running" and rt in ("process", "systemd", "compose") %}
             <form method="post" action="{{ url }}/{{ 'restart' if rt == 'process' else 'start' }}" onsubmit="return confirm('Start Odoo of {{ what }}?')">
               <input type="hidden" name="next" value="{{ prefix }}/">
               <button class="icon-btn btn-start" title="Start" aria-label="Start {{ what }}" {{ off }}>{{ icon("start") }}</button></form>
             {% endif %}
-            {% if st != "stopped" and rt in ("process", "systemd") %}
+            {% if st != "stopped" and rt in ("process", "systemd", "compose") %}
             <form method="post" action="{{ url }}/stop" onsubmit="return confirm('Stop Odoo of {{ what }}? It stays stopped, also for the auto update, until Start.')">
               <input type="hidden" name="next" value="{{ prefix }}/">
               <button class="icon-btn btn-stop" title="Stop" aria-label="Stop {{ what }}" {{ off }}>{{ icon("stop") }}</button></form>

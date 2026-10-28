@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import datetime
+import json
 import os
 import shlex
 import signal
@@ -297,13 +298,24 @@ async def restart(job: Job, instance: Instance) -> None:
     if instance.restart.type == "process":
         await restart_process(job, instance)
         return
+    if instance.restart.type == "compose":
+        # up -d first: a changed .env or image needs its containers made
+        # again, which a restart does not do (a no-op when nothing changed)
+        job.log(f"--- restart compose project {instance.restart.service}")
+        await run(job, instance.restart.command("start"), timeout=RESTART_TIMEOUT)
+        await run(job, instance.restart.command("restart"), timeout=RESTART_TIMEOUT)
+        return
     job.log(f"--- restart {instance.restart.type} service {instance.restart.service}")
     await run(job, instance.restart.command(), timeout=RESTART_TIMEOUT)
 
 
 async def service_state(instance: Instance) -> str | None:
     """ActiveState of a systemd instance's unit (active, inactive, failed,
-    activating...); None when it is not systemd or the unit is not found."""
+    activating...), or the state of a compose project (compose_state); None
+    when it is neither or the unit is not found."""
+    if instance.restart.type == "compose":
+        code, out = await capture(instance.restart.command("state"))
+        return None if code else compose_state(out)
     if instance.restart.type != "systemd":
         return None
     code, out = await capture(["systemctl", "show", "-p", "LoadState", "-p", "ActiveState",
@@ -312,6 +324,30 @@ async def service_state(instance: Instance) -> str | None:
     if code or props.get("LoadState") != "loaded":
         return None
     return props.get("ActiveState") or None
+
+
+def compose_state(ps_json: str) -> str | None:
+    """From docker compose ps -a --format json (one object per line; an
+    array before Compose 2.21): active when every container runs, inactive
+    when none does or there is none, partial otherwise; None when it cannot
+    be read."""
+    text = ps_json.strip()
+    try:
+        if text.startswith("["):
+            containers = json.loads(text)
+        else:
+            containers = [json.loads(line) for line in text.splitlines() if line.strip()]
+        running = [c.get("State") == "running" for c in containers]
+    except (ValueError, AttributeError):
+        return None
+    if running and all(running):
+        return "active"
+    return "partial" if any(running) else "inactive"
+
+
+def _service(instance: Instance) -> str:
+    kind = "compose project" if instance.restart.type == "compose" else "systemd service"
+    return f"{kind} {instance.restart.service}"
 
 
 def _label(instance: Instance) -> str:
@@ -324,7 +360,8 @@ def _config(instance: Instance) -> Path | None:
 
 
 async def start(job: Job, instance: Instance) -> None:
-    """Start the systemd service, or the process OmniaCLI starts itself."""
+    """Start the systemd service or the compose project, or the process
+    OmniaCLI starts itself."""
     if instance.restart.type == "process":
         job.log(f"--- start {_label(instance)} started by OmniaCLI ({_config(instance)})")
         if managed_pid(instance) is not None:
@@ -332,9 +369,10 @@ async def start(job: Job, instance: Instance) -> None:
             return
         await restart_process(job, instance)
         return
-    if instance.restart.type != "systemd":
-        raise JobFailed(f"Start is for a systemd service or an {_label(instance)} OmniaCLI starts itself")
-    job.log(f"--- start systemd service {instance.restart.service}")
+    if instance.restart.type not in ("systemd", "compose"):
+        raise JobFailed(f"Start is for a systemd service, a compose project or an {_label(instance)} "
+                        "OmniaCLI starts itself")
+    job.log(f"--- start {_service(instance)}")
     await run(job, instance.restart.command("start"), timeout=RESTART_TIMEOUT)
 
 
@@ -447,14 +485,16 @@ async def start_process(job: Job, instance: Instance) -> int:
 
 
 async def stop(job: Job, instance: Instance) -> None:
-    """Stop the systemd service, or the process OmniaCLI started (one it did
-    not start is not touched); an init.d service is not stopped from here."""
-    if instance.restart.type == "systemd":
-        job.log(f"--- stop systemd service {instance.restart.service}")
+    """Stop the systemd service or the compose project, or the process
+    OmniaCLI started (one it did not start is not touched); an init.d
+    service is not stopped from here."""
+    if instance.restart.type in ("systemd", "compose"):
+        job.log(f"--- stop {_service(instance)}")
         await run(job, instance.restart.command("stop"), timeout=RESTART_TIMEOUT)
         return
     if instance.restart.type != "process":
-        raise JobFailed(f"Stop is for a systemd service or an {_label(instance)} OmniaCLI starts itself")
+        raise JobFailed(f"Stop is for a systemd service, a compose project or an {_label(instance)} "
+                        "OmniaCLI starts itself")
     job.log(f"--- stop {_label(instance)} started by OmniaCLI ({_config(instance)})")
     own = managed_pid(instance)
     if own is None:

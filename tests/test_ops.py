@@ -445,7 +445,7 @@ async def test_start_stop_systemd_not_initd(env):
     assert "stop odoo-test\nstart odoo-test" in env["calls"].read_text()
     test.restart.type = "initd"
     for action in (ops.stop, ops.start):
-        with pytest.raises(JobFailed, match="systemd service or an Odoo OmniaCLI starts itself"):
+        with pytest.raises(JobFailed, match="systemd service, a compose project or an Odoo OmniaCLI starts itself"):
             await action(job(), test)
 
 

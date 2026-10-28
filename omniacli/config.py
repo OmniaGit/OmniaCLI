@@ -23,8 +23,16 @@ ROLES = ("production", "test")
 # token could do then (read, update_test, backup_test, download backups)
 TOKEN_DEFAULT_ROLE = "developer"
 # process: OmniaCLI starts the service itself (odoo-bin...), its output going
-# to a log of its own
-RESTART_TYPES = ("systemd", "initd", "process")
+# to a log of its own; compose: a Docker Compose project, the service being
+# its folder (only for a plugin that runs in one: has_compose)
+RESTART_TYPES = ("systemd", "initd", "process", "compose")
+# what a compose project's command does for each action: start applies a
+# changed .env or image (up -d recreates what changed), state lists every
+# container of the project, stopped ones too
+COMPOSE_ACTIONS = {"start": ["up", "-d"], "stop": ["stop"], "restart": ["restart"],
+                   "state": ["ps", "-a", "--format", "json"]}
+# the files docker compose reads in a project's folder, when none is named
+COMPOSE_FILES = ("compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml")
 # a server name is part of URLs and of the job keys
 SERVER_STATUSES = ("active", "draft")
 SERVER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
@@ -52,10 +60,13 @@ class Restart:
 
     def command(self, action: str = "restart") -> list[str]:
         """The restart command of a systemd or init.d service (a systemd
-        service is also started and stopped: action start or stop)."""
+        service is also started and stopped: action start or stop), or of a
+        compose project (also action state)."""
         if self.type == "systemd":
             # without --no-ask-password systemctl waits on a polkit prompt
             cmd = ["systemctl", "--no-ask-password", action, self.service]
+        elif self.type == "compose":
+            cmd = ["docker", "compose", "--project-directory", self.service, *COMPOSE_ACTIONS[action]]
         else:
             cmd = [f"/etc/init.d/{self.service}", action]
         return (["sudo", "-n"] + cmd) if self.sudo else cmd
@@ -411,6 +422,9 @@ def _parse_instance(server: str, role: str, data: dict, logs_dir: Path | None, p
         raise ConfigError(
             f"{where}.restart: type must be one of {', '.join(RESTART_TYPES)}"
         )
+    if restart_type == "compose" and not plugin.has_compose:
+        raise ConfigError(f"{where}.restart: {plugin.label} does not run in Docker Compose "
+                          "(type compose)")
     if restart_type == "process":
         if not plugin.has_process:
             raise ConfigError(f"{where}.restart: {plugin.label} cannot be started by OmniaCLI "
@@ -423,6 +437,9 @@ def _parse_instance(server: str, role: str, data: dict, logs_dir: Path | None, p
     else:
         log_file = Path(_require(data, "log_file", where))
         service = str(_require(restart, "service", f"{where}.restart"))
+        if restart_type == "compose" and not service.startswith("/"):
+            raise ConfigError(f"{where}.restart.service: {service!r} is not the absolute path "
+                              "of the compose project's folder")
     run_as = str(data.get("run_as") or "").strip() or None
     if run_as is not None:
         if not USER_NAME.fullmatch(run_as):

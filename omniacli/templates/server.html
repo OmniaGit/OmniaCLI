@@ -56,7 +56,7 @@
       {% else %}
       {% set state = service_state.get(inst.key) %}
       {% set up = state in ("active", "activating", "reloading") %}
-      {% if inst.restart.type == "systemd" %}
+      {% if inst.restart.type in ("systemd", "compose") %}
       {# state unknown: both #}
       {% if not up %}
       <form method="post" action="{{ base }}/start"
@@ -74,7 +74,7 @@
       <form method="post" action="{{ base }}/restart"
             onsubmit="return confirm('Restart the service {{ inst.restart.service }} of {{ inst.key }}?')">
         <button class="btn-restart" {{ off }}>{{ icon("restart") }}Restart</button></form>
-      {% if inst.restart.type == "systemd" %}<span class="muted" style="align-self: center">service {{ state or "state unknown" }}</span>{% endif %}
+      {% if inst.restart.type in ("systemd", "compose") %}<span class="muted" style="align-self: center">{{ "project" if inst.restart.type == "compose" else "service" }} {{ state or "state unknown" }}</span>{% endif %}
       {% endif %}
       {% for b in buttons[inst.key].service %}{{ action_button(b, off) }}{% endfor %}
       </div>

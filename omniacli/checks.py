@@ -16,7 +16,7 @@ import tempfile
 from pathlib import Path
 
 from . import ops, packages
-from .config import Instance, Server
+from .config import COMPOSE_FILES, Instance, Server
 from .jobs import JobFailed
 from .plugin_api import ERROR, WARNING, Check, system_user
 
@@ -118,31 +118,46 @@ async def _instance_checks(instance: Instance) -> list[Check]:
             ["systemctl", "show", "-p", "LoadState", "--value", restart.service])
         add("Service", code == 0 and state == "loaded",
             f"systemd unit {restart.service}: {state or 'unknown'}")
+    elif restart.type == "compose":
+        folder = Path(restart.service)
+        found = [name for name in COMPOSE_FILES if (folder / name).is_file()]
+        add("Service", bool(found),
+            f"compose project {folder}: {found[0]}" if found else
+            f"{folder} holds no {', '.join(COMPOSE_FILES)}")
+        add("Docker", shutil.which("docker") is not None,
+            "docker found" if shutil.which("docker") else "docker is not installed (or not in the PATH)")
     else:
         script = Path(f"/etc/init.d/{restart.service}")
         add("Service", os.access(script, os.X_OK),
             f"{script} {'exists' if os.access(script, os.X_OK) else 'not found or not executable'}")
     command = restart.command()
     if restart.sudo:
-        # sudo -n -l <command>: 0 when sudoers lets this user run exactly it
-        # without a password
-        code, _ = await ops.capture(["sudo", "-n", "-l", *command[2:]])
-        executable = shutil.which(command[2]) or command[2]
-        add("Restart permission", code == 0,
-            "sudo allows it without a password" if code == 0 else
-            "sudo refuses it or asks a password; add to /etc/sudoers.d/omniacli: "
-            f"{system_user()} ALL=(root) NOPASSWD: {' '.join([executable, *command[3:]])}")
-        if restart.type == "systemd":
-            # Start and Stop buttons: not needed to deploy, so a warning
-            missing = []
-            for action in ("start", "stop"):
+        async def refused(actions) -> list[str]:
+            """The sudoers lines of the actions' commands sudo refuses:
+            sudo -n -l <command> is 0 when sudoers lets this user run
+            exactly it without a password."""
+            lines = []
+            for action in actions:
                 other = restart.command(action)
                 code, _ = await ops.capture(["sudo", "-n", "-l", *other[2:]])
                 if code:
-                    missing.append(f"{system_user()} ALL=(root) NOPASSWD: {' '.join([executable, *other[3:]])}")
+                    executable = shutil.which(other[2]) or other[2]
+                    lines.append(f"{system_user()} ALL=(root) NOPASSWD: {' '.join([executable, *other[3:]])}")
+            return lines
+
+        # a compose restart is up -d, then restart
+        missing = await refused(("start", "restart") if restart.type == "compose" else ("restart",))
+        add("Restart permission", not missing,
+            "sudo allows it without a password" if not missing else
+            "sudo refuses it or asks a password; add to /etc/sudoers.d/omniacli: " + " and ".join(missing))
+        if restart.type in ("systemd", "compose"):
+            # Start and Stop buttons (and a project's state): not needed to
+            # deploy, so a warning
+            missing = await refused(("start", "stop") if restart.type == "systemd" else ("stop", "state"))
+            what = "Start and Stop" if restart.type == "systemd" else "Stop and the state of the project"
             add("Start/Stop permission", not missing,
                 "sudo allows them without a password" if not missing else
-                "Start and Stop will fail; add to /etc/sudoers.d/omniacli: " + " and ".join(missing),
+                f"{what} will fail; add to /etc/sudoers.d/omniacli: " + " and ".join(missing),
                 WARNING)
     else:
         add("Restart permission", True,

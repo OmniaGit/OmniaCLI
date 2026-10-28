@@ -800,9 +800,10 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
     @app.post("/servers/{server}/{role}/start")
     async def action_start(request: Request, server: str, role: str, user: Principal = Depends(anyone)):
         instance = get_instance(server, role)
-        if instance.restart.type not in ("systemd", "process"):
+        if instance.restart.type not in ("systemd", "compose", "process"):
             raise HTTPException(status.HTTP_400_BAD_REQUEST,
-                                f"Start is for a systemd service or an {instance.plugin.label} OmniaCLI starts itself")
+                                f"Start is for a systemd service, a compose project or an {instance.plugin.label} "
+                                "OmniaCLI starts itself")
         return await started_or_back(
             request,
             jobs.submit(
@@ -816,9 +817,10 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
     @app.post("/servers/{server}/{role}/stop")
     async def action_stop(request: Request, server: str, role: str, user: Principal = Depends(anyone)):
         instance = get_instance(server, role)
-        if instance.restart.type not in ("systemd", "process"):
+        if instance.restart.type not in ("systemd", "compose", "process"):
             raise HTTPException(status.HTTP_400_BAD_REQUEST,
-                                f"Stop is for a systemd service or an {instance.plugin.label} OmniaCLI starts itself")
+                                f"Stop is for a systemd service, a compose project or an {instance.plugin.label} "
+                                "OmniaCLI starts itself")
         return await started_or_back(
             request,
             jobs.submit(
@@ -1237,7 +1239,8 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
                     "active": bool(original and settings.servers[original].active),
                     "logs_dir": str(settings.logs_dir),
                     # what the form offers: the loaded plugins, with their fields
-                    "types": {n: {"label": p.label, "has_process": p.has_process, "has_restore": p.has_restore,
+                    "types": {n: {"label": p.label, "has_process": p.has_process, "has_compose": p.has_compose,
+                                  "has_restore": p.has_restore,
                                   "fields": [_field_dict(f) for f in p.fields()]}
                               for n, p in plugins.registry().plugins.items()},
                     "default_type": plugins.DEFAULT_TYPE,

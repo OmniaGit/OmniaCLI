@@ -49,7 +49,7 @@
         <label>Package name</label><input type="text" data-k="package.name" class="mono" placeholder="the Package of the .deb, e.g. api-server" title="The name dpkg knows it by: a .deb of another package is refused">
         <label>Package public key</label><input type="text" data-k="package.public_key" class="mono" placeholder="ed25519:… (omniacli package-key prints it)" title="The key the checksum file must be signed with: an unsigned or otherwise signed package is not installed">
         <label>Restart with</label>
-        <select data-k="restart.type"><option value="systemd">systemd</option><option value="initd">init.d</option><option value="process" class="process-option">OmniaCLI starts it itself</option></select>
+        <select data-k="restart.type"><option value="systemd">systemd</option><option value="initd">init.d</option><option value="process" class="process-option">OmniaCLI starts it itself</option><option value="compose" class="compose-option">Docker Compose</option></select>
         <label>Service name</label><input type="text" data-k="restart.service">
         <label>Use sudo -n</label><input type="checkbox" data-k="restart.sudo">
         <label>Auto update</label><input type="checkbox" data-k="auto_update.enabled">
@@ -96,7 +96,7 @@ typeSelect.value = MODEL.server.type || MODEL.default_type;
 if (!typeSelect.value) typeSelect.selectedIndex = 0;
 // an existing server keeps its type (a clone may change it)
 typeSelect.disabled = !!MODEL.original;
-const currentType = () => MODEL.types[typeSelect.value] || {label: "", fields: [], has_process: false};
+const currentType = () => MODEL.types[typeSelect.value] || {label: "", fields: [], has_process: false, has_compose: false};
 const get = (obj, path) => path.split(".").reduce((o, k) => (o == null ? undefined : o[k]), obj);
 function set(obj, path, value) {
   const keys = path.split("."), last = keys.pop();
@@ -263,6 +263,11 @@ function processFields(box) {
   box.querySelector(".process-option").disabled = !type.has_process;
   box.querySelector(".process-option").textContent = `OmniaCLI starts ${type.label || "it"} itself`;
   if (!type.has_process && restartType.value === "process") restartType.value = "systemd";
+  // compose: only a type that runs in a compose project; the service is its folder
+  box.querySelector(".compose-option").disabled = !type.has_compose;
+  if (!type.has_compose && restartType.value === "compose") restartType.value = "systemd";
+  box.querySelector('[data-k="restart.service"]').placeholder =
+    restartType.value === "compose" ? "the project's folder, e.g. /srv/odooplm-19" : "";
   const process = restartType.value === "process";
   for (const key of ["restart.service", "restart.sudo", "log_file", "run_as"]) {
     box.querySelector(`[data-k="${key}"]`).disabled = process;

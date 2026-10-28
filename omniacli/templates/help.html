@@ -249,9 +249,10 @@ fields.</p>
     config. Empty: the port of the config. It applies at the next Start or Restart.</td></tr>
   <tr><td>odoo-bin</td><td>the <span class="mono">odoo-bin</span> used by <strong>Update modules</strong> (a chosen
     list of modules) and by restart type <em>process</em>. Empty: the first repository that has one.</td></tr>
-  <tr><td>Restart with</td><td>how Odoo is restarted, started and stopped: see the three configurations below.</td></tr>
+  <tr><td>Restart with</td><td>how Odoo is restarted, started and stopped: see the four configurations below.</td></tr>
   <tr><td>Service name</td><td>the systemd unit or the init.d script, for example
-    <span class="mono">odoo-customer-test</span>.</td></tr>
+    <span class="mono">odoo-customer-test</span>; with Docker Compose, the project's folder, for example
+    <span class="mono">/srv/odooplm-19</span>.</td></tr>
   <tr><td>Use sudo -n</td><td>run the service command through <span class="mono">sudo -n</span> (no password prompt:
     sudoers must allow it, see below).</td></tr>
   <tr><td>Update changed modules</td><td>after a pull, update the modules whose files changed
@@ -277,7 +278,7 @@ fields.</p>
 <p>A working copy with uncommitted changes is refused by a pull, except on a <strong>test instance without auto
 update</strong>: there someone may be working, so the changes are kept (and git refuses to overwrite them).</p>
 
-<h3>The three restart configurations</h3>
+<h3>The four restart configurations</h3>
 <table class="help-table">
   <tr><th>Restart with</th><th>What OmniaCLI does</th><th>Needs</th></tr>
   <tr><td>systemd</td><td><span class="mono">systemctl --no-ask-password restart|start|stop &lt;service&gt;</span>; the
@@ -287,6 +288,13 @@ update</strong>: there someone may be working, so the changes are kept (and git 
   <tr><td>process</td><td>OmniaCLI starts <span class="mono">odoo-bin -c &lt;config&gt;</span> itself, in the instance's
     venv, and stops it with a signal; Odoo outlives a restart of OmniaCLI. It refuses to start when another process
     already runs with the same config. No service name, no Run as.</td><td>nothing: it runs as OmniaCLI's user.</td></tr>
+  <tr><td>Docker Compose</td><td><span class="mono">docker compose --project-directory &lt;folder&gt;</span>:
+    Restart is <span class="mono">up -d</span> (a changed <span class="mono">.env</span> or image makes its containers
+    again) then <span class="mono">restart</span>, Start <span class="mono">up -d</span>, Stop
+    <span class="mono">stop</span>; the pages show the project's state (<span class="mono">ps -a</span>: active when
+    every container runs, partial, inactive). Only for a type that runs in Docker Compose.</td><td>with sudo, a
+    sudoers line per command and folder; without sudo, OmniaCLI's user in group docker (which is as good as
+    root).</td></tr>
 </table>
 <p>The sudoers lines go in <span class="mono">/etc/sudoers.d/omniacli</span> (the package installs it with examples,
 all commented); a failed check prints the exact lines. Examples, with your service names and paths:</p>
@@ -294,6 +302,10 @@ all commented); a failed check prints the exact lines. Examples, with your servi
 omniacli ALL=(root) NOPASSWD: /usr/bin/systemctl --no-ask-password start odoo-customer-test
 omniacli ALL=(root) NOPASSWD: /usr/bin/systemctl --no-ask-password stop odoo-customer-test
 omniacli ALL=(root) NOPASSWD: /etc/init.d/odoo-customer-test restart
+omniacli ALL=(root) NOPASSWD: /usr/bin/docker compose --project-directory /srv/odooplm-19 up -d
+omniacli ALL=(root) NOPASSWD: /usr/bin/docker compose --project-directory /srv/odooplm-19 restart
+omniacli ALL=(root) NOPASSWD: /usr/bin/docker compose --project-directory /srv/odooplm-19 stop
+omniacli ALL=(root) NOPASSWD: /usr/bin/docker compose --project-directory /srv/odooplm-19 ps -a --format json
 omniacli ALL=(odoo) NOPASSWD:SETENV: /opt/odoo/venvs/odoo18/bin/
 omniacli ALL=(odoo) NOPASSWD:SETENV: /usr/bin/psql</pre>
 <p>The last two lines are for <strong>Run as</strong> <span class="mono">odoo</span>: the first allows the programs of

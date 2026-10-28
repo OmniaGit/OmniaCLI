@@ -14,7 +14,8 @@ OmniaCLI keeps working across its versions for a given PLUGIN_API.
 
 The core does, for every type, what is common: the git repositories (pull,
 pending commits, merge of test into production), the service (restart, start,
-stop of a systemd or init.d service, or a process OmniaCLI starts itself), the
+stop of a systemd or init.d service, of a Docker Compose project for a type
+that runs in one (has_compose), or a process OmniaCLI starts itself), the
 jobs, the auto update, the log page, the users and the links. The plugin does
 what only its type knows: its own settings of an instance, its checks, what
 follows a pull, the backup, and the command of the process OmniaCLI starts.
@@ -441,6 +442,13 @@ class ServicePlugin(ABC):
     @property
     def has_process(self) -> bool:
         return type(self).process_command is not ServicePlugin.process_command
+
+    @property
+    def has_compose(self) -> bool:
+        """True: the type runs in a Docker Compose project, and its
+        instances may have restart type compose (the service is the
+        project's folder)."""
+        return False
 
     @property
     def has_restore(self) -> bool:
