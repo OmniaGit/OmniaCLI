@@ -170,6 +170,8 @@ case "$1" in
         apply_service_user "$(service_user)"
         build_venv
         create_config
+        # the plugins installed from the Plugins page, into the new venv
+        [ -x "$VENV/bin/omniacli" ] && "$VENV/bin/omniacli" plugin-install --all || true
         ;;
     abort-upgrade|abort-remove|abort-deconfigure)
         ;;

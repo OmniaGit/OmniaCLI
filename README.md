@@ -1272,6 +1272,51 @@ init.d service, nothing else: what an install without plugins has) and
 **Odoo** (`omniacli/odoo`, which imports only `plugin_api`). The core imports
 neither: it reaches them through the contract only.
 
+#### Plugins published for download
+
+The **Plugins** page also lists the plugins published for download, and an
+admin installs or updates one with a button. The list comes from an index on
+the download server, set in the main configuration (which only root writes):
+
+```yaml
+plugins:
+  index: https://www.omniasolutions.website/download/omniacli-plugins.json
+  public_key: "ed25519:..."   # without it nothing can be installed
+```
+
+- the index (`{"format": 1, "plugins": [{"name", "label", "description",
+  "file"}]}`) and each plugin's wheel are believed only with their signed
+  manifest (`.json`, `.json.sig`, the format of the signed packages,
+  `omniacli/packagesign.py`), checked with `public_key`. The wheel is
+  published under a name without version (`file`); its manifest gives its
+  version and, as `package`, the wheel's own file name, which pip needs.
+  Whoever controls the download server can withhold a plugin, not hand out
+  one of his own nor change its version;
+- **Install** downloads the wheel into `/var/lib/omniacli/plugins/<name>/`,
+  checked, then runs the root helper `omniacli plugin-install <name>` through
+  sudo. The helper copies the files into a folder of root's own, checks them
+  again with the key it reads itself from `/etc/omniacli/omniacli.yaml`, and
+  installs the copy into the venv (`pip --no-deps --no-index`). It takes a
+  plugin name only, no other configuration: the user the service runs as
+  cannot get into the venv a file the key did not sign. It needs, in
+  `/etc/sudoers.d/omniacli` (the page prints it):
+
+  ```
+  omniacli ALL=(root) NOPASSWD: /opt/omniacli/venv/bin/omniacli plugin-install *
+  ```
+
+- the plugin is loaded when OmniaCLI restarts: **Restart OmniaCLI** on the
+  page (when no job runs) makes it exit, and systemd starts it again
+  (`Restart=on-failure`);
+- every upgrade of the package builds a new venv: postinst then runs
+  `omniacli plugin-install --all`, which installs again every plugin kept in
+  `/var/lib/omniacli/plugins` (checked again); the purge removes them.
+
+The publisher writes the index and signs the files (a release script, as
+the API server's `Setup/release.py`, or `omniacli package-sign --version`):
+the wheel, its `.sha256`, `.json` and `.json.sig`, then the index with its
+own.
+
 ## Acknowledgements
 
 OmniaCLI's work on the Odoo instances rests on

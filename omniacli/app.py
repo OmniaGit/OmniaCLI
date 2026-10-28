@@ -30,7 +30,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.background import BackgroundTask
 from starlette.requests import HTTPConnection
 
-from . import checks, consumer, disks, linkcopy, ops, packages, plugins, puller, publisher, schedules, selflog, shell, tunnel
+from . import checks, consumer, disks, linkcopy, ops, packages, plugins, pluginstore, puller, publisher, schedules, selflog, shell, tunnel
 from .accesslog import AccessLog
 from .diskhistory import DiskHistory, DiskRecorder
 from .auth import ROLES as ACCESS_ROLES
@@ -1575,8 +1575,65 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         return _TEMPLATES.TemplateResponse(
             request, "plugins.html",
             {"found": found, "count": count, "missing": missing, "api_version": PLUGIN_API,
-             "group": ENTRY_POINT_GROUP, "route_errors": route_errors},
+             "group": ENTRY_POINT_GROUP, "route_errors": route_errors,
+             "source": settings.plugin_source,
+             "sudoers": pluginstore.sudoers_line(pwd.getpwuid(os.getuid()).pw_name),
+             "systemd": bool(os.environ.get("INVOCATION_ID"))},
         )
+
+    def installed_plugins() -> dict[str, str]:
+        """{plugin name: version of its package} of the plugins found."""
+        return {i.name: i.version for i in plugins.registry().found}
+
+    @app.get("/api/plugins/available", dependencies=[Depends(admin)])
+    async def plugins_available():
+        """The plugins published for download (signed), with the version loaded here."""
+        try:
+            found = await pluginstore.available(settings.plugin_source)
+        except pluginstore.StoreError as exc:
+            return refuse(str(exc), status.HTTP_502_BAD_GATEWAY)
+        loaded = installed_plugins()
+        return {"index": settings.plugin_source.index,
+                "plugins": [{**p, "installed": loaded.get(p["name"])} for p in found]}
+
+    @app.post("/api/plugins/{name}/install")
+    async def plugin_install(name: str, user: Principal = Depends(admin)):
+        """Download a published plugin, check it, and install it through the
+        root helper; OmniaCLI loads it once restarted."""
+        try:
+            found = {p["name"]: p for p in await pluginstore.available(settings.plugin_source)}
+        except pluginstore.StoreError as exc:
+            return refuse(str(exc), status.HTTP_502_BAD_GATEWAY)
+        plugin = found.get(name)
+        if plugin is None:
+            return refuse(f"The index publishes no plugin {name}", status.HTTP_404_NOT_FOUND)
+        if plugin.get("error"):
+            return refuse(f"{name}: {plugin['error']}")
+
+        async def action(job):
+            manifest = await pluginstore.download(job, settings.plugin_source, plugin,
+                                                  pluginstore.plugins_dir(settings.jobs_dir))
+            await ops.run(job, pluginstore.install_command(name), timeout=pluginstore.INSTALL_TIMEOUT)
+            job.result = {"plugin": name, "version": manifest["version"], "restart": True}
+            job.log(f"{name} {manifest['version']} installed: it is loaded when OmniaCLI restarts "
+                    "(Restart OmniaCLI on the Plugins page)")
+
+        job = jobs.submit(f"Install plugin {name} {plugin.get('version', '')}".strip(), ["omniacli/plugins"],
+                          f"manual: {user}", action)
+        return {"job": job.id}
+
+    @app.post("/api/omniacli/restart")
+    async def omniacli_restart(user: Principal = Depends(admin)):
+        """Restart OmniaCLI (a plugin installed is loaded): it exits, and
+        systemd starts it again (Restart=on-failure)."""
+        if not os.environ.get("INVOCATION_ID"):
+            return refuse("OmniaCLI is not run by systemd here: restart it yourself")
+        running = [j.title for j in jobs.recent(500) if not j.finished_flag]
+        if running:
+            return refuse(f"Jobs are running ({', '.join(running[:3])}): restart when they end")
+        logging.getLogger(__name__).warning("restart asked by %s", user)
+        asyncio.get_running_loop().call_later(1.0, os._exit, 75)
+        return {"ok": True}
 
     @app.get("/access", dependencies=[Depends(admin)])
     async def access_page(request: Request, q: str = ""):

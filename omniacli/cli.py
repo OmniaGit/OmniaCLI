@@ -134,6 +134,26 @@ def _package_verify(args) -> int:
     return 0
 
 
+def _plugin_install(args) -> int:
+    """As root (sudo, postinst): a downloaded plugin into this venv, checked
+    with the key of the main configuration (pluginstore.py)."""
+    from . import pluginstore
+
+    if args.all:
+        for line in pluginstore.install_all():
+            print(f"omniacli: {line}")
+        return 0
+    if not args.name:
+        print("plugin-install: name a plugin, or --all", file=sys.stderr)
+        return 2
+    try:
+        print(f"installed {pluginstore.install(args.name)}")
+    except pluginstore.StoreError as exc:
+        print(f"plugin-install: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="omniacli")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -177,6 +197,13 @@ def main(argv: list[str] | None = None) -> int:
     verify.add_argument("--public-key", required=True, help="ed25519:... as package-key printed it")
     verify.add_argument("file")
     verify.set_defaults(func=_package_verify)
+
+    plugin = sub.add_parser("plugin-install",
+                            help="as root: install a downloaded plugin, checked with plugins.public_key "
+                                 "of /etc/omniacli/omniacli.yaml")
+    plugin.add_argument("name", nargs="?", help="the plugin, as the Plugins page downloaded it")
+    plugin.add_argument("--all", action="store_true", help="every plugin downloaded (after a new venv)")
+    plugin.set_defaults(func=_plugin_install)
 
     check = sub.add_parser("check-config", help="run the Test & activate checks on every server")
     check.add_argument("-c", "--config", default="omniacli.yaml")

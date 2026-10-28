@@ -17,7 +17,7 @@ case "$1" in
         # backups stay
         rm -rf /var/lib/omniacli/jobs /var/lib/omniacli/logs /var/lib/omniacli/scripts \
             /var/lib/omniacli/pullers /var/lib/omniacli/publications /var/lib/omniacli/connections \
-            /var/lib/omniacli/packages
+            /var/lib/omniacli/packages /var/lib/omniacli/plugins
         rm -f /var/lib/omniacli/servers.yaml /var/lib/omniacli/servers.yaml.bak \
             /var/lib/omniacli/servers.yaml.tmp \
             /var/lib/omniacli/users.yaml /var/lib/omniacli/users.yaml.tmp \

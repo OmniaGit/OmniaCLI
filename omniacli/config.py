@@ -314,6 +314,8 @@ class Settings:
     # readable by its owner only: it holds the keys)
     connections_file: Path | None = None
     connections: dict[str, PullerConnection] = field(default_factory=dict)
+    # the plugins published for download (main configuration, plugins:)
+    plugin_source: PluginSource = field(default_factory=lambda: PluginSource())
     token_roles: dict[str, str] = field(default_factory=dict)
     fixed: Access = field(default_factory=Access)
     web: Access = field(default_factory=Access)
@@ -1185,6 +1187,38 @@ def save_connections(path: Path, connections: dict[str, PullerConnection]) -> No
     os.replace(tmp, path)
 
 
+# where the plugins published for download are listed (pluginstore.py)
+DEFAULT_PLUGIN_INDEX = "https://www.omniasolutions.website/download/omniacli-plugins.json"
+
+
+@dataclass
+class PluginSource:
+    """The index of the plugins published for download, and the public key
+    their manifests are signed with (empty: none can be installed). Set in
+    the main configuration, which only root writes: the root helper that
+    installs a plugin reads the key from there (pluginstore.py)."""
+
+    index: str = DEFAULT_PLUGIN_INDEX
+    public_key: str = ""
+
+
+def parse_plugin_source(data) -> PluginSource:
+    data = data if isinstance(data, dict) else {}
+    index = str(data.get("index") or DEFAULT_PLUGIN_INDEX).strip()
+    parts = urlsplit(index)
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        raise ConfigError(f"plugins.index: {index!r} is not an http(s) URL")
+    key = str(data.get("public_key") or "").strip()
+    if key:
+        from .packagesign import SigningError, parse_public_key  # it imports cryptography
+
+        try:
+            parse_public_key(key)
+        except SigningError as exc:
+            raise ConfigError(f"plugins.public_key: {exc}") from None
+    return PluginSource(index, key)
+
+
 def parse_settings(data: dict, base_dir: Path = Path(".")) -> Settings:
     fixed = parse_auth(data.get("auth") or {})
     servers_file = Path(data.get("servers_file") or "servers.yaml")
@@ -1240,6 +1274,7 @@ def parse_settings(data: dict, base_dir: Path = Path(".")) -> Settings:
         publications=load_publications(publications_file),
         connections_file=connections_file,
         connections=load_connections(connections_file),
+        plugin_source=parse_plugin_source(data.get("plugins")),
         fixed=fixed,
     )
     settings.set_web_access(load_access(users_file))

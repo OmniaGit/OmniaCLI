@@ -28,6 +28,68 @@ as they are, without actions, until it is back.</p>
   </table>
   </div>
 </div>
+<h2 style="margin-top: 24px">Published for download</h2>
+<p class="muted">The plugins listed by <span class="mono">{{ source.index }}</span>, believed only when their signed manifest verifies with
+<span class="mono">plugins.public_key</span> of the main configuration{% if not source.public_key %} (<strong>not set</strong>: nothing can be installed){% endif %}.
+<strong>Install</strong> downloads one, checks it, and installs it through the root helper; it is loaded when OmniaCLI restarts, and installed again at every upgrade.
+The helper needs, in <span class="mono">/etc/sudoers.d/omniacli</span>:</p>
+<pre class="console mono" style="white-space: pre-wrap">{{ sudoers }}</pre>
+<div id="store-error" class="banner" hidden></div>
+<div class="panel">
+  <div class="scroll">
+  <table id="store">
+    <tr><th>Type</th><th>Name</th><th>Published</th><th>Here</th><th></th></tr>
+    <tr><td colspan="5" class="muted">Reading the index…</td></tr>
+  </table>
+  </div>
+</div>
+<div class="actions">
+  <button type="button" id="restart" {% if not systemd %}disabled title="OmniaCLI is not run by systemd here: restart it yourself"{% endif %}>Restart OmniaCLI</button>
+  <span class="muted">to load a plugin just installed: running jobs must end first</span>
+</div>
+<script>
+(function () {
+  const table = document.getElementById("store"), errorBox = document.getElementById("store-error");
+  const show = (message) => { errorBox.textContent = message; errorBox.hidden = !message; };
+  function cell(row, text, cls) { const td = row.insertCell(); td.textContent = text; if (cls) td.className = cls; return td; }
+  async function load() {
+    const resp = await fetch("{{ prefix }}/api/plugins/available", {headers: {Accept: "application/json"}});
+    const data = await resp.json().catch(() => ({}));
+    while (table.rows.length > 1) table.deleteRow(1);
+    if (!resp.ok) { show(data.error || data.detail || "Error " + resp.status); return; }
+    if (!data.plugins.length) { cell(table.insertRow(), "The index lists no plugins.", "muted").colSpan = 5; return; }
+    for (const p of data.plugins) {
+      const row = table.insertRow();
+      cell(row, p.name, "mono"); cell(row, p.label + (p.description ? " — " + p.description : ""));
+      cell(row, p.error ? p.error : `${p.version}${p.built ? ", built " + p.built : ""}`, p.error ? "error" : "mono");
+      cell(row, p.installed || "not installed", p.installed ? "mono" : "muted");
+      const td = row.insertCell();
+      if (!p.error && p.installed !== p.version) {
+        const button = document.createElement("button");
+        button.type = "button"; button.textContent = p.installed ? "Update" : "Install";
+        button.onclick = async () => {
+          if (!confirm(`${button.textContent} the plugin ${p.name} ${p.version}?`)) return;
+          show("");
+          const r = await fetch(`{{ prefix }}/api/plugins/${encodeURIComponent(p.name)}/install`, {method: "POST"});
+          const d = await r.json().catch(() => ({}));
+          if (r.ok) location.href = "{{ prefix }}/jobs/" + d.job; else show(d.error || d.detail || "Error " + r.status);
+        };
+        td.appendChild(button);
+      }
+    }
+  }
+  document.getElementById("restart").onclick = async () => {
+    if (!confirm("Restart OmniaCLI? The pages answer again in a few seconds.")) return;
+    show("");
+    const r = await fetch("{{ prefix }}/api/omniacli/restart", {method: "POST"});
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { show(d.error || d.detail || "Error " + r.status); return; }
+    show("OmniaCLI is restarting…");
+    setTimeout(() => location.reload(), 8000);
+  };
+  load();
+})();
+</script>
 {% if missing %}
 <h2>Servers without their plugin</h2>
 <div class="panel">
