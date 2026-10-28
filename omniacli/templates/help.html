@@ -385,6 +385,13 @@ user: <span class="mono">OMNIACLI_USER=&lt;user&gt;</span> in <span class="mono"
   <li><strong>A development or demo machine</strong>: one test instance, restart <em>process</em>, an HTTP port per
     instance when several run on the same machine; no sudo needed.</li>
   <li><strong>An old server with init.d scripts</strong>: restart <em>init.d</em>; Restart only, no Start and Stop.</li>
+  <li><strong>An Odoo 18 or later in Docker Compose</strong> (a DockerOdooPLM stack, or the official image): type
+    <em>Odoo (Docker Compose)</em>, restart <em>Docker Compose</em> with the project's folder, the database, the Odoo
+    and database services (<span class="mono">odoo</span> and <span class="mono">db</span> by default), the port the
+    machine publishes Odoo on; the repositories are the addons folders the project mounts. The project must be
+    root's (see above). Backup and restore use <span class="mono">odoo db</span>, the update of the changed modules
+    <span class="mono">click-odoo-update</span> with OmniaCLI's own tools; <strong>Pull image</strong> gets a newer
+    image. Not yet: Copy production to test, passwords to admin, a shared filestore.</li>
   <li><strong>A test instance someone develops on</strong>: auto update off, so a pull keeps their uncommitted
     changes.</li>
 </ul>

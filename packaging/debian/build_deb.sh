@@ -126,7 +126,8 @@ install -d "$PKG/DEBIAN" "$PKG/opt/omniacli/dist" "$PKG/opt/omniacli/requirement
     "$PKG/usr/bin" "$PKG/usr/lib/systemd/system" "$PKG/usr/share/omniacli" \
     "$PKG/usr/share/doc/omniacli" "$PKG/etc/default" "$PKG/etc/sudoers.d"
 install -m 644 "$WORK"/dist/omniacli-*.whl "$PKG/opt/omniacli/dist/"
-install -m 644 "$SRC"/packaging/debian/requirements/py*.txt "$PKG/opt/omniacli/requirements/"
+install -m 644 "$SRC"/packaging/debian/requirements/py*.txt "$SRC"/packaging/debian/requirements/tools.txt \
+    "$PKG/opt/omniacli/requirements/"
 ln -s /opt/omniacli/venv/bin/omniacli "$PKG/usr/bin/omniacli"
 install -m 644 "$FILES/omniacli.service" "$PKG/usr/lib/systemd/system/omniacli.service"
 install -m 644 "$FILES/omniacli.yaml.in" "$PKG/usr/share/omniacli/omniacli.yaml.in"

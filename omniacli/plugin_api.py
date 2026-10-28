@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import Any, Callable, Union
 
 from . import ops as _ops
+from .composehelper import TOOLS as COMPOSE_TOOLS
 from .config import ROLES, SERVER_NAME, USER_NAME, ConfigError, Instance, Repository, Server
 from .jobs import Job, JobFailed
 
@@ -65,7 +66,7 @@ __all__ = [
     "ConfigError", "Instance", "Repository", "Server", "Job", "JobFailed",
     "run", "capture", "as_user", "restart", "start", "stop", "service_state", "base_env", "system_user",
     "ROLES", "SERVER_NAME", "USER_NAME", "Field", "FormButton", "Action", "ActionRefused", "Host",
-    "Discovered",
+    "Discovered", "COMPOSE_TOOLS",
 ]
 
 

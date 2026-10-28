@@ -23,8 +23,9 @@ _logger = logging.getLogger(__name__)
 # the type of a server whose mapping names none: every server before plugins
 DEFAULT_TYPE = "odoo"
 # the plugins that come inside the omniacli package: the generic type (git
-# and a service, nothing else: what an install without plugins has) and Odoo
-BUILTIN = ("omniacli.generic:GenericPlugin", "omniacli.odoo:OdooPlugin")
+# and a service, nothing else: what an install without plugins has), Odoo,
+# and Odoo in Docker Compose
+BUILTIN = ("omniacli.generic:GenericPlugin", "omniacli.odoo:OdooPlugin", "omniacli.docker:DockerPlugin")
 PLUGIN_NAME = re.compile(r"[a-z][a-z0-9_]{0,31}")
 
 

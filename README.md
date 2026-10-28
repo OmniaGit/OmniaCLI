@@ -893,7 +893,7 @@ as its arguments, never in a script's text:
 | `port <service> <port>` | where the machine publishes the container's port |
 | `version <odoo service>` | `odoo --version` |
 | `dump <odoo service> <db> [--no-filestore]` | `odoo db dump` into a file of the container, then to the output: to the output itself, Odoo 19 and 20 ignore `--no-filestore` (`odoo/cli/db.py`) |
-| `load <odoo service> <db> [--neutralize]` | the zip read from the input into a file of the container, `odoo db load --force`, the file removed |
+| `load <odoo service> <db> [--neutralize]` | in a container of its own of the service (`run --rm`, which starts the database it depends on: the service may be stopped), the zip read from the input into a file, `odoo db load --force` |
 | `update <odoo service> <db>` | `click-odoo-update`: in a container of its own of the service (`run --rm --no-deps`), OmniaCLI's tools mounted read only |
 | `update <odoo service> <db> --modules a,b` | `odoo -u a,b --stop-after-init --no-http` in the service's container |
 | `psql <database service> <db>` | `psql` on the caller's terminal (the web shell) |
@@ -1047,6 +1047,65 @@ kept next to it (`.pid`).
 - Odoo runs as the user of OmniaCLI: that user needs write access to Odoo's
   `data_dir` (filestore, sessions).
 - Odoo is not started at boot: a Restart starts it.
+
+## Odoo in Docker Compose (type `docker`)
+
+A server of type **Odoo (Docker Compose)** (`omniacli/docker`, built in) is
+an Odoo 18 or later that runs in a compose project: a
+[DockerOdooPLM](https://github.com/OmniaGit/DockerOdooPLM) stack or the
+official `odoo` image alike. Its restart type is `compose`, the service the
+project's folder, and every docker command goes through the root helper
+(see *Docker Compose: who may change the project is root* under
+Permissions, which also says how to secure the project).
+
+```yaml
+servers:
+  plm19:
+    type: docker
+    test:
+      database: odooplm
+      odoo_service: odoo        # default odoo
+      db_service: db            # default db
+      http_port: 8069           # where the machine publishes Odoo's 8069
+      update_modules: true
+      restart: {type: compose, service: /srv/odooplm-19}
+      repositories:
+        - {name: addons, path: /srv/odooplm-19/addons-extra, branch: 19.0}
+```
+
+| What | How |
+|---|---|
+| Checks | Odoo 18 or later (`odoo --version`), the HTTP port docker publishes, OmniaCLI's tools, the two services; the core's checks of the project and of the sudoers line |
+| Git pull + restart | pull, `click-odoo-update` of the changed modules (the tools mounted into a container of its own), restart |
+| Update modules | the changed modules, or those named (`odoo -u … --stop-after-init`), and a restart if asked |
+| Pull image | `docker compose pull`, then `up -d`: a newer image (a new DockerOdooPLM build) |
+| Backup | `odoo db dump`, `<db>_<time>.zip` (`_nofilestore` without filestore: from Odoo 19, Odoo 18 refuses it) |
+| Restore | refused for a backup of another Odoo version; stop, `odoo db load --force` (neutralized by default) in a container of its own, update of the changed modules, start |
+| Log | `docker compose logs` of the Odoo service |
+| psql | `psql` in the database service |
+
+The repositories are the addons folders the project mounts into the
+container (`./addons-extra` of DockerOdooPLM): OmniaCLI pulls them on the
+machine, and the container sees the new code.
+
+Not in it yet: Copy production to test, setting every password to admin, a
+filestore shared with production, discover, the CPU and memory charts.
+
+OmniaCLI's tools (click-odoo-contrib and what it needs, pure Python, pinned
+in `packaging/debian/requirements/tools.txt`) are installed by the package's
+postinst into `/opt/omniacli/venv/omniacli-tools`, for the Python of the
+images (3.12), whatever the machine's Python. Running from the sources,
+install them so:
+
+```bash
+<venv>/bin/pip install --no-deps --only-binary=:all: --python-version 3.12 \
+    --ignore-requires-python --target <venv>/omniacli-tools \
+    -r packaging/debian/requirements/tools.txt
+```
+
+`--ignore-requires-python`: an older pip (20.3, Debian 11's) checks a
+package's Python against the machine's, not against `--python-version`
+(click 8.5 needs 3.10).
 
 ## A service installed from a signed Debian package
 

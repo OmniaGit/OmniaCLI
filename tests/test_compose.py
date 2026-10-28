@@ -339,7 +339,9 @@ def test_the_odoo_actions(tmp_path, monkeypatch):
     assert dump[-2:] == ["sh", "DB_prod"] and "DB_prod" not in dump[5]
     assert "--no-filestore" not in dump[5] and "--no-filestore" in one("dump", "odoo", "DB_prod", "--no-filestore")[5]
     load = one("load", "odoo", "DB_test", "--neutralize")
-    assert "--neutralize" in load[5] and load[-1] == "DB_test" and "cat >" in load[5]
+    # in a container of its own: the service may be stopped
+    assert load[:7] == ["run", "--rm", "-T", "--entrypoint", "sh", "odoo", "-c"]
+    assert "--neutralize" in load[7] and load[-2:] == ["sh", "DB_test"] and "cat >" in load[7]
     with pytest.raises(composehelper.HelperError, match="holds no click-odoo-update"):
         one("update", "odoo", "DB_test")
     (tmp_path / "tools" / "bin").mkdir(parents=True)

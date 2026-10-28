@@ -41,7 +41,8 @@ command of the caller's, and runs docker with an environment of its own:
                                          odoo db dump: the zip to the output
     load <odoo service> <db> [--neutralize]
                                          odoo db load --force of the zip read
-                                         from the input
+                                         from the input, in a container of
+                                         its own (the service may be stopped)
     update <odoo service> <db>           click-odoo-update, in a container of
                                          the service with OmniaCLI's tools
                                          (TOOLS) mounted read only
@@ -282,8 +283,11 @@ def commands(project: Path, action: str, args: list[str]) -> list[list[str]]:
         # load <odoo service> <database> [--neutralize]: the zip from the input
         if len(args) not in (2, 3) or args[2:] not in ([], ["--neutralize"]):
             raise HelperError("usage: load <service> <database> [--neutralize]")
+        # in a container of its own: the Odoo service may be stopped (a
+        # restore loads with Odoo stopped), run starts the database it needs
         script = "load-neutralize" if args[2:] else "load"
-        return [_script(service(project, args[0]), script, _database(args[1]))]
+        return [["run", "--rm", "-T", "--entrypoint", "sh", service(project, args[0]), "-c", SCRIPTS[script],
+                 "sh", _database(args[1])]]
     if action == "update":
         # update <odoo service> <database> [--modules a,b]: the changed
         # modules (click-odoo-update, in a container of its own with the

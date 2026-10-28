@@ -1,0 +1,11 @@
+# OmniaCLI's tools for the Odoo instances in Docker Compose: click-odoo-update,
+# mounted read only into a container of the instance's own image by the
+# compose helper (omniacli/composehelper.py, TOOLS). Pure Python, installed
+# by postinst into /opt/omniacli/venv/omniacli-tools for the Python of the
+# images (3.12, Odoo 18 to 20), whatever the machine's Python
+# (--python-version 3.12 --ignore-requires-python).
+# Written by hand, not by make_locks.sh: the versions tried on odoo:20.0.
+click==8.5.0
+click-odoo==1.8.0
+click-odoo-contrib==1.24
+manifestoo-core==1.16.1

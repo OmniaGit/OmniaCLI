@@ -244,7 +244,7 @@ async def test_the_form_of_a_plugin(rich_client, env):
     assert page.status_code == 200
     model = json.loads(page.text.split("const MODEL = ", 1)[1].split(";\n", 1)[0])
     assert model["server"]["type"] == "rich" and model["server"]["test"]["flavour"] == "spicy"
-    assert sorted(model["types"]) == ["generic", "odoo", "rich"]
+    assert sorted(model["types"]) == ["docker", "generic", "odoo", "rich"]
     flavour, port = model["types"]["rich"]["fields"]
     assert flavour["required"] and flavour["buttons"][0]["route"] == "form/taste"
     assert port["restart_types"] == ["process"] and not model["types"]["rich"]["has_process"]

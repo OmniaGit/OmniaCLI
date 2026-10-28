@@ -74,7 +74,7 @@ def job():
 def test_the_odoo_plugin_is_built_in():
     found = plugins.load(entry_points=[])
     assert [(i.name, i.source, i.error) for i in found.found] == [
-        ("generic", "built-in", None), ("odoo", "built-in", None)]
+        ("generic", "built-in", None), ("odoo", "built-in", None), ("docker", "built-in", None)]
     assert found.get("odoo").label == "Odoo"
 
 
@@ -123,8 +123,8 @@ def test_the_contract_is_checked():
 def test_a_type_is_served_once():
     found = plugins.load(entry_points=[FakeEntryPoint("odoo", type("Odoo2", (Dummy,), {"name": "odoo"})),
                                        FakeEntryPoint("dummy", Dummy)])
-    assert [i.error for i in found.found] == [None, None, "another plugin already serves the type odoo", None]
-    assert sorted(found.plugins) == ["dummy", "generic", "odoo"]
+    assert [i.error for i in found.found] == [None, None, None, "another plugin already serves the type odoo", None]
+    assert sorted(found.plugins) == ["docker", "dummy", "generic", "odoo"]
 
 
 def test_a_server_without_its_plugin_is_kept(without_plugins, tmp_path):

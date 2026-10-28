@@ -35,8 +35,8 @@ test = ["pytest", "pytest-asyncio", "httpx"]
 omniacli = "omniacli.cli:main"
 
 [tool.setuptools]
-# omniacli.odoo: the Odoo plugin, built in
-packages = ["omniacli", "omniacli.odoo"]
+# omniacli.odoo, omniacli.docker: the Odoo plugins, built in
+packages = ["omniacli", "omniacli.odoo", "omniacli.docker"]
 
 [tool.setuptools.package-data]
 omniacli = ["templates/*.html", "static/*"]
