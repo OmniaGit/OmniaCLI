@@ -320,3 +320,64 @@ def test_the_logs_action(tmp_path, monkeypatch):
             composehelper.commands(project, "logs", args)
     with pytest.raises(composehelper.HelperError, match="takes no arguments"):
         composehelper.commands(project, "stop", ["--timeout", "0"])
+
+
+def test_the_odoo_actions(tmp_path, monkeypatch):
+    monkeypatch.setattr(composehelper, "services", lambda project: ["odoo", "db"])
+    monkeypatch.setattr(composehelper, "TOOLS", tmp_path / "tools")
+
+    def one(action, *args):
+        found = composehelper.commands(tmp_path, action, list(args))
+        assert len(found) == 1
+        return found[0]
+
+    assert composehelper.commands(tmp_path, "pull", []) == [["pull"], ["up", "-d"]]
+    assert one("version", "odoo")[:5] == ["exec", "-T", "odoo", "sh", "-c"]
+    assert one("port", "odoo", "8069") == ["port", "odoo", "8069"]
+    # the database reaches the shell as $1, never in the script's text
+    dump = one("dump", "odoo", "DB_prod")
+    assert dump[-2:] == ["sh", "DB_prod"] and "DB_prod" not in dump[5]
+    assert "--no-filestore" not in dump[5] and "--no-filestore" in one("dump", "odoo", "DB_prod", "--no-filestore")[5]
+    load = one("load", "odoo", "DB_test", "--neutralize")
+    assert "--neutralize" in load[5] and load[-1] == "DB_test" and "cat >" in load[5]
+    with pytest.raises(composehelper.HelperError, match="holds no click-odoo-update"):
+        one("update", "odoo", "DB_test")
+    (tmp_path / "tools" / "bin").mkdir(parents=True)
+    (tmp_path / "tools" / "bin" / "click-odoo-update").write_text("")
+    update = one("update", "odoo", "DB_test")
+    assert update[:5] == ["run", "--rm", "--no-deps", "-T", "-v"]
+    assert update[5] == f"{tmp_path / 'tools'}:{composehelper.TOOLS_MOUNT}:ro" and update[-1] == "DB_test"
+    assert one("update", "odoo", "DB_test", "--modules", "web,plm_box")[-2:] == ["DB_test", "web,plm_box"]
+    # psql on the caller's terminal: no -T
+    assert one("psql", "db", "DB_test")[:3] == ["exec", "db", "sh"]
+    for action, args, message in (
+            ("dump", ["odoo", "DB; rm -rf /"], "not a database name"),
+            ("dump", ["odoo", "-DB"], "not a database name"),
+            ("dump", ["odoo", "DB", "--format"], "usage"),
+            ("load", ["odoo", "DB", "--force"], "usage"),
+            ("update", ["odoo", "DB", "--modules", "web,Base"], "not a list of module names"),
+            ("update", ["odoo", "DB", "--modules", "web;x"], "not a list of module names"),
+            ("update", ["odoo", "DB", "-u", "web"], "usage"),
+            ("port", ["odoo", "80a"], "usage"),
+            ("version", ["web"], "no service"),
+            ("psql", ["db"], "usage"),
+            ("pull", ["--quiet"], "takes no arguments")):
+        with pytest.raises(composehelper.HelperError, match=message):
+            composehelper.commands(tmp_path, action, args)
+
+
+def test_the_database_connection_is_the_entrypoints(tmp_path):
+    """The PG* variables from HOST, PORT, USER, PASSWORD(_FILE), with the
+    official image's defaults; one set already wins."""
+    import subprocess
+
+    script = composehelper.ODOO_DB + 'echo "$PGHOST $PGPORT $PGUSER $PGPASSWORD"'
+    clean = {"PATH": "/usr/bin:/bin"}
+    out = lambda env: subprocess.run(["sh", "-c", script], env={**clean, **env}, capture_output=True,  # noqa: E731
+                                     text=True, check=True).stdout.split()
+    assert out({}) == ["db", "5432", "odoo", "odoo"]
+    assert out({"HOST": "pg", "PORT": "6543", "USER": "u", "PASSWORD": "p"}) == ["pg", "6543", "u", "p"]
+    assert out({"POSTGRES_USER": "pu", "POSTGRES_PASSWORD": "pp"}) == ["db", "5432", "pu", "pp"]
+    assert out({"HOST": "pg", "PGHOST": "other"})[0] == "other"
+    (tmp_path / "secret").write_text("from-file")
+    assert out({"PASSWORD": "p", "PASSWORD_FILE": str(tmp_path / "secret")})[3] == "from-file"

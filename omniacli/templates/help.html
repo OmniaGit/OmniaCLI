@@ -337,6 +337,27 @@ the new container's. Limit it in the compose file:</p>
       options:
         max-size: "50m"
         max-file: "5"</pre>
+<h3>Docker Compose: what the helper does</h3>
+<p><span class="mono">omniacli compose-helper &lt;folder&gt; &lt;action&gt;</span> takes these actions and nothing else
+(a service must be one of the project's, a database name <span class="mono">[A-Za-z0-9_.-]</span>, a module
+<span class="mono">[a-z0-9_]</span>):</p>
+<table class="help-table">
+  <tr><th>Action</th><th>Runs</th></tr>
+  <tr><td>start, stop, restart, state</td><td><span class="mono">up -d</span>; <span class="mono">stop</span>;
+    <span class="mono">up -d</span> then <span class="mono">restart</span>; <span class="mono">ps -a</span></td></tr>
+  <tr><td>pull</td><td><span class="mono">pull</span>, then <span class="mono">up -d</span></td></tr>
+  <tr><td>logs</td><td>the service's output, the last lines or those since a time</td></tr>
+  <tr><td>port, version</td><td>where the machine publishes a port; <span class="mono">odoo --version</span></td></tr>
+  <tr><td>dump</td><td><span class="mono">odoo db dump</span> (with or without filestore), the zip to the output</td></tr>
+  <tr><td>load</td><td>the zip from the input, <span class="mono">odoo db load --force</span>, neutralized or not</td></tr>
+  <tr><td>update</td><td><span class="mono">click-odoo-update</span> in a container of its own with OmniaCLI's tools
+    mounted read only, or <span class="mono">odoo -u</span> of the modules named</td></tr>
+  <tr><td>psql</td><td><span class="mono">psql</span> in the database service, for the web shell</td></tr>
+</table>
+<p>The database connection is the one the official Odoo image's entrypoint makes, from the container's
+<span class="mono">HOST</span>, <span class="mono">PORT</span>, <span class="mono">USER</span> and
+<span class="mono">PASSWORD</span>; a <span class="mono">db_host</span>... in the Odoo config still wins. No image has to
+carry click-odoo-contrib: OmniaCLI mounts its own.</p>
 <p>The sudoers lines go in <span class="mono">/etc/sudoers.d/omniacli</span> (the package installs it with examples,
 all commented); a failed check prints the exact lines. Examples, with your service names and paths:</p>
 <pre class="console mono">omniacli ALL=(root) NOPASSWD: /usr/bin/systemctl --no-ask-password restart odoo-customer-test

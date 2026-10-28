@@ -878,6 +878,41 @@ services:
         max-file: "5"
 ```
 
+#### Docker Compose: what the helper does
+
+`omniacli compose-helper <folder> <action> [arguments]` takes these actions
+and nothing else; a service must be one of the project's, a database name
+`[A-Za-z0-9_.-]`, a module `[a-z0-9_]`, and they reach the container's shell
+as its arguments, never in a script's text:
+
+| Action | Runs |
+|---|---|
+| `start`, `stop`, `restart`, `state` | `up -d`; `stop`; `up -d` then `restart`; `ps -a --format json` |
+| `pull` | `pull`, then `up -d`: the containers made again with the newer images |
+| `logs <service> --tail <N>` / `--since <time>` | the service's output, each line with its time (N 1 to 10000, the time UTC) |
+| `port <service> <port>` | where the machine publishes the container's port |
+| `version <odoo service>` | `odoo --version` |
+| `dump <odoo service> <db> [--no-filestore]` | `odoo db dump` into a file of the container, then to the output: to the output itself, Odoo 19 and 20 ignore `--no-filestore` (`odoo/cli/db.py`) |
+| `load <odoo service> <db> [--neutralize]` | the zip read from the input into a file of the container, `odoo db load --force`, the file removed |
+| `update <odoo service> <db>` | `click-odoo-update`: in a container of its own of the service (`run --rm --no-deps`), OmniaCLI's tools mounted read only |
+| `update <odoo service> <db> --modules a,b` | `odoo -u a,b --stop-after-init --no-http` in the service's container |
+| `psql <database service> <db>` | `psql` on the caller's terminal (the web shell) |
+
+The zip goes through the helper's input and output: the helper never opens a
+file the caller names. The database connection is the one the official
+Odoo image's entrypoint makes, from the container's `HOST`, `PORT`, `USER`
+and `PASSWORD` (or `PASSWORD_FILE`), with its defaults (`db`, `5432`,
+`odoo`, `odoo`), given as `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`: Odoo
+and click-odoo leave them to libpq when the Odoo config sets no `db_host`...,
+and a config that sets one still wins. `odoo db` and click-odoo find the
+config through `ODOO_RC`, which the image sets.
+
+OmniaCLI's tools are click-odoo-contrib and what it needs (click, click-odoo,
+manifestoo-core: pure Python, pinned), in `omniacli-tools` next to the venv,
+which only root writes. They are mounted into a container of the image the
+instance already runs, so no image has to carry them: a DockerOdooPLM stack
+and a plain `odoo` image alike.
+
 ### Configuration cases
 
 Problems met putting OmniaCLI on an existing Odoo 18 server (Odoo as the

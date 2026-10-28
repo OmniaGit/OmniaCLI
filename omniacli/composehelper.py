@@ -31,9 +31,28 @@ The helper takes a fixed set of actions with checked arguments, never a
 command of the caller's, and runs docker with an environment of its own:
 
     start, stop, restart, state          up -d; stop; up -d then restart; ps -a
+    pull                                 pull, then up -d
     logs <service> --tail <N>            the last N lines (1 to 10000) of the
     logs <service> --since <time>        service, or those since a UTC time,
                                          each with its time
+    port <service> <port>                where the machine publishes the port
+    version <odoo service>               odoo --version
+    dump <odoo service> <db> [--no-filestore]
+                                         odoo db dump: the zip to the output
+    load <odoo service> <db> [--neutralize]
+                                         odoo db load --force of the zip read
+                                         from the input
+    update <odoo service> <db>           click-odoo-update, in a container of
+                                         the service with OmniaCLI's tools
+                                         (TOOLS) mounted read only
+    update <odoo service> <db> --modules a,b
+                                         odoo -u a,b --stop-after-init
+    psql <database service> <db>         psql, on the caller's terminal
+
+A database name is [A-Za-z0-9_.-], a module [a-z0-9_]; a service must be one
+of the project's. They reach the container's shell as its arguments, never
+in a script's text. The database connection is the one the official image's
+entrypoint makes, from HOST, PORT, USER and PASSWORD (or PASSWORD_FILE).
 """
 
 from __future__ import annotations
@@ -62,6 +81,51 @@ ACTIONS = {
     "stop": [["stop"]],
     "restart": [["up", "-d"], ["restart"]],
     "state": [["ps", "-a", "--format", "json"]],
+    # a newer image of every service, then the containers made again with it
+    "pull": [["pull"], ["up", "-d"]],
+}
+# the actions that take arguments (commands())
+WITH_ARGUMENTS = ("logs", "version", "port", "dump", "load", "update", "psql")
+DATABASE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,62}")
+MODULE = re.compile(r"[a-z0-9][a-z0-9_]{0,99}")
+# where click-odoo-contrib and what it needs are, next to this venv, which
+# only root writes (the helper itself is there): pure Python, mounted read
+# only into a container of the Odoo service for click-odoo-update
+TOOLS = Path(sys.prefix) / "omniacli-tools"
+TOOLS_MOUNT = "/opt/omniacli-tools"
+# in an Odoo container: the database connection its entrypoint makes (the
+# official image's /entrypoint.sh: HOST, PORT, USER, PASSWORD or
+# PASSWORD_FILE, with their defaults), as the PG* variables Odoo and
+# click-odoo leave to libpq when the Odoo config sets no db_host...: a value
+# of the config still wins, as with the entrypoint
+ODOO_DB = (
+    'if [ -n "${PASSWORD_FILE:-}" ]; then PASSWORD="$(cat "$PASSWORD_FILE")"; fi; '
+    ': "${HOST:=${DB_PORT_5432_TCP_ADDR:-db}}"; '
+    ': "${PORT:=${DB_PORT_5432_TCP_PORT:-5432}}"; '
+    ': "${USER:=${DB_ENV_POSTGRES_USER:-${POSTGRES_USER:-odoo}}}"; '
+    ': "${PASSWORD:=${DB_ENV_POSTGRES_PASSWORD:-${POSTGRES_PASSWORD:-odoo}}}"; '
+    'export PGHOST="${PGHOST:-$HOST}" PGPORT="${PGPORT:-$PORT}" PGUSER="${PGUSER:-$USER}" '
+    'PGPASSWORD="${PGPASSWORD:-$PASSWORD}"; '
+)
+# the scripts the Odoo actions run in the container, the database as $1
+# (never in the script's text): dump writes the zip to the output, load
+# reads it from the input
+SCRIPTS = {
+    "version": "exec odoo --version",
+    # into a file, then to the output: to the output itself, odoo db dump
+    # ignores --no-filestore (Odoo 19 and 20, cli/db.py)
+    "dump": ODOO_DB + 'f="$(mktemp /tmp/omniacli-dump-XXXXXX.zip)"; trap \'rm -f "$f"\' EXIT; '
+                      'odoo db dump "$1" "$f" >&2 && cat "$f"',
+    "dump-no-filestore": ODOO_DB + 'f="$(mktemp /tmp/omniacli-dump-XXXXXX.zip)"; trap \'rm -f "$f"\' EXIT; '
+                                   'odoo db dump --no-filestore "$1" "$f" >&2 && cat "$f"',
+    "load": ODOO_DB + 'f="$(mktemp /tmp/omniacli-load-XXXXXX.zip)"; trap \'rm -f "$f"\' EXIT; '
+                      'cat > "$f"; odoo db load --force "$1" "$f"',
+    "load-neutralize": ODOO_DB + 'f="$(mktemp /tmp/omniacli-load-XXXXXX.zip)"; trap \'rm -f "$f"\' EXIT; '
+                                 'cat > "$f"; odoo db load --force --neutralize "$1" "$f"',
+    "update": ODOO_DB + f'export PYTHONPATH={TOOLS_MOUNT}; '
+                        f'exec python3 {TOOLS_MOUNT}/bin/click-odoo-update -d "$1"',
+    "update-modules": ODOO_DB + 'exec odoo -d "$1" -u "$2" --stop-after-init --no-http',
+    "psql": 'exec psql -U "${POSTGRES_USER:-postgres}" "$1"',
 }
 _ENV_LINE = re.compile(r"\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=")
 # logs: a service's output with the time of each line, the last N lines or
@@ -179,12 +243,68 @@ def service(project: Path, name: str) -> str:
     return name
 
 
+def _database(name: str) -> str:
+    if not DATABASE.fullmatch(name):
+        raise HelperError(f"{name!r} is not a database name")
+    return name
+
+
+def _script(service_name: str, script: str, *args: str) -> list[str]:
+    """exec in the service's container (-T: no terminal, the output as it
+    is), the script's arguments apart from its text."""
+    tty = [] if script == "psql" else ["-T"]
+    return ["exec", *tty, service_name, "sh", "-c", SCRIPTS[script], "sh", *args]
+
+
 def commands(project: Path, action: str, args: list[str]) -> list[list[str]]:
     """The docker compose commands of an action, its arguments checked."""
     if action in ACTIONS:
         if args:
             raise HelperError(f"{action} takes no arguments")
         return ACTIONS[action]
+    if action == "version":
+        # version <odoo service>: odoo --version
+        if len(args) != 1:
+            raise HelperError("usage: version <service>")
+        return [_script(service(project, args[0]), "version")]
+    if action == "port":
+        # port <service> <port in the container>: where the machine publishes it
+        if len(args) != 2 or not (args[1].isdigit() and 1 <= int(args[1]) <= 65535):
+            raise HelperError("usage: port <service> <port>")
+        return [["port", service(project, args[0]), args[1]]]
+    if action == "dump":
+        # dump <odoo service> <database> [--no-filestore]: the zip to the output
+        if len(args) not in (2, 3) or args[2:] not in ([], ["--no-filestore"]):
+            raise HelperError("usage: dump <service> <database> [--no-filestore]")
+        script = "dump-no-filestore" if args[2:] else "dump"
+        return [_script(service(project, args[0]), script, _database(args[1]))]
+    if action == "load":
+        # load <odoo service> <database> [--neutralize]: the zip from the input
+        if len(args) not in (2, 3) or args[2:] not in ([], ["--neutralize"]):
+            raise HelperError("usage: load <service> <database> [--neutralize]")
+        script = "load-neutralize" if args[2:] else "load"
+        return [_script(service(project, args[0]), script, _database(args[1]))]
+    if action == "update":
+        # update <odoo service> <database> [--modules a,b]: the changed
+        # modules (click-odoo-update, in a container of its own with the
+        # tools mounted) or the ones named
+        if len(args) == 2:
+            if not (TOOLS / "bin" / "click-odoo-update").is_file():
+                raise HelperError(f"{TOOLS} holds no click-odoo-update: install OmniaCLI's tools")
+            return [["run", "--rm", "--no-deps", "-T", "-v", f"{TOOLS}:{TOOLS_MOUNT}:ro",
+                     "--entrypoint", "sh", service(project, args[0]), "-c", SCRIPTS["update"], "sh",
+                     _database(args[1])]]
+        if len(args) == 4 and args[2] == "--modules":
+            modules = args[3].split(",")
+            if not all(MODULE.fullmatch(m) for m in modules):
+                raise HelperError(f"{args[3]!r} is not a list of module names")
+            return [_script(service(project, args[0]), "update-modules", _database(args[1]), ",".join(modules))]
+        raise HelperError("usage: update <service> <database> [--modules a,b]")
+    if action == "psql":
+        # psql <database service> <database>: on a terminal, the web shell's
+        if len(args) != 2:
+            raise HelperError("usage: psql <service> <database>")
+        return [_script(service(project, args[0]), "psql", _database(args[1]))]
     if action == "logs":
         # logs <service> --tail <N> | --since <time>
         if len(args) != 3 or args[1] not in ("--tail", "--since"):
@@ -194,7 +314,7 @@ def commands(project: Path, action: str, args: list[str]) -> list[list[str]]:
         if args[1] == "--since" and not SINCE.fullmatch(args[2]):
             raise HelperError("--since takes a UTC time, as 2026-10-28T16:48:50.380582551Z")
         return [[*LOGS, args[1], args[2], service(project, args[0])]]
-    raise HelperError(f"unknown action {action!r}: {', '.join([*ACTIONS, 'logs'])}")
+    raise HelperError(f"unknown action {action!r}: {', '.join([*ACTIONS, *WITH_ARGUMENTS])}")
 
 
 def run(argv: list[str]) -> int:
@@ -202,8 +322,8 @@ def run(argv: list[str]) -> int:
     if len(argv) < 2:
         raise HelperError("usage: compose-helper <project folder> <action> [arguments]")
     project, action, args = Path(argv[0]), argv[1], argv[2:]
-    if action not in (*ACTIONS, "logs"):
-        raise HelperError(f"unknown action {action!r}: {', '.join([*ACTIONS, 'logs'])}")
+    if action not in (*ACTIONS, *WITH_ARGUMENTS):
+        raise HelperError(f"unknown action {action!r}: {', '.join([*ACTIONS, *WITH_ARGUMENTS])}")
     name, uid, groups = caller()
     found = problems(project, uid, groups)
     if found:
