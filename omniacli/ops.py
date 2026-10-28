@@ -299,10 +299,9 @@ async def restart(job: Job, instance: Instance) -> None:
         await restart_process(job, instance)
         return
     if instance.restart.type == "compose":
-        # up -d first: a changed .env or image needs its containers made
-        # again, which a restart does not do (a no-op when nothing changed)
+        # the helper runs up -d first: a changed .env or image needs its
+        # containers made again, which a restart does not do
         job.log(f"--- restart compose project {instance.restart.service}")
-        await run(job, instance.restart.command("start"), timeout=RESTART_TIMEOUT)
         await run(job, instance.restart.command("restart"), timeout=RESTART_TIMEOUT)
         return
     job.log(f"--- restart {instance.restart.type} service {instance.restart.service}")
@@ -328,15 +327,17 @@ async def service_state(instance: Instance) -> str | None:
 
 def compose_state(ps_json: str) -> str | None:
     """From docker compose ps -a --format json (one object per line; an
-    array before Compose 2.21): active when every container runs, inactive
-    when none does or there is none, partial otherwise; None when it cannot
-    be read."""
-    text = ps_json.strip()
+    array before Compose 2.21), among the warnings docker compose may write
+    with it: active when every container runs, inactive when none does or
+    there is none, partial otherwise; None when it cannot be read."""
+    containers = []
     try:
-        if text.startswith("["):
-            containers = json.loads(text)
-        else:
-            containers = [json.loads(line) for line in text.splitlines() if line.strip()]
+        for line in ps_json.splitlines():
+            line = line.strip()
+            if line.startswith("["):
+                containers += json.loads(line)
+            elif line.startswith("{"):
+                containers.append(json.loads(line))
         running = [c.get("State") == "running" for c in containers]
     except (ValueError, AttributeError):
         return None

@@ -9,6 +9,7 @@ import ipaddress
 import os
 import re
 import shutil
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -26,13 +27,9 @@ TOKEN_DEFAULT_ROLE = "developer"
 # to a log of its own; compose: a Docker Compose project, the service being
 # its folder (only for a plugin that runs in one: has_compose)
 RESTART_TYPES = ("systemd", "initd", "process", "compose")
-# what a compose project's command does for each action: start applies a
-# changed .env or image (up -d recreates what changed), state lists every
-# container of the project, stopped ones too
-COMPOSE_ACTIONS = {"start": ["up", "-d"], "stop": ["stop"], "restart": ["restart"],
-                   "state": ["ps", "-a", "--format", "json"]}
-# the files docker compose reads in a project's folder, when none is named
-COMPOSE_FILES = ("compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml")
+# the omniacli command of this venv: a compose project's commands go
+# through its root helper, compose-helper (composehelper.py)
+OMNIACLI_COMMAND = Path(sys.executable).parent / "omniacli"
 # a server name is part of URLs and of the job keys
 SERVER_STATUSES = ("active", "draft")
 SERVER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
@@ -61,12 +58,12 @@ class Restart:
     def command(self, action: str = "restart") -> list[str]:
         """The restart command of a systemd or init.d service (a systemd
         service is also started and stopped: action start or stop), or of a
-        compose project (also action state)."""
+        compose project, through the root helper (also action state)."""
         if self.type == "systemd":
             # without --no-ask-password systemctl waits on a polkit prompt
             cmd = ["systemctl", "--no-ask-password", action, self.service]
         elif self.type == "compose":
-            cmd = ["docker", "compose", "--project-directory", self.service, *COMPOSE_ACTIONS[action]]
+            cmd = [str(OMNIACLI_COMMAND), "compose-helper", self.service, action]
         else:
             cmd = [f"/etc/init.d/{self.service}", action]
         return (["sudo", "-n"] + cmd) if self.sudo else cmd

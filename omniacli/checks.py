@@ -16,7 +16,8 @@ import tempfile
 from pathlib import Path
 
 from . import ops, packages
-from .config import COMPOSE_FILES, Instance, Server
+from . import composehelper
+from .config import Instance, Server
 from .jobs import JobFailed
 from .plugin_api import ERROR, WARNING, Check, system_user
 
@@ -119,11 +120,15 @@ async def _instance_checks(instance: Instance) -> list[Check]:
         add("Service", code == 0 and state == "loaded",
             f"systemd unit {restart.service}: {state or 'unknown'}")
     elif restart.type == "compose":
-        folder = Path(restart.service)
-        found = [name for name in COMPOSE_FILES if (folder / name).is_file()]
-        add("Service", bool(found),
-            f"compose project {folder}: {found[0]}" if found else
-            f"{folder} holds no {', '.join(COMPOSE_FILES)}")
+        # what the root helper refuses, seen as the user running OmniaCLI:
+        # whoever may change the project's files is root through it
+        import pwd
+
+        found = composehelper.problems(Path(restart.service), os.getuid(),
+                                       os.getgrouplist(pwd.getpwuid(os.getuid()).pw_name, os.getgid()))
+        add("Service", not found,
+            f"compose project {restart.service}: safe from {system_user()}" if not found else
+            f"the compose-helper refuses {restart.service}: " + "; ".join(found))
         add("Docker", shutil.which("docker") is not None,
             "docker found" if shutil.which("docker") else "docker is not installed (or not in the PATH)")
     else:
@@ -145,19 +150,24 @@ async def _instance_checks(instance: Instance) -> list[Check]:
                     lines.append(f"{system_user()} ALL=(root) NOPASSWD: {' '.join([executable, *other[3:]])}")
             return lines
 
-        # a compose restart is up -d, then restart
-        missing = await refused(("start", "restart") if restart.type == "compose" else ("restart",))
+        if restart.type == "compose":
+            # one line lets every action of the helper on this project
+            code, _ = await ops.capture(["sudo", "-n", "-l", *command[2:]])
+            add("Restart permission", code == 0,
+                "sudo allows the compose-helper without a password" if code == 0 else
+                "sudo refuses the compose-helper or asks a password; add to /etc/sudoers.d/omniacli: "
+                f"{system_user()} ALL=(root) NOPASSWD: {command[2]} compose-helper {restart.service} *")
+            return checks
+        missing = await refused(("restart",))
         add("Restart permission", not missing,
             "sudo allows it without a password" if not missing else
             "sudo refuses it or asks a password; add to /etc/sudoers.d/omniacli: " + " and ".join(missing))
-        if restart.type in ("systemd", "compose"):
-            # Start and Stop buttons (and a project's state): not needed to
-            # deploy, so a warning
-            missing = await refused(("start", "stop") if restart.type == "systemd" else ("stop", "state"))
-            what = "Start and Stop" if restart.type == "systemd" else "Stop and the state of the project"
+        if restart.type == "systemd":
+            # Start and Stop buttons: not needed to deploy, so a warning
+            missing = await refused(("start", "stop"))
             add("Start/Stop permission", not missing,
                 "sudo allows them without a password" if not missing else
-                f"{what} will fail; add to /etc/sudoers.d/omniacli: " + " and ".join(missing),
+                "Start and Stop will fail; add to /etc/sudoers.d/omniacli: " + " and ".join(missing),
                 WARNING)
     else:
         add("Restart permission", True,

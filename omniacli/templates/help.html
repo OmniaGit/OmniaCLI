@@ -288,24 +288,46 @@ update</strong>: there someone may be working, so the changes are kept (and git 
   <tr><td>process</td><td>OmniaCLI starts <span class="mono">odoo-bin -c &lt;config&gt;</span> itself, in the instance's
     venv, and stops it with a signal; Odoo outlives a restart of OmniaCLI. It refuses to start when another process
     already runs with the same config. No service name, no Run as.</td><td>nothing: it runs as OmniaCLI's user.</td></tr>
-  <tr><td>Docker Compose</td><td><span class="mono">docker compose --project-directory &lt;folder&gt;</span>:
-    Restart is <span class="mono">up -d</span> (a changed <span class="mono">.env</span> or image makes its containers
-    again) then <span class="mono">restart</span>, Start <span class="mono">up -d</span>, Stop
-    <span class="mono">stop</span>; the pages show the project's state (<span class="mono">ps -a</span>: active when
-    every container runs, partial, inactive). Only for a type that runs in Docker Compose.</td><td>with sudo, a
-    sudoers line per command and folder; without sudo, OmniaCLI's user in group docker (which is as good as
-    root).</td></tr>
+  <tr><td>Docker Compose</td><td><span class="mono">docker compose --project-directory &lt;folder&gt;</span>, always
+    through the root helper <span class="mono">omniacli compose-helper</span> (see below): Restart is
+    <span class="mono">up -d</span> (a changed <span class="mono">.env</span> or image makes its containers again) then
+    <span class="mono">restart</span>, Start <span class="mono">up -d</span>, Stop <span class="mono">stop</span>; the
+    pages show the project's state (<span class="mono">ps -a</span>: active when every container runs, partial,
+    inactive). Only for a type that runs in Docker Compose.</td><td>with sudo, one sudoers line per project folder;
+    without sudo, OmniaCLI's user in group docker (which is as good as root).</td></tr>
 </table>
+<h3>Docker Compose: who may change the project is root</h3>
+<p>Docker runs as root what a project's files say: whoever may change them may mount the whole machine into a
+container (one <span class="mono">compose.override.yaml</span> is enough) and is root through every
+<span class="mono">up -d</span>. So OmniaCLI never runs docker itself: it runs
+<span class="mono">omniacli compose-helper &lt;folder&gt; &lt;action&gt;</span>, which takes a fixed list of actions
+and, as root, refuses a project that the user who called sudo could change:</p>
+<ul>
+  <li>the project's folder, and every folder above it up to <span class="mono">/</span> (one that may be written may
+    put another folder in its place; a sticky one, as <span class="mono">/tmp</span>, only when the folder is that
+    user's), must not be writable by that user; the folder may not be reached through a symbolic link;</li>
+  <li>nor <span class="mono">compose.yaml</span>, <span class="mono">compose.yml</span>,
+    <span class="mono">docker-compose.yaml</span>, <span class="mono">docker-compose.yml</span>, their
+    <span class="mono">.override.yaml</span>/<span class="mono">.override.yml</span> (docker compose reads them by
+    itself) and <span class="mono">.env</span>; none may be a symbolic link;</li>
+  <li><span class="mono">.env</span> may not set <span class="mono">COMPOSE_FILE</span>,
+    <span class="mono">COMPOSE_PATH_SEPARATOR</span> or <span class="mono">COMPOSE_PROJECT_DIRECTORY</span>, which make
+    docker compose read other files.</li>
+</ul>
+<p>A file is writable by its owner (who may change its mode) and through the group or other write bit that applies;
+ACLs are not read. The <strong>Service</strong> check makes the same checks as OmniaCLI's user and prints, for each
+problem, the command that fixes it. Secure a project so:</p>
+<pre class="console mono">chown -R root: /srv/odooplm-19
+chmod -R go-w /srv/odooplm-19</pre>
+<p>The folders the project mounts (<span class="mono">./config</span>, <span class="mono">./addons-extra</span>...) are
+not checked: who writes them controls Odoo inside its container, not the machine.</p>
 <p>The sudoers lines go in <span class="mono">/etc/sudoers.d/omniacli</span> (the package installs it with examples,
 all commented); a failed check prints the exact lines. Examples, with your service names and paths:</p>
 <pre class="console mono">omniacli ALL=(root) NOPASSWD: /usr/bin/systemctl --no-ask-password restart odoo-customer-test
 omniacli ALL=(root) NOPASSWD: /usr/bin/systemctl --no-ask-password start odoo-customer-test
 omniacli ALL=(root) NOPASSWD: /usr/bin/systemctl --no-ask-password stop odoo-customer-test
 omniacli ALL=(root) NOPASSWD: /etc/init.d/odoo-customer-test restart
-omniacli ALL=(root) NOPASSWD: /usr/bin/docker compose --project-directory /srv/odooplm-19 up -d
-omniacli ALL=(root) NOPASSWD: /usr/bin/docker compose --project-directory /srv/odooplm-19 restart
-omniacli ALL=(root) NOPASSWD: /usr/bin/docker compose --project-directory /srv/odooplm-19 stop
-omniacli ALL=(root) NOPASSWD: /usr/bin/docker compose --project-directory /srv/odooplm-19 ps -a --format json
+omniacli ALL=(root) NOPASSWD: /opt/omniacli/venv/bin/omniacli compose-helper /srv/odooplm-19 *
 omniacli ALL=(odoo) NOPASSWD:SETENV: /opt/odoo/venvs/odoo18/bin/
 omniacli ALL=(odoo) NOPASSWD:SETENV: /usr/bin/psql</pre>
 <p>The last two lines are for <strong>Run as</strong> <span class="mono">odoo</span>: the first allows the programs of

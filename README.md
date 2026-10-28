@@ -106,8 +106,8 @@ stopped with *Stop job*.
 | Git pull | ✓ | ✓ | `git pull --ff-only <remote> <branch>` in every repository, then `git submodule update --init --recursive` in those with submodules |
 | Git pull + restart | ✓ | ✓ | pull, `click-odoo-update` (only the changed modules), restart |
 | Update modules | ✓ | ✓ | a popup asks: the changed modules (`click-odoo-update`) or chosen ones (`odoo-bin -u … --stop-after-init --workers=0`), and whether to restart after. The last 5 choices of modules of each instance are offered again; they are kept in the browser (`localStorage`), so each browser has its own |
-| Restart | ✓ | ✓ | the instance's systemd or init.d restart, `docker compose up -d` then `restart` of a compose project (a type that runs in one), or OmniaCLI's own start of `odoo-bin` (see below) |
-| Start, Stop | ✓ | ✓ | `systemctl start`/`stop` of a systemd service or `docker compose up -d`/`stop` of a compose project (each needs its sudoers line, the **Start/Stop permission** check prints them), or OmniaCLI's own Odoo; a stopped Odoo stays stopped for the auto update |
+| Restart | ✓ | ✓ | the instance's systemd or init.d restart, `docker compose up -d` then `restart` of a compose project (a type that runs in one, through the root helper `compose-helper`), or OmniaCLI's own start of `odoo-bin` (see below) |
+| Start, Stop | ✓ | ✓ | `systemctl start`/`stop` of a systemd service (each needs its sudoers line, the **Start/Stop permission** check prints them), `docker compose up -d`/`stop` of a compose project (the helper's line), or OmniaCLI's own Odoo; a stopped Odoo stays stopped for the auto update |
 | Backup | ✓ | ✓ | `click-odoo-backupdb` → `<backup_dir>/<server>/<role>/<db>_<timestamp>.zip`, database and filestore; with **Without filestore** checked, the database only (`--no-filestore`), `<db>_<timestamp>_nofilestore.zip`. The backup before a merge always has the filestore |
 | pip requirements | ✓ | ✓ | `<venv_bin>/python -m pip install -r` the `requirements.txt` next to `odoo-bin` and that of every repository having one, in one call |
 | pip click-odoo | ✓ | ✓ | `<venv_bin>/python -m pip install click-odoo-contrib`, the scripts OmniaCLI runs in the venv |
@@ -811,17 +811,48 @@ omniacli ALL=(root) NOPASSWD: /etc/init.d/odoo-customer-a-test restart
 ```
 
   A compose project (restart type `compose`, a type that runs in one: the
-  service is the project's folder) needs four lines, which the checks print:
-  `up -d` and `restart` for Restart, `stop` for Stop, `ps -a --format json`
-  for its state. Without sudo, OmniaCLI's user would need group `docker`,
-  which is as good as root on that machine.
+  service is the project's folder) needs one line, which the checks print:
+  OmniaCLI runs every docker compose command of the project through the
+  root helper `omniacli compose-helper <folder> <action>` (below). Without
+  sudo, OmniaCLI's user would need group `docker`, which is as good as root
+  on that machine.
 
 ```
-omniacli ALL=(root) NOPASSWD: /usr/bin/docker compose --project-directory /srv/odooplm-19 up -d
-omniacli ALL=(root) NOPASSWD: /usr/bin/docker compose --project-directory /srv/odooplm-19 restart
-omniacli ALL=(root) NOPASSWD: /usr/bin/docker compose --project-directory /srv/odooplm-19 stop
-omniacli ALL=(root) NOPASSWD: /usr/bin/docker compose --project-directory /srv/odooplm-19 ps -a --format json
+omniacli ALL=(root) NOPASSWD: /opt/omniacli/venv/bin/omniacli compose-helper /srv/odooplm-19 *
 ```
+
+#### Docker Compose: who may change the project is root
+
+Docker runs as root what a project's files say: whoever may change them may
+mount the whole machine into a container (one `compose.override.yaml` is
+enough) and is root through every `up -d`. So OmniaCLI never runs docker
+itself. The helper (`omniacli/composehelper.py`) takes a fixed list of
+actions, runs docker with an environment of its own, and, as root, refuses a
+project that the user who called sudo (`SUDO_USER`) could change:
+
+- the project's folder, and every folder above it up to `/`, must not be
+  writable by that user: one that may be written may put another folder in
+  its place (a sticky one, as `/tmp`, only when the folder is that user's);
+  the folder may not be reached through a symbolic link;
+- nor the files docker compose reads by itself, `compose.yaml`,
+  `compose.yml`, `docker-compose.yaml`, `docker-compose.yml` and their
+  `.override.yaml`/`.override.yml`, nor `.env`; none may be a symbolic link;
+- `.env` may not set `COMPOSE_FILE`, `COMPOSE_PATH_SEPARATOR` or
+  `COMPOSE_PROJECT_DIRECTORY`, which make docker compose read other files.
+
+A file is writable by its owner (who may change its mode) and through the
+group or other write bit that applies; ACLs are not read. The **Service**
+check makes the same checks as OmniaCLI's user and prints the command that
+fixes each problem. Secure a project so:
+
+```bash
+sudo chown -R root: /srv/odooplm-19
+sudo chmod -R go-w /srv/odooplm-19
+```
+
+The folders the project mounts (`./config`, `./addons-extra`...) are not
+checked: who writes them controls Odoo inside its container, not the
+machine.
 
 ### Configuration cases
 

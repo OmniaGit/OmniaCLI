@@ -154,6 +154,14 @@ def _plugin_install(args) -> int:
     return 0
 
 
+def _compose_helper(args) -> int:
+    """As root (sudo): an action on a compose project, which must be safe
+    from the user who called sudo (composehelper.py)."""
+    from . import composehelper
+
+    return composehelper.main(args.args)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="omniacli")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -204,6 +212,12 @@ def main(argv: list[str] | None = None) -> int:
     plugin.add_argument("name", nargs="?", help="the plugin, as the Plugins page downloaded it")
     plugin.add_argument("--all", action="store_true", help="every plugin downloaded (after a new venv)")
     plugin.set_defaults(func=_plugin_install)
+
+    helper = sub.add_parser("compose-helper",
+                            help="as root: an action on a Docker Compose project that the caller "
+                                 "cannot change (start, stop, restart, state)")
+    helper.add_argument("args", nargs=argparse.REMAINDER, help="<project folder> <action> [arguments]")
+    helper.set_defaults(func=_compose_helper)
 
     check = sub.add_parser("check-config", help="run the Test & activate checks on every server")
     check.add_argument("-c", "--config", default="omniacli.yaml")
