@@ -10,11 +10,11 @@
     <label><input type="radio" name="backup" value="" checked> A new backup of production, now</label>
     <div id="copy-filestore" style="margin-left: 22px">
       <label style="display: block" title="The filestore is in the backup and copied into test">
-        <input type="radio" name="filestore" value="copy" checked> with filestore (a copy of production's)</label>
+        <input type="radio" name="filestore" value="copy"> with filestore (a copy of production's)</label>
       <label style="display: block" title="Database only, no attachments: test gets no filestore">
         <input type="radio" name="filestore" value="none"> without filestore (test without attachments)</label>
       <label style="display: block" title="The backup without filestore; test's filestore is made of hard links to production's files: no extra disk space, test reads every attachment, its new and deleted files do not touch production's. Production and test filestores on the same filesystem">
-        <input type="radio" name="filestore" value="share"> filestore shared with production (hard links, no extra disk space)</label>
+        <input type="radio" name="filestore" value="share" checked> filestore shared with production (hard links, no extra disk space)</label>
     </div>
     <div id="copy-backups" class="scroll" style="max-height: 40vh; margin: 6px 0"><span class="muted">Loading the backups…</span></div>
     <p id="copy-error" class="error"></p>
@@ -67,7 +67,7 @@
       target = {server: button.dataset.key, url: button.dataset.url};
       document.getElementById("copy-title").textContent = `Copy production to test ${target.server}`;
       dialog.querySelector('input[name=backup][value=""]').checked = true;
-      for (const c of filestoreChoices) { c.checked = c.value === "copy"; c.disabled = false; }
+      for (const c of filestoreChoices) { c.checked = c.value === "share"; c.disabled = false; }
       errorBox.textContent = "";
       dialog.showModal(); load();
     };
