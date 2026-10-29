@@ -290,6 +290,7 @@ async def test_install_from_the_plugins_page(env, published, tmp_path, venv, mon
         assert entry_points(venv) == "['omniacli_demo:Plugin']"
         assert (await client.post("/api/plugins/nope/install", headers=as_admin(post=True))).status_code == 404
         # not run by systemd here: no restart
+        monkeypatch.delenv("INVOCATION_ID", raising=False)
         resp = await client.post("/api/omniacli/restart", headers=as_admin(post=True))
         assert resp.status_code == 400 and "not run by systemd" in resp.json()["error"]
         exits = []
