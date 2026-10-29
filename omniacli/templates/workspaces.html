@@ -1,0 +1,102 @@
+{# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C · SPDX-License-Identifier: AGPL-3.0-or-later -#}
+{% extends "base.html" %}
+{% block title %}Workspaces · OmniaCLI{% endblock %}
+{% block crumbs %}{% from "_crumbs.html" import crumbs with context %}
+{{ crumbs([("Dashboard", "/"), ("Workspaces", None)]) }}
+{% endblock %}
+{% block content %}
+<h1>Workspaces</h1>
+<p class="muted">A workspace is a customer's closed part of this machine: its servers, and its users, each with
+its role there (<strong>user</strong>, <strong>developer</strong>, <strong>admin</strong>, as on the Users page).
+A user of role <strong>workspace</strong> (Users page) sees only the servers of its workspaces, none of this
+machine's pages, consoles, links and configuration; the admins of a workspace manage its users. A server is in one
+workspace at most. Saved in <span class="mono">{{ workspaces_file }}</span>.</p>
+<div id="error" class="banner" hidden></div>
+<div id="workspaces"></div>
+<div class="actions">
+  <button type="button" id="add">Add workspace</button>
+</div>
+<h2 style="margin-top: 24px">Known now</h2>
+<p class="muted">Servers: {% for s in servers %}<span class="mono">{{ s }}</span>{% if not loop.last %}, {% endif %}{% else %}none{% endfor %}.<br>
+Users of workspaces: {% for u in users if user_roles[u] == "workspace" %}<span class="mono">{{ u }}</span>{% if not loop.last %}, {% endif %}{% else %}none (create them on the Users page with role workspace, or let a workspace's admin create them){% endfor %}.</p>
+<template id="ws-template">
+  <fieldset class="group-box">
+    <legend><input type="text" class="name mono" placeholder="name: a-z 0-9 -" aria-label="Workspace name"></legend>
+    <div class="form-grid">
+      <label>Label</label>
+      <input type="text" class="label" placeholder="ACME S.p.A." aria-label="Label">
+      <label>Domain</label>
+      <input type="text" class="domain mono" placeholder="acme.example.com (test: test.acme.example.com)" aria-label="Domain">
+      <label>Storage</label>
+      {% if storage_roots %}<select class="storage" aria-label="Storage">{% for r in storage_roots %}<option>{{ r }}</option>{% endfor %}</select>
+      {% else %}<input type="text" class="storage mono" placeholder="no workspaces.storage in the main configuration" disabled aria-label="Storage">{% endif %}
+      {% for key in limits %}<label>{{ key }}</label>
+      <input type="number" min="0" step="any" class="limit mono" data-limit="{{ key }}" placeholder="no limit" aria-label="{{ key }}">{% endfor %}
+      <label>Servers, one per line</label>
+      <textarea class="servers mono" rows="3" aria-label="Servers"></textarea>
+      <label>Users, one per line: <span class="mono">name role</span></label>
+      <textarea class="members mono" rows="3" placeholder="mario admin" aria-label="Users"></textarea>
+    </div>
+    <div class="actions" style="margin: 8px 0 0">
+      <button type="button" class="save">Save</button>
+      <a class="button users-link">Users of the workspace</a>
+      <button type="button" class="danger remove">Delete</button>
+    </div>
+  </fieldset>
+</template>
+<script>
+(function () {
+  const list = document.getElementById("workspaces"), template = document.getElementById("ws-template");
+  const errorBox = document.getElementById("error");
+  async function post(url, body) {
+    errorBox.hidden = true;
+    const resp = await fetch("{{ prefix }}/api/workspaces/" + url, {method: "POST",
+      headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      errorBox.textContent = data.error || data.detail || ("Error " + resp.status);
+      errorBox.hidden = false;
+      window.scrollTo(0, 0);
+      return null;
+    }
+    return data;
+  }
+  function addWorkspace(ws, isNew) {
+    const box = template.content.firstElementChild.cloneNode(true);
+    const field = (cls) => box.querySelector("." + cls);
+    field("name").value = ws.name || "";
+    field("name").disabled = !isNew;
+    field("label").value = ws.label || "";
+    field("domain").value = ws.domain || "";
+    if (ws.storage && field("storage").tagName === "SELECT") field("storage").value = ws.storage;
+    for (const input of box.querySelectorAll(".limit")) input.value = (ws.limits || {})[input.dataset.limit] ?? "";
+    field("servers").value = (ws.servers || []).join("\n");
+    field("members").value = Object.entries(ws.members || {}).map(([n, r]) => `${n} ${r}`).join("\n");
+    if (isNew) field("users-link").remove(); else field("users-link").href = "{{ prefix }}/workspaces/" + encodeURIComponent(ws.name);
+    field("save").onclick = async () => {
+      const members = {};
+      for (const line of field("members").value.split("\n").map((l) => l.trim()).filter(Boolean)) {
+        const [name, role] = line.split(/\s+/);
+        members[name] = role || "user";
+      }
+      const limits = {};
+      for (const input of box.querySelectorAll(".limit")) if (input.value !== "") limits[input.dataset.limit] = input.value;
+      const storage = field("storage").disabled ? "" : field("storage").value;
+      const body = {name: field("name").value.trim(), new: isNew, label: field("label").value.trim(),
+                    domain: field("domain").value.trim(), storage, limits, members,
+                    servers: field("servers").value.split("\n").map((l) => l.trim()).filter(Boolean)};
+      if (await post("save", body)) location.reload();
+    };
+    field("remove").onclick = async () => {
+      if (isNew) { box.remove(); return; }
+      if (!confirm(`Delete workspace ${ws.name}? Its servers stay; its users no longer see them.`)) return;
+      if (await post("delete", {name: ws.name})) location.reload();
+    };
+    list.appendChild(box);
+    return box;
+  }
+  for (const ws of {{ workspaces | tojson }}) addWorkspace(ws, false);
+  document.getElementById("add").onclick = () => addWorkspace({}, true).querySelector(".name").focus();
+})();
+</script>
+{% endblock %}

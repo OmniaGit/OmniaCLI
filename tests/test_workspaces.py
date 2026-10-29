@@ -1,0 +1,266 @@
+# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""Workspaces: a customer's users see the servers of their workspaces only,
+with their role there, and nothing of the machine."""
+import base64
+import re
+
+import pytest
+import yaml
+from fastapi.routing import APIRoute, APIWebSocketRoute
+from starlette.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
+
+from omniacli.app import WORKSPACE_ROUTES, create_app
+from omniacli.auth import hash_password
+from omniacli.config import (
+    Access,
+    ConfigError,
+    Workspace,
+    load_workspaces,
+    parse_auth,
+    parse_storage_roots,
+    parse_workspaces,
+    save_workspaces,
+    server_to_dict,
+)
+from omniacli.sessions import COOKIE
+
+from .conftest import PASSWORD
+from .test_app import AUTH, HOST, POST, client, wait_job  # noqa: F401 - the client fixture
+
+ORIGIN = f"http://{HOST}"
+
+
+def basic(user: str) -> dict:
+    return {"Authorization": "Basic " + base64.b64encode(f"{user}:{PASSWORD}".encode()).decode()}
+
+
+def post_as(user: str) -> dict:
+    return {**basic(user), "Origin": ORIGIN}
+
+
+@pytest.fixture
+def workspaces(env):
+    """acme holds srv (mario its admin, luca a user there); beta holds
+    nothing (eva a developer there); zoe is in no workspace."""
+    settings = env["settings"]
+    password = hash_password(PASSWORD, iterations=1000)
+    names = ("mario", "luca", "eva", "zoe")
+    settings.set_web_access(Access(users={n: password for n in names}, roles={n: "workspace" for n in names}))
+    settings.workspaces = {
+        "acme": Workspace("acme", "ACME", "acme.example.com", servers=["srv"],
+                          members={"mario": "admin", "luca": "user"}),
+        "beta": Workspace("beta", members={"eva": "developer"}),
+    }
+    return settings
+
+
+def test_parse_workspaces(tmp_path):
+    found = parse_workspaces({"acme": {"label": "ACME", "domain": "ACME.example.com", "storage": "/srv/omniacli",
+                                       "limits": {"disk_gb": 100, "cpus": 2.5, "instances": 3},
+                                       "servers": ["srv", "srv"], "members": {"mario": "admin"}}},
+                             ("/srv/omniacli",))
+    acme = found["acme"]
+    assert (acme.domain, acme.servers, acme.limits) == ("acme.example.com", ["srv"],
+                                                        {"disk_gb": 100, "cpus": 2.5, "instances": 3})
+    save_workspaces(tmp_path / "w.yaml", found)
+    assert load_workspaces(tmp_path / "w.yaml", ("/srv/omniacli",)) == found
+    assert load_workspaces(tmp_path / "none.yaml") == {}
+    for bad, message in (
+            ({"Acme": {}}, "lower case"), ({"-a": {}}, "lower case"),
+            ({"a": {"domain": "not a domain"}}, "not a domain name"),
+            ({"a": {"storage": "/elsewhere"}}, "not one of the storage roots"),
+            ({"a": {"limits": {"disk_gb": 0}}}, "positive"), ({"a": {"limits": {"instances": 1.5}}}, "whole"),
+            ({"a": {"limits": {"ram": 1}}}, "not one of"), ({"a": {"servers": ["../x"]}}, "not a server name"),
+            ({"a": {"members": {"mario": "workspace"}}}, "role must be one of"),
+            ({"a": {"members": {"ma rio": "user"}}}, "not a user name"),
+            ({"a": {"servers": ["srv"]}, "b": {"servers": ["srv"]}}, "in two workspaces"),
+            ({"a": {"domain": "x.example.com"}, "b": {"domain": "x.example.com"}}, "in two workspaces")):
+        with pytest.raises(ConfigError, match=message):
+            parse_workspaces(bad, ("/srv/omniacli",))
+    assert parse_storage_roots({"storage": ["/srv/omniacli/", "/data"]}) == ("/srv/omniacli", "/data")
+    with pytest.raises(ConfigError, match="absolute"):
+        parse_storage_roots({"storage": ["srv"]})
+    # a user of workspaces only; never a link or a token
+    access = parse_auth({"users": {"mario": {"password": "x", "role": "workspace"}}}, need_user=False)
+    assert access.roles == {"mario": "workspace"}
+    with pytest.raises(ConfigError, match="role must be one of"):
+        parse_auth({"links": {"x": {"token": "sha256$" + "0" * 64, "role": "workspace"}}}, need_user=False)
+
+
+async def test_a_workspace_user_sees_its_servers_only(workspaces, client, env):
+    # mario, admin of acme: srv, nothing of the machine
+    page = (await client.get("/", headers=basic("mario"))).text
+    assert "/servers/srv" in page and "This machine" not in page
+    assert "/config" not in page and "/users" not in page and 'href="/workspaces/acme"' in page
+    page = (await client.get("/servers/srv", headers=basic("mario"))).text
+    assert "/servers/srv/test/restart" in page and "/test/shell" not in page and "/test/psql" not in page
+    assert [s["name"] for s in (await client.get("/api/servers", headers=basic("mario"))).json()] == ["srv"]
+    metrics = (await client.get("/api/metrics", headers=basic("mario"))).json()
+    assert metrics["machine"] == [] and set(metrics["instances"]) == {"srv/production", "srv/test"}
+    # eva, of beta: no srv anywhere
+    assert "/servers/srv" not in (await client.get("/", headers=basic("eva"))).text
+    assert (await client.get("/api/servers", headers=basic("eva"))).json() == []
+    assert (await client.get("/api/metrics", headers=basic("eva"))).json()["instances"] == {}
+    for url in ("/servers/srv", "/servers/srv/test/log", "/api/servers/srv/test/log",
+                "/api/servers/srv/test/backups", "/x/odoo/servers/srv/test/addons"):
+        resp = await client.get(url, headers=basic("eva"))
+        assert resp.status_code == 403 and "workspaces" in resp.json()["detail"], url
+    assert (await client.post("/servers/srv/test/restart", headers=post_as("eva"))).status_code == 403
+    # zoe, in no workspace: an empty Dashboard
+    assert (await client.get("/api/servers", headers=basic("zoe"))).json() == []
+    # luca, a user in acme: restarts, does not pull
+    assert (await client.post("/servers/srv/test/pull", headers=post_as("luca"))).status_code == 403
+    resp = await client.post("/servers/srv/test/restart", headers=post_as("luca"), follow_redirects=False)
+    assert resp.status_code == 303
+    job_id = resp.headers["location"].rsplit("/", 1)[1]
+    await wait_job(client, job_id)
+    # the job: seen in acme, not in beta
+    assert job_id in [j["id"] for j in (await client.get("/api/jobs", headers=basic("mario"))).json()["jobs"]]
+    assert (await client.get("/api/jobs", headers=basic("eva"))).json()["jobs"] == []
+    assert job_id not in (await client.get("/jobs", headers=basic("eva"))).text
+    assert (await client.get(f"/jobs/{job_id}", headers=basic("eva"))).status_code == 403
+    assert (await client.get(f"/api/jobs/{job_id}", headers=basic("mario"))).status_code == 200
+    # the machine's users see everything, as before
+    assert (await client.get("/config", headers={"Authorization": AUTH})).status_code == 200
+    assert job_id in [j["id"] for j in (await client.get("/api/jobs", headers={"Authorization": AUTH})).json()["jobs"]]
+
+
+def _sample(path: str) -> str:
+    values = {"server": "srv", "role": "test", "plugin": "odoo", "workspace": "acme"}
+    return re.sub(r"\{(\w+)(:path)?\}", lambda m: values.get(m.group(1), "x"), path)
+
+
+async def test_every_other_route_is_closed(workspaces, client, env):
+    """A route not listed for the users of workspaces refuses them, mario
+    being an admin there: a route added later is closed until listed."""
+    checked = 0
+    for route in client.app.routes:
+        if not isinstance(route, APIRoute) or route.path in WORKSPACE_ROUTES:
+            continue
+        if route.path.startswith("/x/") and "{server}" in route.path and "{role}" in route.path:
+            continue
+        url = _sample(route.path)
+        if "GET" in route.methods:
+            resp = await client.get(url, headers=basic("mario"))
+        else:
+            method = sorted(route.methods)[0]
+            resp = await client.request(method, url, headers=post_as("mario"), json={})
+        assert resp.status_code == 403, (route.path, resp.status_code)
+        assert resp.json()["detail"] == "Not open to the users of workspaces", route.path
+        checked += 1
+    assert checked > 60
+
+
+def test_websockets_closed(env, workspaces):
+    app = create_app(env["settings"])
+    sockets = [r.path for r in app.routes if isinstance(r, APIWebSocketRoute)]
+    assert sockets and not set(sockets) & WORKSPACE_ROUTES
+    with TestClient(app) as c:
+        cookie = app.state.sessions.create("mario", env["settings"].users["mario"])
+        for path in sockets:
+            with pytest.raises(WebSocketDisconnect) as refused:
+                with c.websocket_connect(_sample(path), headers={"cookie": f"{COOKIE}={cookie}",
+                                                                  "origin": ORIGIN}) as ws:
+                    ws.receive()
+            assert refused.value.code == 1008, path
+
+
+async def test_workspace_admin_manages_its_users(workspaces, client, env):
+    settings = env["settings"]
+    url = "/api/workspaces/acme/members/"
+    # a new user: of workspaces only, in acme
+    resp = await client.post(url + "save", headers=post_as("mario"),
+                             json={"name": "nina", "role": "developer", "password": "nina-pass-1", "new": True})
+    assert resp.status_code == 200, resp.text
+    assert settings.user_role("nina") == "workspace" and settings.workspaces["acme"].members["nina"] == "developer"
+    assert yaml.safe_load(settings.users_file.read_text())["users"]["nina"]["role"] == "workspace"
+    assert load_workspaces(settings.workspaces_file)["acme"].members["nina"] == "developer"
+    nina = {"Authorization": "Basic " + base64.b64encode(b"nina:nina-pass-1").decode()}
+    assert [s["name"] for s in (await client.get("/api/servers", headers=nina)).json()] == ["srv"]
+    # its role and password; never its own role
+    assert (await client.post(url + "save", headers=post_as("mario"),
+                              json={"name": "nina", "role": "user", "password": "nina-pass-2"})).status_code == 200
+    assert settings.workspaces["acme"].members["nina"] == "user"
+    assert (await client.get("/api/servers", headers=nina)).status_code == 401
+    resp = await client.post(url + "save", headers=post_as("mario"), json={"name": "mario", "role": "user"})
+    assert resp.status_code == 400 and "own role" in resp.json()["error"]
+    # not a user of acme; a name taken; a short password; luca is no admin there
+    resp = await client.post(url + "save", headers=post_as("mario"), json={"name": "eva", "role": "admin"})
+    assert resp.status_code == 404
+    resp = await client.post(url + "save", headers=post_as("mario"),
+                             json={"name": "eva", "role": "user", "password": "long-enough", "new": True})
+    assert resp.status_code == 400 and "already exists" in resp.json()["error"]
+    resp = await client.post(url + "save", headers=post_as("mario"),
+                             json={"name": "ugo", "role": "user", "password": "short", "new": True})
+    assert resp.status_code == 400 and "at least" in resp.json()["error"]
+    assert (await client.post(url + "save", headers=post_as("luca"),
+                              json={"name": "ugo", "role": "user", "password": "long-enough", "new": True})
+            ).status_code == 403
+    assert (await client.get("/workspaces/acme", headers=basic("luca"))).status_code == 403
+    assert (await client.get("/workspaces/beta", headers=basic("mario"))).status_code == 403
+    assert "nina" in (await client.get("/workspaces/acme", headers=basic("mario"))).text
+    # a user of two workspaces: its password is not acme's to change, and removing it keeps it
+    settings.workspaces["beta"].members["luca"] = "user"
+    resp = await client.post(url + "save", headers=post_as("mario"),
+                             json={"name": "luca", "role": "user", "password": "long-enough"})
+    assert resp.status_code == 400 and "other workspaces" in resp.json()["error"]
+    resp = await client.post(url + "delete", headers=post_as("mario"), json={"name": "luca"})
+    assert resp.json() == {"ok": True, "deleted": False} and "luca" in settings.users
+    # a user of acme only is deleted with it; never oneself
+    resp = await client.post(url + "delete", headers=post_as("mario"), json={"name": "nina"})
+    assert resp.json() == {"ok": True, "deleted": True} and "nina" not in settings.users
+    resp = await client.post(url + "delete", headers=post_as("mario"), json={"name": "mario"})
+    assert resp.status_code == 400
+    # the machine's admin manages them too
+    assert (await client.get("/workspaces/beta", headers={"Authorization": AUTH})).status_code == 200
+
+
+async def test_workspaces_page_and_api(workspaces, client, env):
+    settings = env["settings"]
+    assert "acme.example.com" in (await client.get("/workspaces", headers={"Authorization": AUTH})).text
+    assert (await client.get("/workspaces", headers=basic("mario"))).status_code == 403
+    resp = await client.post("/api/workspaces/save", headers=POST,
+                             json={"name": "gamma", "new": True, "label": "Gamma", "servers": ["srv"]})
+    assert resp.status_code == 400 and "in two workspaces" in resp.json()["error"]
+    for body, message in (({"servers": ["nope"]}, "No server nope"), ({"members": {"ghost": "user"}}, "No user ghost"),
+                          ({"domain": "acme.example.com"}, "in two workspaces")):
+        resp = await client.post("/api/workspaces/save", headers=POST, json={"name": "gamma", "new": True, **body})
+        assert resp.status_code == 400 and message in resp.json()["error"], body
+    resp = await client.post("/api/workspaces/save", headers=POST,
+                             json={"name": "gamma", "new": True, "members": {"zoe": "developer"},
+                                   "limits": {"disk_gb": "50"}})
+    assert resp.status_code == 200, resp.text
+    assert load_workspaces(settings.workspaces_file)["gamma"].limits == {"disk_gb": 50}
+    resp = await client.post("/api/workspaces/save", headers=POST, json={"name": "gamma", "new": True})
+    assert resp.status_code == 400 and "already exists" in resp.json()["error"]
+    assert (await client.post("/api/workspaces/delete", headers=POST, json={"name": "gamma"})).json() == {"ok": True}
+    assert "gamma" not in settings.workspaces
+    assert (await client.post("/api/workspaces/save", headers=post_as("mario"), json={"name": "x"})).status_code == 403
+
+
+async def test_servers_keep_or_leave_their_workspace(workspaces, client, env):
+    settings = env["settings"]
+    server = server_to_dict(settings.servers["srv"])
+    # renamed: still in acme
+    resp = await client.post("/api/servers/save", headers=POST, json={"original": "srv", "name": "first", "server": server})
+    assert resp.status_code == 200, resp.text
+    assert settings.workspaces["acme"].servers == ["first"]
+    # a server saved again under its name stays where it is
+    resp = await client.post("/api/servers/save", headers=POST, json={"original": "first", "name": "first", "server": server})
+    assert resp.status_code == 200 and settings.workspaces["acme"].servers == ["first"]
+    # deleted: out of acme, so a new server of that name is in no workspace
+    assert (await client.post("/api/servers/delete", headers=POST, json={"name": "first"})).status_code == 200
+    assert settings.workspaces["acme"].servers == []
+    # a leftover name in a workspace is not inherited by a new server
+    settings.workspaces["beta"].servers.append("ghost")
+    resp = await client.post("/api/servers/save", headers=POST, json={"original": None, "name": "ghost", "server": server})
+    assert resp.status_code == 200 and settings.workspaces["beta"].servers == []
+    assert load_workspaces(settings.workspaces_file)["beta"].servers == []
+
+
+async def test_account_page_names_the_workspaces(workspaces, client, env):
+    page = (await client.get("/account", headers=basic("mario"))).text
+    assert "<strong>workspace</strong>" in page and "<strong>acme</strong> (admin)" in page
+    assert "<strong>admin</strong>" in (await client.get("/account", headers={"Authorization": AUTH})).text

@@ -115,8 +115,9 @@
       {% for b in buttons[inst.key].backup %}{{ action_button(b, off) }}{% endfor %}
       </div>
       {% endif %}
-      {% if can_act %}
-      {# a login shell on the server, in a new tab #}
+      {% if can_act and not scoped %}
+      {# a login shell on the server, in a new tab (not for a user of
+         workspaces: a shell of this machine) #}
       <div class="action-group">
       <a class="button" href="{{ base }}/shell" target="_blank" rel="noopener" title="A shell of the user running OmniaCLI, in {{ inst.repositories[0].path if inst.repositories else 'its home' }}">{{ icon("terminal") }}Shell</a>
       {% if inst.claude_dir %}

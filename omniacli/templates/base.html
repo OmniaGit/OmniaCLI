@@ -349,7 +349,7 @@ summary { cursor: pointer; color: var(--muted); }
       {% for c in puller_connections %}<a href="/pullers/connections/{{ c }}">{{ c }}</a>{% endfor %}
     </div>
   </div>{% endif %}
-  {% if is_admin or (can_act and account and not prefix) %}<div class="menu">
+  {% if not scoped and (is_admin or (can_act and account and not prefix)) %}<div class="menu">
     <button type="button" class="menu-label" aria-haspopup="true">Configure ▾</button>
     <div class="menu-items">
       {% if is_admin %}<a href="{{ prefix }}/config">Servers</a>
@@ -359,16 +359,18 @@ summary { cursor: pointer; color: var(--muted); }
       {% if can_act and account and not prefix %}<a href="/tunnels">Tunnels</a>{% endif %}
     </div>
   </div>{% endif %}
-  {% if is_admin %}<div class="menu">
+  {% if is_admin and not scoped %}<div class="menu">
     <button type="button" class="menu-label" aria-haspopup="true">Settings ▾</button>
     <div class="menu-items">
       <a href="{{ prefix }}/plugins">Plugins</a>
       <a href="{{ prefix }}/users">Users</a>
+      <a href="{{ prefix }}/workspaces">Workspaces</a>
       <a href="{{ prefix }}/omniacli/log" title="OmniaCLI's own log">Log</a>
       <a href="{{ prefix }}/options">Options</a>
     </div>
   </div>{% endif %}
-  {% if can_act %}<a href="{{ prefix }}/help">Help</a>{% endif %}
+  {% if can_act and not scoped %}<a href="{{ prefix }}/help">Help</a>{% endif %}
+  {% for ws in my_workspaces %}<a href="{{ prefix }}/workspaces/{{ ws }}" title="Your workspace {{ ws }}">{{ ws }}</a>{% endfor %}
   <span class="head-end">
     {% if account %}<a href="{{ prefix }}/account" title="Your account and password">{{ account }}</a>
     <form method="post" action="/logout" class="logout"><button class="logout-button">Log out</button></form>{% endif %}

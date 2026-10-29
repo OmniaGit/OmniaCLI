@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import functools
 import importlib.metadata
 import importlib.util
@@ -34,7 +35,7 @@ from . import checks, consumer, disks, linkcopy, ops, packages, plugins, plugins
 from .accesslog import AccessLog
 from .diskhistory import DiskHistory, DiskRecorder
 from .auth import ROLES as ACCESS_ROLES
-from .auth import Authenticator, Principal, hash_password, hash_token, new_token, verify_password
+from .auth import WORKSPACE_ROLE, Authenticator, Principal, hash_password, hash_token, new_token, verify_password
 from .config import (
     PUBLISHED_COMMANDS,
     PULLER_FILE_MIB,
@@ -44,6 +45,8 @@ from .config import (
     SHELL_FONT_SIZE,
     SHELL_FONT_SIZES,
     TUNNEL_IDLE_HOURS,
+    USER_ROLES,
+    WORKSPACE_LIMITS,
     Access,
     ConfigError,
     Instance,
@@ -51,6 +54,7 @@ from .config import (
     LinkTarget,
     Settings,
     TOKEN_DEFAULT_ROLE,
+    Workspace,
     load_settings,
     matches,
     parse_groups,
@@ -60,6 +64,7 @@ from .config import (
     parse_publication,
     parse_puller,
     parse_servers,
+    parse_workspaces,
     save_access,
     save_connections,
     save_groups,
@@ -68,6 +73,7 @@ from .config import (
     save_publications,
     save_pullers,
     save_servers,
+    save_workspaces,
     server_text,
     server_to_dict,
 )
@@ -96,6 +102,10 @@ def _page_context(request: Request) -> dict:
         # restart, start and stop: every role; an MCP token only reads
         "can_restart": bool(user and user.kind != "token"),
         "is_admin": bool(user and user.can("admin")),
+        # a user of workspaces: none of the machine's menus and consoles
+        "scoped": bool(user and user.scoped),
+        # the workspaces whose users it manages (admin there)
+        "my_workspaces": [ws for ws, role in user.workspaces if role == "admin"] if user and user.scoped else [],
         # a user who logged in with a password (not a token or a link)
         "account": user.name if user and user.kind == "user" else None,
         # in the footer of every page after the login
@@ -152,6 +162,24 @@ _MIN_PASSWORD = 8
 _LINK_REQUEST_HEADERS = ("content-type", "accept", "accept-language")
 _LINK_RESPONSE_HEADERS = ("content-type", "content-disposition", "content-length",
                           "content-encoding", "location", "cache-control")
+# the only routes a user of workspaces reaches (in_workspaces): its account,
+# the lists (they show its workspaces' servers only), and what a server of
+# its workspaces offers, with its role in that workspace. Not the consoles
+# (a shell of this machine), the copy from a link, the tunnels, the
+# machine's pages and the configuration.
+WORKSPACE_ROUTES = frozenset({
+    "/logout", "/account", "/api/account/password", "/static/{name}", "/x/{plugin}/static/{path:path}",
+    "/", "/dashboard/servers", "/api/servers", "/api/metrics",
+    "/jobs", "/jobs/{job_id}", "/jobs/{job_id}/stop", "/api/jobs", "/api/jobs/{job_id}",
+    "/servers/{server}", "/servers/{server}/merge", "/servers/{server}/x/{plugin}/{action}",
+    "/servers/{server}/{role}/pull", "/servers/{server}/{role}/pull-restart",
+    "/servers/{server}/{role}/restart", "/servers/{server}/{role}/start", "/servers/{server}/{role}/stop",
+    "/servers/{server}/{role}/backup", "/api/servers/{server}/{role}/backups",
+    "/backups/{server}/{role}/{name}", "/servers/{server}/{role}/x/{plugin}/{action}",
+    "/servers/{server}/{role}/log", "/api/servers/{server}/{role}/log",
+    "/workspaces/{workspace}", "/api/workspaces/{workspace}/members/save",
+    "/api/workspaces/{workspace}/members/delete",
+})
 
 
 _logger = logging.getLogger(__name__)
@@ -302,7 +330,63 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Login required")
         if method not in ("GET", "HEAD") and not _same_origin(request):
             raise HTTPException(status.HTTP_403_FORBIDDEN, "Cross-site request refused")
-        return Principal(name, settings.user_role(name))
+        role = settings.user_role(name)
+        if role == WORKSPACE_ROLE:
+            # its role is decided for each request (in_workspaces)
+            return Principal(name, "user", workspaces=settings.memberships(name), scoped=True)
+        return Principal(name, role)
+
+    def in_workspaces(request: HTTPConnection, user: Principal) -> Principal:
+        """A user of workspaces only reaches the routes of WORKSPACE_ROUTES,
+        and of them only what is in its workspaces, with its role there; any
+        other route is refused (a route added later is closed until it is
+        listed there)."""
+        route = request.scope.get("route")
+        path = getattr(route, "path", None)
+        params = request.scope.get("path_params") or {}
+        allowed = path in WORKSPACE_ROUTES or (
+            # a plugin's own routes, of an instance only
+            path is not None and path.startswith("/x/") and "server" in params and "role" in params)
+        if not allowed:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Not open to the users of workspaces")
+        if "server" in params:
+            names = [str(params["server"])]
+        elif "job_id" in params:
+            job = jobs.get(str(params["job_id"]))
+            # a job of none of its servers is refused like one that does not exist
+            names = job.servers if job is not None and job.servers else [""]
+        elif "workspace" in params:
+            role = user.workspace_role(str(params["workspace"]))
+            if role is None:
+                raise HTTPException(status.HTTP_403_FORBIDDEN, "Not a workspace of yours")
+            return dataclasses.replace(user, role=role)
+        else:
+            # a list (Dashboard, jobs, account): it shows only its workspaces' servers
+            return user
+        roles = []
+        for name in names:
+            workspace = settings.workspace_of(name)
+            role = user.workspace_role(workspace) if workspace else None
+            if role is None:
+                raise HTTPException(status.HTTP_403_FORBIDDEN, "Not a server of your workspaces")
+            roles.append(role)
+        # a job of several servers: the lowest of its roles there
+        return dataclasses.replace(user, role=min(roles, key=ACCESS_ROLES.index))
+
+    def visible_servers(user: Principal | None) -> set[str] | None:
+        """The servers user may see: None, all of them (a user of the machine)."""
+        if user is None or not user.scoped:
+            return None
+        mine = {ws for ws, _ in user.workspaces}
+        return {srv for ws in settings.workspaces.values() if ws.name in mine for srv in ws.servers}
+
+    def visible_jobs(user: Principal | None, found: list) -> list:
+        """Of found, the jobs user may see: for a user of workspaces, those
+        whose every server is in its workspaces."""
+        shown = visible_servers(user)
+        if shown is None:
+            return found
+        return [j for j in found if j.servers and set(j.servers) <= shown]
 
     def current_user(request: HTTPConnection) -> Principal:
         ip = request.client.host if request.client else ""
@@ -321,6 +405,13 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             # a link (with who acts there through it) or a token: a login is
             # its first request after a pause; a user's login is the form's
             access_log.seen(user.kind, user.name, ip, user.on_behalf)
+        if user.scoped:
+            try:
+                user = in_workspaces(request, user)
+            except HTTPException as exc:
+                if isinstance(request, WebSocket):
+                    raise WebSocketException(1008, exc.detail) from None
+                raise
         request.state.user = user
         return user
 
@@ -554,8 +645,11 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
     async def server_sections(request: Request, q: str, me: Principal, with_links: bool) -> dict:
         """The Dashboard's server tables: this instance's live servers, and
         with_links those of every link (asked to them), filtered by text (link,
-        name, database, service, repositories and branches)."""
-        live = settings.active_servers()
+        name, database, service, repositories and branches). A user of
+        workspaces sees its workspaces' servers only, and no link's."""
+        shown = visible_servers(me)
+        live = [srv for srv in settings.active_servers() if shown is None or srv.name in shown]
+        with_links = with_links and shown is None
         states = await run_states(live)
         rows = [
             {
@@ -593,14 +687,17 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
     async def index(request: Request, q: str = "", me: Principal = Depends(current_user)):
         """The Dashboard. With links, their servers come after the page
         (/dashboard/servers): a link that answers slowly never holds it back."""
-        lazy = me.kind == "user" and bool(settings.link_targets)
+        shown = visible_servers(me)
+        lazy = me.kind == "user" and bool(settings.link_targets) and shown is None
         context = await server_sections(request, q, me, with_links=False)
         context.update({
             "lazy": lazy,
             # the load and disks of this machine, and of every link (a link
-            # that does not answer says so in its panel)
-            "machine_links": list(settings.link_targets) if me.kind == "user" else [],
-            "jobs": jobs.recent(10),
+            # that does not answer says so in its panel): not for a user of
+            # workspaces, who sees its own servers only
+            "machine": shown is None,
+            "machine_links": list(settings.link_targets) if me.kind == "user" and shown is None else [],
+            "jobs": visible_jobs(me, jobs.recent(len(jobs.jobs)))[:10],
         })
         return _TEMPLATES.TemplateResponse(request, "index.html", context)
 
@@ -635,7 +732,8 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         # shown also without a usable link, disabled, saying how to get one
         from_link = {}
         for i in shown:
-            if not (i.plugin.has_restore and me.kind == "user" and me.can(from_link_role(i))):
+            # not for a user of workspaces: the links are the machine's
+            if not (i.plugin.has_restore and me.kind == "user" and not me.scoped and me.can(from_link_role(i))):
                 continue
             src = i.from_link
             if src is None:
@@ -698,9 +796,10 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         return {"app": "OmniaCLI", "version": _version(), "caller": str(user), "role": user.role}
 
     @app.get("/api/servers")
-    async def server_list():
+    async def server_list(request: Request):
         """The live servers, with what the Dashboard shows and filters on."""
-        live = settings.active_servers()
+        shown = visible_servers(request.state.user)
+        live = [srv for srv in settings.active_servers() if shown is None or srv.name in shown]
         states = await run_states(live)
         return [
             {
@@ -726,18 +825,20 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         ]
 
     @app.get("/api/metrics")
-    async def metrics(since: int = 0, server: Optional[str] = None, machine_only: bool = False):
+    async def metrics(request: Request, since: int = 0, server: Optional[str] = None, machine_only: bool = False):
         """{cores, interval, machine: [points], instances: {key: {source, points}}};
-        machine_only: no instances (the Dashboard's machine charts)."""
+        machine_only: no instances (the Dashboard's machine charts). A user
+        of workspaces gets its instances only, and not the machine's load."""
+        shown = visible_servers(request.state.user)
         data = {}
         for inst in [] if machine_only else settings.all_instances():
-            if server is None or inst.server == server:
+            if (server is None or inst.server == server) and (shown is None or inst.server in shown):
                 data[inst.key] = {
                     "source": sampler.source.get(inst.key, ""),
                     "points": sampler.series(inst.key, since),
                 }
-        return {"cores": sampler.cores, "interval": 5, "machine": sampler.machine_series(since),
-                "instances": data}
+        return {"cores": sampler.cores, "interval": 5,
+                "machine": sampler.machine_series(since) if shown is None else [], "instances": data}
 
     @app.get("/api/disks")
     async def disk_space():
@@ -1174,8 +1275,10 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
     async def job_list(request: Request, server: str = "", q: str = ""):
         """Every job kept, filtered by server and by text (title, started
         by, error, server)."""
-        found = jobs.recent(len(jobs.jobs))
-        names = sorted(set(settings.servers) | {n for j in found for n in j.servers})
+        me = request.state.user
+        found = visible_jobs(me, jobs.recent(len(jobs.jobs)))
+        shown = visible_servers(me)
+        names = sorted((set(settings.servers) if shown is None else shown) | {n for j in found for n in j.servers})
         found = filter_jobs(found, server, q)
         return _TEMPLATES.TemplateResponse(
             request, "jobs.html",
@@ -1203,15 +1306,17 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         return RedirectResponse(f"{prefix_of(request)}/jobs/{job.id}", status.HTTP_303_SEE_OTHER)
 
     @app.get("/api/jobs")
-    async def jobs_json(limit: int = 20):
+    async def jobs_json(request: Request, limit: int = 20):
         """The last jobs, without their logs, and the instances busy now: the
         Dashboard follows them (runners, end notices)."""
-        found = jobs.recent(min(max(limit, 1), 200))
+        me = request.state.user
+        found = visible_jobs(me, jobs.recent(len(jobs.jobs)))[:min(max(limit, 1), 200)]
+        running = visible_jobs(me, [j for j in jobs.jobs.values() if j.status == "running"])
         return {
             "jobs": [{"id": j.id, "title": j.title, "status": j.status, "instances": j.instances,
                       "servers": j.servers, "source": j.source, "created": j.created,
                       "finished": j.finished, "duration": j.duration, "error": j.error} for j in found],
-            "busy": sorted({key for j in jobs.jobs.values() if j.status == "running" for key in j.instances}),
+            "busy": sorted({key for j in running for key in j.instances}),
         }
 
     @app.get("/api/jobs/{job_id}")
@@ -1344,6 +1449,11 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
                 servers[name if key == original else key] = parsed if key == original else srv
             servers.setdefault(name, parsed)
             error = await store(servers)
+            if error:
+                return error
+            # a renamed server stays in its workspace; a new one is in none,
+            # whatever a workspace still names
+            error = await rename_in_workspaces(original, name)
             if error:
                 return error
         return {
@@ -1509,7 +1619,179 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             error = await store(servers)
             if error:
                 return error
+            # out of its workspace: a later server of the same name is not in it
+            error = await rename_in_workspaces(name, None)
+            if error:
+                return error
         return {"ok": True}
+
+    # --- workspaces -------------------------------------------------------
+
+    workspaces_lock = asyncio.Lock()
+
+    async def store_workspaces(found: dict[str, Workspace]):
+        """Write the workspaces file and make it current; a response on error."""
+        try:
+            await asyncio.to_thread(save_workspaces, settings.workspaces_file, found)
+        except OSError as exc:
+            return refuse(f"Cannot write {settings.workspaces_file}: {exc}", 500)
+        settings.workspaces = found
+        return None
+
+    async def rename_in_workspaces(old: str | None, new: str | None):
+        """The server old is now new (None: deleted); a new server (old None)
+        leaves any workspace that still names it."""
+        if old == new:
+            return None
+        async with workspaces_lock:
+            changed = {}
+            for ws in settings.workspaces.values():
+                # a workspace naming new still (a deleted server's leftover) loses it
+                names = [s for s in ws.servers if new is None or s != new]
+                if old is not None:
+                    names = [n for n in (new if s == old else s for s in names) if n is not None]
+                changed[ws.name] = dataclasses.replace(ws, servers=names)
+            if changed == settings.workspaces:
+                return None
+            return await store_workspaces(changed)
+
+    def workspace_rows() -> list[dict]:
+        return [{**ws.to_dict(), "name": ws.name} for ws in sorted(settings.workspaces.values(), key=lambda w: w.name)]
+
+    @app.get("/workspaces", dependencies=[Depends(admin)])
+    async def workspaces_page(request: Request):
+        """The customers' workspaces (users of the machine only)."""
+        return _TEMPLATES.TemplateResponse(
+            request, "workspaces.html",
+            {"workspaces": workspace_rows(), "workspaces_file": settings.workspaces_file,
+             "servers": sorted(settings.servers), "users": sorted(settings.users),
+             "user_roles": {n: settings.user_role(n) for n in settings.users},
+             "storage_roots": settings.storage_roots, "roles": ACCESS_ROLES, "limits": WORKSPACE_LIMITS},
+        )
+
+    @app.post("/api/workspaces/save", dependencies=[Depends(admin)])
+    async def workspace_save(payload: dict = Body(...)):
+        """Create (new: true) or change a workspace: its servers and members
+        must exist, a server and a domain are in one workspace only."""
+        name = str(payload.get("name") or "").strip()
+        new = bool(payload.get("new"))
+        async with workspaces_lock:
+            if new and name in settings.workspaces:
+                return refuse(f"A workspace named {name} already exists")
+            if not new and name not in settings.workspaces:
+                return refuse(f"No workspace {name}", status.HTTP_404_NOT_FOUND)
+            data = {key: payload.get(key) for key in ("label", "domain", "storage", "limits", "servers", "members")}
+            try:
+                found = parse_workspaces({**{n: ws.to_dict() for n, ws in settings.workspaces.items()}, name: data},
+                                         settings.storage_roots)
+            except ConfigError as exc:
+                return refuse(str(exc))
+            ws = found[name]
+            unknown = [s for s in ws.servers if s not in settings.servers]
+            if unknown:
+                return refuse(f"No server {', '.join(unknown)}")
+            strangers = [u for u in ws.members if u not in settings.users]
+            if strangers:
+                return refuse(f"No user {', '.join(strangers)}")
+            return await store_workspaces(found) or {"ok": True}
+
+    @app.post("/api/workspaces/delete", dependencies=[Depends(admin)])
+    async def workspace_delete(payload: dict = Body(...)):
+        """Delete a workspace: its servers stay, its users of workspaces only
+        no longer see them."""
+        name = str(payload.get("name") or "")
+        async with workspaces_lock:
+            if name not in settings.workspaces:
+                return refuse(f"No workspace {name}", status.HTTP_404_NOT_FOUND)
+            return await store_workspaces({n: ws for n, ws in settings.workspaces.items() if n != name}) \
+                or {"ok": True}
+
+    def a_workspace(name: str) -> Workspace:
+        found = settings.workspaces.get(name)
+        if found is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, f"No workspace {name}")
+        return found
+
+    @app.get("/workspaces/{workspace}", dependencies=[Depends(admin)])
+    async def workspace_page(request: Request, workspace: str):
+        """The users of a workspace, for its admins (and the machine's)."""
+        ws = a_workspace(workspace)
+        me = request.state.user
+        members = [{"name": n, "role": r, "only_here": only_here(n, ws.name)} for n, r in sorted(ws.members.items())]
+        return _TEMPLATES.TemplateResponse(
+            request, "workspace.html",
+            {"ws": ws, "members": members, "roles": ACCESS_ROLES, "me": me.name, "min_password": _MIN_PASSWORD},
+        )
+
+    def only_here(user: str, workspace: str) -> bool:
+        """user is a user of workspaces only, and of this one only: its
+        workspace's admins may change its password and delete it."""
+        return (settings.user_role(user) == WORKSPACE_ROLE and user not in settings.fixed.users
+                and [ws for ws, _ in settings.memberships(user)] == [workspace])
+
+    @app.post("/api/workspaces/{workspace}/members/save", dependencies=[Depends(admin)])
+    async def member_save(workspace: str, payload: dict = Body(...), me: Principal = Depends(current_user)):
+        """A workspace's admin creates a user of it (new: true, with a
+        password: a user of workspaces only), changes a member's role, and
+        the password of a member of this workspace only."""
+        name, role = str(payload.get("name") or "").strip(), str(payload.get("role") or "")
+        password, new = str(payload.get("password") or ""), bool(payload.get("new"))
+        if role not in ACCESS_ROLES:
+            return refuse(f"The role must be one of {', '.join(ACCESS_ROLES)}")
+        async with access_lock, workspaces_lock:
+            ws = a_workspace(workspace)
+            if new:
+                refused = check_name("User", name, settings.fixed.users, settings.users, True)
+                if refused:
+                    return refused
+                if len(password) < _MIN_PASSWORD:
+                    return refuse(f"The password needs at least {_MIN_PASSWORD} characters")
+            else:
+                if name not in ws.members:
+                    return refuse(f"{name} is not a user of {workspace}", status.HTTP_404_NOT_FOUND)
+                if me.kind == "user" and name == me.name and role != ws.members[name]:
+                    return refuse("You cannot change your own role")
+                if password and not only_here(name, workspace):
+                    return refuse(f"{name} is also a user of other workspaces or of the machine: "
+                                  "ask the administrator of the machine for its password")
+                if password and len(password) < _MIN_PASSWORD:
+                    return refuse(f"The password needs at least {_MIN_PASSWORD} characters")
+            if new or password:
+                web = web_copy()
+                web.users[name] = await asyncio.to_thread(hash_password, password)
+                if new:
+                    web.roles[name] = WORKSPACE_ROLE
+                refused = await store_access(web)
+                if refused:
+                    return refused
+            found = dict(settings.workspaces)
+            found[workspace] = dataclasses.replace(ws, members={**ws.members, name: role})
+            return await store_workspaces(found) or {"ok": True}
+
+    @app.post("/api/workspaces/{workspace}/members/delete", dependencies=[Depends(admin)])
+    async def member_delete(workspace: str, payload: dict = Body(...), me: Principal = Depends(current_user)):
+        """Out of the workspace; a user of this workspace only is deleted."""
+        name = str(payload.get("name") or "")
+        async with access_lock, workspaces_lock:
+            ws = a_workspace(workspace)
+            if name not in ws.members:
+                return refuse(f"{name} is not a user of {workspace}", status.HTTP_404_NOT_FOUND)
+            if me.kind == "user" and name == me.name:
+                return refuse("You cannot remove yourself")
+            delete_user = only_here(name, workspace)
+            found = dict(settings.workspaces)
+            found[workspace] = dataclasses.replace(ws, members={n: r for n, r in ws.members.items() if n != name})
+            refused = await store_workspaces(found)
+            if refused:
+                return refused
+            if delete_user:
+                web = web_copy()
+                web.users.pop(name, None)
+                web.roles.pop(name, None)
+                refused = await store_access(web)
+                if refused:
+                    return refused
+            return {"ok": True, "deleted": delete_user}
 
     # --- users, links and MCP tokens ------------------------------------
 
@@ -1544,8 +1826,8 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             return refuse(f"No {kind.lower()} {name}", status.HTTP_404_NOT_FOUND)
         return None
 
-    def check_role(role: str):
-        return None if role in ACCESS_ROLES else refuse(f"The role must be one of {', '.join(ACCESS_ROLES)}")
+    def check_role(role: str, roles: tuple[str, ...] = ACCESS_ROLES):
+        return None if role in roles else refuse(f"The role must be one of {', '.join(roles)}")
 
     @app.get("/users", dependencies=[Depends(admin)])
     async def users_page(request: Request):
@@ -1562,6 +1844,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
                            for n in sorted(settings.tokens)],
                 "users_file": settings.users_file,
                 "roles": ACCESS_ROLES,
+                "user_roles": USER_ROLES,
             },
         )
 
@@ -1662,7 +1945,8 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         password, new = str(payload.get("password") or ""), bool(payload.get("new"))
         async with access_lock:
             web = web_copy()
-            refused = check_name("User", name, settings.fixed.users, settings.users, new) or check_role(role)
+            refused = (check_name("User", name, settings.fixed.users, settings.users, new)
+                       or check_role(role, USER_ROLES))
             if refused:
                 return refused
             if (new or password) and len(password) < _MIN_PASSWORD:
@@ -2602,7 +2886,8 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         password_user(me)
         return _TEMPLATES.TemplateResponse(
             request, "account.html",
-            {"name": me.name, "role": me.role, "fixed": me.name in settings.fixed.users},
+            {"name": me.name, "role": WORKSPACE_ROLE if me.scoped else me.role, "workspaces": me.workspaces,
+             "fixed": me.name in settings.fixed.users},
         )
 
     @app.post("/api/account/password")

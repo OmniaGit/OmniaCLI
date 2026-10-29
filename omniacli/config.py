@@ -18,8 +18,12 @@ from urllib.parse import urlsplit
 import yaml
 
 from .auth import ROLES as ACCESS_ROLES
+from .auth import WORKSPACE_ROLE
 
 ROLES = ("production", "test")
+# the roles a user may have on the machine: the access roles, or none but
+# those of its workspaces
+USER_ROLES = (*ACCESS_ROLES, WORKSPACE_ROLE)
 # an MCP token saved without a role, as before tokens had one: what such a
 # token could do then (read, update_test, backup_test, download backups)
 TOKEN_DEFAULT_ROLE = "developer"
@@ -335,6 +339,11 @@ class Settings:
     connections: dict[str, PullerConnection] = field(default_factory=dict)
     # the plugins published for download (main configuration, plugins:)
     plugin_source: PluginSource = field(default_factory=lambda: PluginSource())
+    # the customers' workspaces (workspaces.yaml, Workspaces page), and the
+    # folders they may live in (main configuration, workspaces.storage)
+    workspaces_file: Path | None = None
+    workspaces: dict[str, Workspace] = field(default_factory=dict)
+    storage_roots: tuple[str, ...] = ()
     token_roles: dict[str, str] = field(default_factory=dict)
     fixed: Access = field(default_factory=Access)
     web: Access = field(default_factory=Access)
@@ -370,6 +379,15 @@ class Settings:
     def all_instances(self) -> list[Instance]:
         """The instances of the active servers."""
         return [i for s in self.active_servers() for i in s.instances.values()]
+
+    def workspace_of(self, server: str) -> str | None:
+        """The workspace server is in, None: none."""
+        return next((ws.name for ws in self.workspaces.values() if server in ws.servers), None)
+
+    def memberships(self, user: str) -> tuple[tuple[str, str], ...]:
+        """((workspace, role), ...) of user, by workspace name."""
+        return tuple((ws.name, ws.members[user]) for ws in sorted(self.workspaces.values(), key=lambda w: w.name)
+                     if user in ws.members)
 
 
 def _require(data: dict, key: str, where: str):
@@ -690,10 +708,10 @@ def save_servers(path: Path, servers: dict[str, Server]) -> None:
 _TOKEN_HASH = re.compile(r"sha256\$[0-9a-f]{64}")
 
 
-def _access_role(where: str, value) -> str:
+def _access_role(where: str, value, roles: tuple[str, ...] = ACCESS_ROLES) -> str:
     role = str(value or "")
-    if role not in ACCESS_ROLES:
-        raise ConfigError(f"{where}: role must be one of {', '.join(ACCESS_ROLES)}, not {role!r}")
+    if role not in roles:
+        raise ConfigError(f"{where}: role must be one of {', '.join(roles)}, not {role!r}")
     return role
 
 
@@ -705,7 +723,7 @@ def parse_auth(auth: dict, where: str = "auth", need_user: bool = True) -> Acces
         name = str(name)
         if isinstance(value, dict):
             users[name] = str(value.get("password") or "")
-            roles[name] = _access_role(f"{where}.users.{name}", value.get("role"))
+            roles[name] = _access_role(f"{where}.users.{name}", value.get("role"), USER_ROLES)
         else:
             # the format before roles: such a user is an admin
             users[name], roles[name] = str(value), "admin"
@@ -880,6 +898,142 @@ def save_groups(path: Path, groups: list[ServerGroup]) -> None:
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(text, encoding="utf-8")
     os.replace(tmp, path)
+
+
+# a workspace's name is part of URLs, of folders and of systemd unit names
+WORKSPACE_NAME = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?")
+# the domain production answers on (test: test.<domain>)
+DOMAIN_NAME = re.compile(r"(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}")
+# the users of a workspace: names as the Users page makes them
+MEMBER_NAME = re.compile(r"[A-Za-z0-9._@-]{1,64}")
+# what a workspace may use; a limit not set is no limit
+WORKSPACE_LIMITS = ("disk_gb", "cpus", "memory_gb", "instances")
+
+
+@dataclass
+class Workspace:
+    """A customer's closed part of the machine: its servers, and the users
+    who see them, each with its role there. Set by the users of the machine
+    (classes of users: README, Workspaces)."""
+
+    name: str
+    label: str = ""
+    domain: str = ""
+    # one of the storage roots of the main configuration (workspaces.storage)
+    storage: str = ""
+    limits: dict[str, float] = field(default_factory=dict)
+    servers: list[str] = field(default_factory=list)
+    members: dict[str, str] = field(default_factory=dict)  # {user name: role}
+
+    def to_dict(self) -> dict:
+        data: dict[str, Any] = {"label": self.label}
+        if self.domain:
+            data["domain"] = self.domain
+        if self.storage:
+            data["storage"] = self.storage
+        if self.limits:
+            data["limits"] = dict(self.limits)
+        data["servers"] = list(self.servers)
+        data["members"] = dict(self.members)
+        return data
+
+
+def parse_workspace(name: str, data: dict, storage_roots: tuple[str, ...] = ()) -> Workspace:
+    where = f"workspaces.{name}"
+    if not WORKSPACE_NAME.fullmatch(name):
+        raise ConfigError(f"{where}: a name is 1-32 lower case letters, digits and -, "
+                          "not starting or ending with -")
+    data = data if isinstance(data, dict) else {}
+    label = str(data.get("label") or "").strip()
+    if len(label) > 100:
+        raise ConfigError(f"{where}.label: at most 100 characters")
+    domain = str(data.get("domain") or "").strip().lower()
+    if domain and not DOMAIN_NAME.fullmatch(domain):
+        raise ConfigError(f"{where}.domain: {domain!r} is not a domain name")
+    storage = str(data.get("storage") or "").strip()
+    if storage and storage_roots and storage not in storage_roots:
+        raise ConfigError(f"{where}.storage: {storage} is not one of the storage roots "
+                          f"({', '.join(storage_roots)})")
+    limits = {}
+    for key, value in (data.get("limits") or {}).items():
+        if key not in WORKSPACE_LIMITS:
+            raise ConfigError(f"{where}.limits: {key} is not one of {', '.join(WORKSPACE_LIMITS)}")
+        if value in (None, ""):
+            continue
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            raise ConfigError(f"{where}.limits.{key}: {value!r} is not a number") from None
+        if number <= 0 or (key == "instances" and not number.is_integer()):
+            raise ConfigError(f"{where}.limits.{key}: {value!r} is not a positive "
+                              + ("whole number" if key == "instances" else "number"))
+        limits[key] = int(number) if number.is_integer() else number
+    servers = [str(s).strip() for s in data.get("servers") or [] if str(s).strip()]
+    bad = [s for s in servers if not SERVER_NAME.fullmatch(s)]
+    if bad:
+        raise ConfigError(f"{where}.servers: {', '.join(bad)} is not a server name")
+    members = {}
+    for user, role in (data.get("members") or {}).items():
+        user = str(user)
+        if not MEMBER_NAME.fullmatch(user):
+            raise ConfigError(f"{where}.members: {user!r} is not a user name")
+        members[user] = _access_role(f"{where}.members.{user}", role)
+    return Workspace(name, label, domain, storage, limits, list(dict.fromkeys(servers)), members)
+
+
+def parse_workspaces(data, storage_roots: tuple[str, ...] = ()) -> dict[str, Workspace]:
+    if not isinstance(data, dict):
+        raise ConfigError("workspaces must be a mapping {name: workspace}")
+    found = {str(name): parse_workspace(str(name), value, storage_roots) for name, value in data.items()}
+    # a server is in one workspace at most, and so is a domain
+    owner: dict[str, str] = {}
+    for ws in found.values():
+        for srv in ws.servers:
+            if srv in owner:
+                raise ConfigError(f"server {srv} is in two workspaces: {owner[srv]} and {ws.name}")
+            owner[srv] = ws.name
+    domains: dict[str, str] = {}
+    for ws in found.values():
+        if ws.domain and ws.domain in domains:
+            raise ConfigError(f"domain {ws.domain} is in two workspaces: {domains[ws.domain]} and {ws.name}")
+        domains[ws.domain] = ws.name
+    return found
+
+
+def load_workspaces(path: Path, storage_roots: tuple[str, ...] = ()) -> dict[str, Workspace]:
+    """The workspaces file; none yet is no workspaces."""
+    if not path.exists():
+        return {}
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        raise ConfigError(f"cannot read {path}: {exc}") from exc
+    try:
+        return parse_workspaces(data.get("workspaces") or {}, storage_roots)
+    except ConfigError as exc:
+        raise ConfigError(f"{path}: {exc}") from exc
+
+
+def save_workspaces(path: Path, workspaces: dict[str, Workspace]) -> None:
+    text = yaml.safe_dump({"workspaces": {n: ws.to_dict() for n, ws in workspaces.items()}},
+                          sort_keys=False, allow_unicode=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def parse_storage_roots(data) -> tuple[str, ...]:
+    """workspaces.storage of the main configuration: the folders a workspace
+    may live in (absolute, real paths: no symbolic links)."""
+    data = data if isinstance(data, dict) else {}
+    roots = []
+    for value in data.get("storage") or []:
+        root = str(value).strip().rstrip("/")
+        if not root.startswith("/") or root == "":
+            raise ConfigError(f"workspaces.storage: {value!r} is not an absolute path")
+        roots.append(root)
+    return tuple(dict.fromkeys(roots))
 
 
 # the text size of the shell pages, in pixels
@@ -1280,6 +1434,10 @@ def parse_settings(data: dict, base_dir: Path = Path(".")) -> Settings:
     scripts_dir = Path(data.get("scripts_dir") or servers_file.parent / "scripts")
     if not scripts_dir.is_absolute():
         scripts_dir = base_dir / scripts_dir
+    workspaces_file = Path(data.get("workspaces_file") or servers_file.parent / "workspaces.yaml")
+    if not workspaces_file.is_absolute():
+        workspaces_file = base_dir / workspaces_file
+    storage_roots = parse_storage_roots(data.get("workspaces"))
     jobs_dir = Path(_require(data, "jobs_dir", "root"))
     settings = Settings(
         users={},
@@ -1303,6 +1461,9 @@ def parse_settings(data: dict, base_dir: Path = Path(".")) -> Settings:
         connections_file=connections_file,
         connections=load_connections(connections_file),
         plugin_source=parse_plugin_source(data.get("plugins")),
+        workspaces_file=workspaces_file,
+        workspaces=load_workspaces(workspaces_file, storage_roots),
+        storage_roots=storage_roots,
         fixed=fixed,
     )
     settings.set_web_access(load_access(users_file))

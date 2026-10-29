@@ -1,0 +1,78 @@
+{# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C · SPDX-License-Identifier: AGPL-3.0-or-later -#}
+{% extends "base.html" %}
+{% block title %}{{ ws.name }} · OmniaCLI{% endblock %}
+{% block crumbs %}{% from "_crumbs.html" import crumbs with context %}
+{{ crumbs([("Dashboard", "/"), ("Workspace " ~ ws.name, None)]) }}
+{% endblock %}
+{% block content %}
+<h1>Workspace {{ ws.name }}{% if ws.label %} <span class="muted">· {{ ws.label }}</span>{% endif %}</h1>
+<p class="muted">The users of this workspace and their role here: <strong>user</strong> watches and restarts,
+starts and stops, <strong>developer</strong> also pulls, updates and backs up, <strong>admin</strong> also manages
+these users. A user created here sees this workspace's servers only.</p>
+<div id="error" class="banner" hidden></div>
+<div class="panel">
+  <div class="scroll">
+  <table>
+    <tr><th>User</th><th>Role</th><th>New password</th><th></th></tr>
+    {% for m in members %}
+    <tr data-user="{{ m.name }}">
+      <td><strong>{{ m.name }}</strong>{% if m.name == me %} <span class="muted">(you)</span>{% endif %}
+        {% if not m.only_here %}<br><span class="muted">also elsewhere: its password is the machine's administrator's</span>{% endif %}</td>
+      <td><select class="role" aria-label="Role of {{ m.name }}" {% if m.name == me %}disabled title="You cannot change your own role"{% endif %}>
+        {% for r in roles %}<option {% if r == m.role %}selected{% endif %}>{{ r }}</option>{% endfor %}</select></td>
+      <td>{% if m.only_here %}<input type="password" class="password" autocomplete="new-password" placeholder="unchanged" aria-label="New password of {{ m.name }}">{% endif %}</td>
+      <td><div class="actions" style="margin: 0">
+        <button type="button" data-save>Save</button>
+        {% if m.name != me %}<button type="button" class="danger" data-delete>Remove</button>{% endif %}
+      </div></td>
+    </tr>
+    {% else %}
+    <tr><td colspan="4" class="muted">No users yet.</td></tr>
+    {% endfor %}
+    <tr>
+      <td><input type="text" id="new-user" placeholder="new user" aria-label="New user name"></td>
+      <td><select id="new-user-role" aria-label="Role of the new user">{% for r in roles %}<option {% if r == "user" %}selected{% endif %}>{{ r }}</option>{% endfor %}</select></td>
+      <td><input type="password" id="new-user-password" autocomplete="new-password" placeholder="password, {{ min_password }}+ characters" aria-label="Password of the new user"></td>
+      <td><button type="button" id="add-user">Add user</button></td>
+    </tr>
+  </table>
+  </div>
+</div>
+<script>
+(function () {
+  const errorBox = document.getElementById("error");
+  const base = "{{ prefix }}/api/workspaces/{{ ws.name | urlencode }}/members/";
+  async function post(url, body) {
+    errorBox.hidden = true;
+    const resp = await fetch(base + url, {method: "POST",
+      headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      errorBox.textContent = data.error || data.detail || ("Error " + resp.status);
+      errorBox.hidden = false;
+      return null;
+    }
+    return data;
+  }
+  for (const button of document.querySelectorAll("[data-save]")) {
+    button.onclick = async () => {
+      const row = button.closest("tr"), password = row.querySelector(".password");
+      const body = {name: row.dataset.user, role: row.querySelector(".role").value, password: password ? password.value : ""};
+      if (await post("save", body)) location.reload();
+    };
+  }
+  for (const button of document.querySelectorAll("[data-delete]")) {
+    button.onclick = async () => {
+      const name = button.closest("tr").dataset.user;
+      if (!confirm(`Remove ${name} from {{ ws.name }}? A user of this workspace only is deleted.`)) return;
+      if (await post("delete", {name})) location.reload();
+    };
+  }
+  document.getElementById("add-user").onclick = async () => {
+    const body = {name: document.getElementById("new-user").value.trim(), role: document.getElementById("new-user-role").value,
+                  password: document.getElementById("new-user-password").value, new: true};
+    if (await post("save", body)) location.reload();
+  };
+})();
+</script>
+{% endblock %}

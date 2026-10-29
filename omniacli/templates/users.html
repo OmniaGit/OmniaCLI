@@ -10,7 +10,9 @@
   <a class="button" href="{{ prefix }}/access">Access log</a>
 </div>
 <p class="muted">Saved in <span class="mono">{{ users_file }}</span>. Entries marked <em>main config</em> are set in the main configuration file and are changed there.
-<strong>user</strong> watches and restarts, starts and stops Odoo, <strong>developer</strong> also acts on the servers (pull, update, backup and its download, pip), <strong>admin</strong> does everything.</p>
+<strong>user</strong> watches and restarts, starts and stops Odoo, <strong>developer</strong> also acts on the servers (pull, update, backup and its download, pip), <strong>admin</strong> does everything.
+<strong>workspace</strong>: a customer's user, with no role on this machine; it sees only the servers of its
+<a href="{{ prefix }}/workspaces">workspaces</a>, with the role it has in each.</p>
 <div id="error" class="banner" hidden></div>
 <div id="secret" class="panel" hidden style="margin-bottom: 16px">
   <p><strong id="secret-title"></strong> It is shown only now: copy it.</p>
@@ -31,7 +33,7 @@
       <td>{{ u.role }}</td><td></td><td></td>
       {% else %}
       <td><select class="role" aria-label="Role of {{ u.name }}" {% if u.name == account %}disabled title="You cannot change your own role"{% endif %}>
-        {% for r in roles %}<option {% if r == u.role %}selected{% endif %}>{{ r }}</option>{% endfor %}</select></td>
+        {% for r in user_roles %}<option {% if r == u.role %}selected{% endif %}>{{ r }}</option>{% endfor %}</select></td>
       <td><input type="password" class="password" autocomplete="new-password" placeholder="unchanged" aria-label="New password of {{ u.name }}"></td>
       <td><div class="actions" style="margin: 0">
         <button type="button" data-save-user>Save</button>
@@ -42,7 +44,7 @@
     {% endfor %}
     <tr>
       <td><input type="text" id="new-user" placeholder="new user" aria-label="New user name"></td>
-      <td><select id="new-user-role" aria-label="Role of the new user">{% for r in roles %}<option {% if r == "user" %}selected{% endif %}>{{ r }}</option>{% endfor %}</select></td>
+      <td><select id="new-user-role" aria-label="Role of the new user">{% for r in user_roles %}<option {% if r == "user" %}selected{% endif %}>{{ r }}</option>{% endfor %}</select></td>
       <td><input type="password" id="new-user-password" autocomplete="new-password" placeholder="password" aria-label="Password of the new user"></td>
       <td><button type="button" id="add-user">Add user</button></td>
     </tr>

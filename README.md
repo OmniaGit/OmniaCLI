@@ -517,6 +517,7 @@ Every user has a role:
 | `user` | watch: servers, load, logs, jobs, the backup list; and restart, start and stop Odoo |
 | `developer` | also act on the servers: pull, update, backup and the download of a backup, pip, the shell, Claude |
 | `admin` | everything: also the configuration pages (servers, users, links, schedules) and the merge of test into production |
+| `workspace` | none of the above on the machine: the servers of its workspaces only, with its role in each (see Workspaces) |
 
 ```yaml
 auth:
@@ -727,6 +728,57 @@ The other instance must be reachable from yours: through an HTTPS reverse
 proxy, a VPN, or an SSH tunnel (`http://` is accepted for a tunnel or a VPN,
 but then the token travels in clear). Both instances need a version with
 links (the Test link button says so).
+
+### Workspaces
+
+A **workspace** is a customer's closed part of the machine: its servers and
+its users. Two classes of users:
+
+| Class | Who | Sees and does |
+|---|---|---|
+| the machine's | the roles `user`, `developer`, `admin` (Users page) | everything their role allows, as before; workspaces change nothing for them |
+| a workspace's | role **`workspace`** (Users page) | only the servers of the workspaces it is a member of, each with **its role there** (`user`, `developer` or `admin`, with the meanings above) |
+
+The machine's admins make the workspaces (**Settings › Workspaces**,
+`/workspaces`): name (`a-z 0-9 -`, it becomes part of URLs and folders),
+label, domain, storage, limits, servers and members. A server is in one
+workspace at most, and so is a domain. Saved in `workspaces.yaml` next to the
+servers file (`workspaces_file` in the main configuration); the folders a
+workspace may live in are listed by root in the main configuration:
+
+```yaml
+workspaces:
+  storage:
+    - /srv/omniacli
+    - /media/disk2/omniacli
+```
+
+The domain, storage and limits are kept for what comes next (instances
+created from templates, their domains, a virtual disk per workspace); today
+they are not applied.
+
+A user of workspaces reaches, of a server of its workspaces: the server
+page, its log, start, stop, restart, and with its role there pull, update,
+backup and its download, the plugin's actions, the merge; its jobs; the
+Dashboard with its servers only; its account. **Nothing else**: not the
+servers of other workspaces (403), not this machine's load and disks, the
+configuration, the links and tunnels, the copy from a link, the schedules,
+the plugins, the options, OmniaCLI's log, the help, and **no console** (the
+shell, Claude and psql pages are shells of this machine). The check is made
+once for every request, before its route (`in_workspaces` in `app.py`): a
+user of workspaces reaches only the routes listed in `WORKSPACE_ROUTES`, and
+of a plugin's own routes those of an instance; a route added later is closed
+to them until it is listed (a test goes through every route).
+
+The admins of a workspace manage its users (the workspace's name in the
+menu, `/workspaces/<name>`): a user they create is a user of workspaces only,
+of theirs; they change the role of its users, the password of a user of
+theirs only (a user also of another workspace, or of the machine, gets its
+password from the machine's admins), and remove users from it (a user of
+that workspace only is deleted). Nobody changes their own role or removes
+themselves. Deleting a server takes it out of its workspace, renaming keeps
+it there, and a new server is in no workspace, whatever a workspace still
+names.
 
 ### Scheduled actions
 
