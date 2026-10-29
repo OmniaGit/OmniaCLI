@@ -13,7 +13,7 @@ servers_file: /var/lib/omniacli/servers.yaml
 
 # the plugins published for download (Plugins page): believed only when they
 # verify with this public key ("ed25519:...", as omniacli package-key prints
-# it); without it none can be installed
+# it), OmniaSolutions' own; without it none can be installed
 plugins:
   index: https://www.omniasolutions.website/download/omniacli-plugins.json
-  public_key: ""
+  public_key: "ed25519:Xj7pTjyUP/LolfpcvftRbL/DYs7CL9dZ4sug9p5fqfg="

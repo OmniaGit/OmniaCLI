@@ -1446,6 +1446,12 @@ plugins:
   public_key: "ed25519:..."   # without it nothing can be installed
 ```
 
+A new installation writes OmniaSolutions' key there
+(`ed25519:Xj7pTjyUP/LolfpcvftRbL/DYs7CL9dZ4sug9p5fqfg=`, the key
+`Setup/release.py` of OmniaConfigurator3 signs the plugins with). An upgrade
+never changes the main configuration: on a machine installed before 2026.1.23,
+add the key by hand and restart OmniaCLI (`sudo systemctl restart omniacli`).
+
 - the index (`{"format": 1, "plugins": [{"name", "label", "description",
   "file"}]}`) and each plugin's wheel are believed only with their signed
   manifest (`.json`, `.json.sig`, the format of the signed packages,
