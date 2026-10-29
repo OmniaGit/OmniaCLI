@@ -753,9 +753,70 @@ workspaces:
     - /media/disk2/omniacli
 ```
 
-The domain, storage and limits are kept for what comes next (instances
-created from templates, their domains, a virtual disk per workspace); today
-they are not applied.
+The domain is kept for what comes next (each instance on its own name, with
+nginx); the storage and the limits of disk and instances apply to the
+instances created from templates (below); the limits of CPU and memory are
+not applied yet.
+
+#### Instances created from templates
+
+The admins of a workspace create its instances on its page (**New
+instance**): a name (`a-z 0-9 -`; the server is `<workspace>-<name>`), a
+template and the fields it asks. A job then:
+
+1. makes or grows the workspace's **virtual disk**: `<storage>/.disks/<workspace>.img`,
+   an ext4 image of the workspace's disk limit (`disk_gb`) that takes room
+   on the real disk as it is used, mounted on `<storage>/<workspace>` by a
+   systemd mount unit at every boot, with docker started after it (a
+   drop-in of `docker.service`); the folder beneath is immutable (`chattr
+   +i`), so nothing is written there while the disk is not mounted. A full
+   disk stops its workspace only;
+2. makes production and test, each a compose project
+   `<storage>/<workspace>/<name>/<role>` of root's: the template's
+   `compose.yaml`, `.env` (the checked fields, the ports on `127.0.0.1`,
+   a database password of its own, the project's name), `config/odoo.conf`
+   (the image's addons, `proxy_mode`, `dbfilter` on the instance's database,
+   `list_db = False`), the filestore and the database as folders of the
+   instance (on its disk), `addons/` for the customer's repositories;
+3. creates each database (`odoo -i <modules>`, in a container of its own)
+   and starts both; a step that fails removes what was made;
+4. adds the server, of type `docker`, to the workspace.
+
+A new database has the user **admin** with password **admin**: change it
+at the first login. **Remove** on the same page takes down both projects,
+deletes their databases, files and folders, then the server.
+
+A template is a folder (`templates/<name>/` in this repository, installed
+by the package in `/usr/share/omniacli/templates`, root's): `template.json`
+(what it is and the fields it asks, each with its choices or pattern),
+`compose.yaml` (only `${...}` of its fields and of what OmniaCLI makes) and
+`odoo.conf.in`. Root runs it, so what its `compose.yaml` may hold is a closed
+list (`stacktemplates.check_compose`): the services' keys of a list (no
+`privileged`, `cap_add`, `devices`, `network_mode`, `pid`, `build`,
+`env_file`...), no top-level key but `name` and `services`, ports
+`127.0.0.1:${VARIABLE}:<port>` only, mounts of the instance's own folders
+only (`./…` and `../…`, never out of it), the configuration and the
+customer's addons read only, logging `json-file` with `max-size` and
+`max-file`. The first template is `odooplm-20` (the DockerOdooPLM image of
+Odoo 20, PostgreSQL 17).
+
+The root helper, `omniacli workspace-helper disk|create|remove`
+(`workspacehelper.py`), takes names only (workspace, instance, template), a
+storage of `workspaces.storage` of the main configuration, which only root
+writes, a template of the package's folder, and refuses a folder or a
+template the caller could change. The databases go through the compose
+helper (`init`). With `OMNIACLI_WORKSPACES=1` in `/etc/default/omniacli`
+(then `sudo dpkg-reconfigure omniacli`) the package writes their sudoers
+lines in `/etc/sudoers.d/omniacli-workspaces`, one for the workspace helper
+and one for the compose helper per storage root:
+
+```
+omniacli ALL=(root) NOPASSWD: /opt/omniacli/venv/bin/omniacli workspace-helper *
+omniacli ALL=(root) NOPASSWD: /opt/omniacli/venv/bin/omniacli compose-helper /srv/omniacli/* *
+```
+
+Without it, nothing is granted: give it only where workspaces are wanted,
+since root runs what these helpers make.
 
 A user of workspaces reaches, of a server of its workspaces: the server
 page, its log, start, stop, restart, and with its role there pull, update,

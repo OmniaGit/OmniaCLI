@@ -16,3 +16,11 @@
 # lines then name this user. Not root. After a change apply it with
 #   sudo dpkg-reconfigure omniacli
 #OMNIACLI_USER=
+
+# The customers' workspaces (README, Workspaces): 1 lets the service's user
+# run their root helpers (sudoers lines in /etc/sudoers.d/omniacli-workspaces,
+# one per folder of workspaces.storage of the main configuration). Root runs
+# what these helpers make: give it only where workspaces are wanted. Apply a
+# change with
+#   sudo dpkg-reconfigure omniacli
+#OMNIACLI_WORKSPACES=

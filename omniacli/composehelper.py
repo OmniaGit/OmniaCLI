@@ -49,6 +49,11 @@ command of the caller's, and runs docker with an environment of its own:
     update <odoo service> <db> --modules a,b
                                          odoo -u a,b --stop-after-init
     psql <database service> <db>         psql, on the caller's terminal
+    init <odoo service> <db> <modules> [<language>]
+                                         odoo -d <db> -i <modules>
+                                         --stop-after-init, without demo data,
+                                         in a container of its own: a new
+                                         database (a workspace's instance)
 
 A database name is [A-Za-z0-9_.-], a module [a-z0-9_]; a service must be one
 of the project's. They reach the container's shell as its arguments, never
@@ -86,9 +91,10 @@ ACTIONS = {
     "pull": [["pull"], ["up", "-d"]],
 }
 # the actions that take arguments (commands())
-WITH_ARGUMENTS = ("logs", "version", "port", "dump", "load", "update", "psql")
+WITH_ARGUMENTS = ("logs", "version", "port", "dump", "load", "update", "psql", "init")
 DATABASE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,62}")
 MODULE = re.compile(r"[a-z0-9][a-z0-9_]{0,99}")
+LANGUAGE = re.compile(r"[a-z]{2,3}_[A-Z]{2}")
 # where click-odoo-contrib and what it needs are, next to this venv, which
 # only root writes (the helper itself is there): pure Python, mounted read
 # only into a container of the Odoo service for click-odoo-update
@@ -304,6 +310,19 @@ def commands(project: Path, action: str, args: list[str]) -> list[list[str]]:
                 raise HelperError(f"{args[3]!r} is not a list of module names")
             return [_script(service(project, args[0]), "update-modules", _database(args[1]), ",".join(modules))]
         raise HelperError("usage: update <service> <database> [--modules a,b]")
+    if action == "init":
+        # init <odoo service> <database> <modules> [<language>]: a new database,
+        # in a container of its own (the image's entrypoint gives the connection)
+        if len(args) not in (3, 4):
+            raise HelperError("usage: init <service> <database> <modules> [<language>]")
+        modules = args[2].split(",")
+        if not all(MODULE.fullmatch(m) for m in modules):
+            raise HelperError(f"{args[2]!r} is not a list of module names")
+        if args[3:] and not LANGUAGE.fullmatch(args[3]):
+            raise HelperError(f"{args[3]!r} is not a language, as it_IT")
+        return [["run", "--rm", "-T", service(project, args[0]), "odoo", "-d", _database(args[1]),
+                 "-i", ",".join(modules), "--stop-after-init", "--without-demo=all", "--no-http",
+                 *(["--load-language", args[3]] if args[3:] else [])]]
     if action == "psql":
         # psql <database service> <database>: on a terminal, the web shell's
         if len(args) != 2:

@@ -31,7 +31,8 @@ from fastapi.templating import Jinja2Templates
 from starlette.background import BackgroundTask
 from starlette.requests import HTTPConnection
 
-from . import checks, consumer, disks, linkcopy, ops, packages, plugins, pluginstore, puller, publisher, schedules, selflog, shell, tunnel
+from . import (checks, consumer, disks, linkcopy, ops, packages, plugins, pluginstore, puller, publisher,
+               schedules, selflog, shell, stacktemplates, tunnel, workspaceops)
 from .accesslog import AccessLog
 from .diskhistory import DiskHistory, DiskRecorder
 from .auth import ROLES as ACCESS_ROLES
@@ -54,6 +55,7 @@ from .config import (
     LinkTarget,
     Settings,
     TOKEN_DEFAULT_ROLE,
+    WORKSPACE_NAME,
     Workspace,
     load_settings,
     matches,
@@ -77,7 +79,7 @@ from .config import (
     server_text,
     server_to_dict,
 )
-from .jobs import JobManager, filter_jobs
+from .jobs import JobFailed, JobManager, filter_jobs
 from .plugin_api import ENTRY_POINT_GROUP, PLUGIN_API, ActionRefused, Host
 from .pullcrypto import new_key
 from .links import LIST_TIMEOUT, LinkClients, describe_error, link_headers, proxy_websocket
@@ -178,7 +180,8 @@ WORKSPACE_ROUTES = frozenset({
     "/backups/{server}/{role}/{name}", "/servers/{server}/{role}/x/{plugin}/{action}",
     "/servers/{server}/{role}/log", "/api/servers/{server}/{role}/log",
     "/workspaces/{workspace}", "/api/workspaces/{workspace}/members/save",
-    "/api/workspaces/{workspace}/members/delete",
+    "/api/workspaces/{workspace}/members/delete", "/api/workspaces/{workspace}/instances/create",
+    "/api/workspaces/{workspace}/instances/delete",
 })
 
 
@@ -1714,14 +1717,96 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
 
     @app.get("/workspaces/{workspace}", dependencies=[Depends(admin)])
     async def workspace_page(request: Request, workspace: str):
-        """The users of a workspace, for its admins (and the machine's)."""
+        """The users and the instances of a workspace, for its admins (and the machine's)."""
         ws = a_workspace(workspace)
         me = request.state.user
         members = [{"name": n, "role": r, "only_here": only_here(n, ws.name)} for n, r in sorted(ws.members.items())]
+        found = await asyncio.to_thread(workspaceops.templates)
         return _TEMPLATES.TemplateResponse(
             request, "workspace.html",
-            {"ws": ws, "members": members, "roles": ACCESS_ROLES, "me": me.name, "min_password": _MIN_PASSWORD},
+            {"ws": ws, "members": members, "roles": ACCESS_ROLES, "me": me.name, "min_password": _MIN_PASSWORD,
+             "servers": [n for n in ws.servers if n in settings.servers],
+             "templates": [t.to_dict() for t in found.values()],
+             "can_create": bool(ws.storage and ws.limits.get("disk_gb")),
+             "instances_left": None if not ws.limits.get("instances")
+             else int(ws.limits["instances"]) - len([n for n in ws.servers if n in settings.servers])},
         )
+
+    @app.post("/api/workspaces/{workspace}/instances/create", dependencies=[Depends(admin)])
+    async def instance_create(workspace: str, payload: dict = Body(...), me: Principal = Depends(current_user)):
+        """A new instance of the workspace, production and test, from a
+        template: a job (the disk, the projects, the databases); then the
+        server, of type docker, is the workspace's."""
+        ws = a_workspace(workspace)
+        instance = str(payload.get("instance") or "").strip()
+        if not WORKSPACE_NAME.fullmatch(instance):
+            return refuse("An instance's name is 1-32 lower case letters, digits and -")
+        name = workspaceops.server_name(ws, instance)
+        template = (await asyncio.to_thread(workspaceops.templates)).get(str(payload.get("template") or ""))
+        if template is None:
+            return refuse(f"No template {payload.get('template')!r}")
+        try:
+            values = template.values({str(k): str(v) for k, v in (payload.get("values") or {}).items()})
+        except stacktemplates.TemplateError as exc:
+            return refuse(str(exc))
+        if not ws.storage or not ws.limits.get("disk_gb"):
+            return refuse(f"Workspace {ws.name} has no storage or no disk limit: the machine's admins set them")
+        async with workspaces_lock:
+            ws = a_workspace(workspace)
+            if name in settings.servers or name in ws.servers:
+                return refuse(f"A server named {name} exists already")
+            mine = [n for n in ws.servers if n in settings.servers]
+            if ws.limits.get("instances") and len(mine) >= ws.limits["instances"]:
+                return refuse(f"Workspace {ws.name} has its {int(ws.limits['instances'])} instances already")
+            # the server is the workspace's from now: its job is seen there
+            refused = await store_workspaces({**settings.workspaces,
+                                              ws.name: dataclasses.replace(ws, servers=[*ws.servers, name])})
+            if refused:
+                return refused
+
+        async def action(job):
+            try:
+                data = await workspaceops.create_instance(job, ws, instance, template, values)
+                parsed = parse_servers({name: {**data, "status": "active"}}, settings.logs_dir)[name]
+                async with config_lock:
+                    error = await store({**settings.servers, name: parsed})
+                if error is not None:
+                    raise JobFailed(f"the instance runs, but the servers file was not written: {error.body.decode()}")
+            except BaseException:
+                await rename_in_workspaces(name, None)
+                raise
+            job.result = {"server": name}
+            job.log(f"Server {name}: production at http://127.0.0.1:{parsed.production.options.http_port}, "
+                    f"test at http://127.0.0.1:{parsed.test.options.http_port}")
+
+        job = jobs.submit(f"Create {name} from {template.name}", [f"{name}/production", f"{name}/test"],
+                          f"manual: {me}", action)
+        return {"job": job.id}
+
+    @app.post("/api/workspaces/{workspace}/instances/delete", dependencies=[Depends(admin)])
+    async def instance_delete(workspace: str, payload: dict = Body(...), me: Principal = Depends(current_user)):
+        """An instance of the workspace removed: its containers, data and
+        folders, then its server."""
+        ws = a_workspace(workspace)
+        name = str(payload.get("server") or "")
+        prefix = f"{ws.name}-"
+        if name not in ws.servers or not name.startswith(prefix) or name not in settings.servers:
+            return refuse(f"No instance {name} in workspace {ws.name}", status.HTTP_404_NOT_FOUND)
+        if server_busy(name):
+            return refuse(f"A job is running on {name}: try again when it ends")
+        instance = name[len(prefix):]
+
+        async def action(job):
+            await workspaceops.remove_instance(job, ws, instance)
+            async with config_lock:
+                error = await store({k: v for k, v in settings.servers.items() if k != name})
+            if error is not None:
+                raise JobFailed(f"the instance is removed, but the servers file was not written: {error.body.decode()}")
+            await rename_in_workspaces(name, None)
+            job.log(f"Server {name} removed")
+
+        job = jobs.submit(f"Remove {name}", [f"{name}/production", f"{name}/test"], f"manual: {me}", action)
+        return {"job": job.id}
 
     def only_here(user: str, workspace: str) -> bool:
         """user is a user of workspaces only, and of this one only: its

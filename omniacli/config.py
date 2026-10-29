@@ -1030,8 +1030,9 @@ def parse_storage_roots(data) -> tuple[str, ...]:
     roots = []
     for value in data.get("storage") or []:
         root = str(value).strip().rstrip("/")
-        if not root.startswith("/") or root == "":
-            raise ConfigError(f"workspaces.storage: {value!r} is not an absolute path")
+        # in a sudoers line too (packaging: postinst): no space, no wildcard
+        if not re.fullmatch(r"(/[A-Za-z0-9._-]+)+", root) or "/../" in root + "/" or "/./" in root + "/":
+            raise ConfigError(f"workspaces.storage: {value!r} is not an absolute path of letters, digits and . _ -")
         roots.append(root)
     return tuple(dict.fromkeys(roots))
 

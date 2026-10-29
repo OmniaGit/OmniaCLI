@@ -10,6 +10,42 @@
 starts and stops, <strong>developer</strong> also pulls, updates and backs up, <strong>admin</strong> also manages
 these users. A user created here sees this workspace's servers only.</p>
 <div id="error" class="banner" hidden></div>
+<h2>Instances</h2>
+<p class="muted">Each instance has a production and a test, made from a template, on the workspace's disk.
+A new database has the user <strong>admin</strong> with password <strong>admin</strong>: change it at the first login.</p>
+<div class="panel" style="margin-bottom: 16px">
+  <div class="scroll">
+  <table>
+    <tr><th>Server</th><th></th></tr>
+    {% for name in servers %}
+    <tr data-server="{{ name }}">
+      <td><a href="{{ prefix }}/servers/{{ name }}"><strong>{{ name }}</strong></a></td>
+      <td><button type="button" class="danger" data-remove-instance>Remove</button></td>
+    </tr>
+    {% else %}
+    <tr><td colspan="2" class="muted">No instances yet.</td></tr>
+    {% endfor %}
+  </table>
+  </div>
+  {% if not can_create %}
+  <p class="muted">New instances need a storage and a disk limit for the workspace: the machine's administrators set them.</p>
+  {% elif instances_left is not none and instances_left <= 0 %}
+  <p class="muted">The workspace has all the instances its limit allows.</p>
+  {% elif not templates %}
+  <p class="muted">No template is installed on this machine.</p>
+  {% else %}
+  <h3>New instance</h3>
+  <div class="form-grid" id="new-instance">
+    <label for="instance-name">Name</label>
+    <input type="text" id="instance-name" class="mono" placeholder="a-z 0-9 -: the server is {{ ws.name }}-&lt;name&gt;">
+    <label for="instance-template">Template</label>
+    <select id="instance-template">{% for t in templates %}<option value="{{ t.name }}">{{ t.label }} ({{ t.version }})</option>{% endfor %}</select>
+  </div>
+  <div class="form-grid" id="template-fields" style="margin-top: 8px"></div>
+  <div class="actions"><button type="button" id="create-instance">Create</button></div>
+  {% endif %}
+</div>
+<h2>Users</h2>
 <div class="panel">
   <div class="scroll">
   <table>
@@ -66,6 +102,58 @@ these users. A user created here sees this workspace's servers only.</p>
       const name = button.closest("tr").dataset.user;
       if (!confirm(`Remove ${name} from {{ ws.name }}? A user of this workspace only is deleted.`)) return;
       if (await post("delete", {name})) location.reload();
+    };
+  }
+  const wsBase = "{{ prefix }}/api/workspaces/{{ ws.name | urlencode }}/";
+  async function postWs(url, body) {
+    errorBox.hidden = true;
+    const resp = await fetch(wsBase + url, {method: "POST",
+      headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) { errorBox.textContent = data.error || data.detail || ("Error " + resp.status); errorBox.hidden = false; return null; }
+    return data;
+  }
+  for (const button of document.querySelectorAll("[data-remove-instance]")) {
+    button.onclick = async () => {
+      const server = button.closest("tr").dataset.server;
+      if (!confirm(`Remove ${server}? Its production and test, their databases and files are deleted.`)) return;
+      const data = await postWs("instances/delete", {server});
+      if (data) location.href = "{{ prefix }}/jobs/" + data.job;
+    };
+  }
+  const templates = {{ templates | tojson }};
+  const fieldsBox = document.getElementById("template-fields"), templateSelect = document.getElementById("instance-template");
+  function drawFields() {
+    if (!fieldsBox) return;
+    fieldsBox.textContent = "";
+    const t = templates.find((x) => x.name === templateSelect.value);
+    for (const f of t ? t.fields : []) {
+      const label = document.createElement("label");
+      label.textContent = f.label;
+      let input;
+      if (f.choices.length) {
+        input = document.createElement("select");
+        for (const c of f.choices) { const o = document.createElement("option"); o.value = c; o.textContent = c || "(none)"; input.appendChild(o); }
+      } else {
+        input = document.createElement("input");
+        input.type = "text";
+        input.className = "mono";
+      }
+      input.value = f.default;
+      input.dataset.field = f.name;
+      input.setAttribute("aria-label", f.label);
+      fieldsBox.append(label, input);
+    }
+  }
+  if (templateSelect) {
+    templateSelect.onchange = drawFields;
+    drawFields();
+    document.getElementById("create-instance").onclick = async () => {
+      const values = {};
+      for (const input of fieldsBox.querySelectorAll("[data-field]")) values[input.dataset.field] = input.value;
+      const data = await postWs("instances/create", {instance: document.getElementById("instance-name").value.trim(),
+                                                     template: templateSelect.value, values});
+      if (data) location.href = "{{ prefix }}/jobs/" + data.job;
     };
   }
   document.getElementById("add-user").onclick = async () => {

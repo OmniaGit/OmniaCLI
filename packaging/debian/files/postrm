@@ -5,9 +5,12 @@ set -e
 
 case "$1" in
     remove)
+        # the workspaces' helpers are gone with the venv
+        rm -f /etc/sudoers.d/omniacli-workspaces
         rm -rf /opt/omniacli/venv /opt/omniacli/venv.old /opt/omniacli/python /opt/omniacli/python.old /opt/omniacli/.python.*
         ;;
     purge)
+        rm -f /etc/sudoers.d/omniacli-workspaces
         rm -rf /opt/omniacli/venv /opt/omniacli/venv.old /opt/omniacli/python /opt/omniacli/python.old /opt/omniacli/.python.*
         rm -f /etc/omniacli/omniacli.yaml /etc/omniacli/initial-admin-password
         rm -f /etc/systemd/system/omniacli.service.d/omniacli-user.conf

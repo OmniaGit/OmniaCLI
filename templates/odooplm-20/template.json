@@ -1,0 +1,22 @@
+{
+  "name": "odooplm-20",
+  "label": "OdooPLM 20 (Odoo 20 + PostgreSQL 17)",
+  "version": "2026.1.1",
+  "type": "docker",
+  "odoo_service": "odoo",
+  "db_service": "db",
+  "addons_path": ["/mnt/odooplm-addons"],
+  "customer_addons": "/mnt/customer-addons",
+  "data": [
+    {"path": "data/filestore", "owner": "100:101"},
+    {"path": "data/pgdata"}
+  ],
+  "fields": [
+    {"name": "IMAGE", "label": "Image", "default": "ghcr.io/omniagit/odooplm:20.0",
+     "choices": ["ghcr.io/omniagit/odooplm:20.0", "ghcr.io/omniagit/odooplm:20.0-slim"]},
+    {"name": "INIT_MODULES", "label": "Modules installed at the creation", "default": "plm",
+     "pattern": "[a-z0-9_]+(,[a-z0-9_]+)*"},
+    {"name": "INIT_LANG", "label": "Language loaded at the creation", "default": "",
+     "choices": ["", "it_IT", "en_US", "de_DE", "fr_FR", "es_ES"]}
+  ]
+}

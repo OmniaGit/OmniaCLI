@@ -162,6 +162,13 @@ def _compose_helper(args) -> int:
     return composehelper.main(args.args)
 
 
+def _workspace_helper(args) -> int:
+    """As root (sudo): a workspace's disk and instances (workspacehelper.py)."""
+    from . import workspacehelper
+
+    return workspacehelper.main(args.args)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="omniacli")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -218,6 +225,12 @@ def main(argv: list[str] | None = None) -> int:
                                  "cannot change (start, stop, restart, state)")
     helper.add_argument("args", nargs=argparse.REMAINDER, help="<project folder> <action> [arguments]")
     helper.set_defaults(func=_compose_helper)
+
+    workspace = sub.add_parser("workspace-helper",
+                               help="as root: a workspace's virtual disk, and its instances made from a "
+                                    "template or removed (disk, create, remove)")
+    workspace.add_argument("args", nargs=argparse.REMAINDER, help="<action> [arguments]")
+    workspace.set_defaults(func=_workspace_helper)
 
     check = sub.add_parser("check-config", help="run the Test & activate checks on every server")
     check.add_argument("-c", "--config", default="omniacli.yaml")

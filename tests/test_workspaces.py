@@ -3,6 +3,7 @@
 """Workspaces: a customer's users see the servers of their workspaces only,
 with their role there, and nothing of the machine."""
 import base64
+import json
 import re
 
 import pytest
@@ -264,3 +265,121 @@ async def test_account_page_names_the_workspaces(workspaces, client, env):
     page = (await client.get("/account", headers=basic("mario"))).text
     assert "<strong>workspace</strong>" in page and "<strong>acme</strong> (admin)" in page
     assert "<strong>admin</strong>" in (await client.get("/account", headers={"Authorization": AUTH})).text
+
+
+async def test_create_and_remove_an_instance(workspaces, client, env, monkeypatch, tmp_path):
+    from pathlib import Path
+
+    from omniacli import stacktemplates, workspaceops
+    from omniacli.jobs import JobFailed
+
+    settings = env["settings"]
+    template = stacktemplates.load_template(Path(__file__).parent.parent / "templates" / "odooplm-20")
+    monkeypatch.setattr(workspaceops, "templates", lambda: {template.name: template})
+    asked = []
+
+    async def create_instance(job, ws, instance, tpl, values):
+        asked.append((ws.name, instance, tpl.name, values))
+        if instance == "broken":
+            raise JobFailed("the helper failed")
+        folder = tmp_path / "storage" / ws.name / instance
+        return {"type": "docker", **{role: {
+            "database": instance, "odoo_service": "odoo", "db_service": "db", "http_port": port,
+            "update_modules": True, "restart": {"type": "compose", "service": str(folder / role), "sudo": True},
+            "repositories": []} for role, port in (("production", 20000), ("test", 20002))}}
+    removed = []
+
+    async def remove_instance(job, ws, instance):
+        removed.append((ws.name, instance))
+    monkeypatch.setattr(workspaceops, "create_instance", create_instance)
+    monkeypatch.setattr(workspaceops, "remove_instance", remove_instance)
+    url = "/api/workspaces/acme/instances/"
+    # the workspace needs its storage and disk limit
+    resp = await client.post(url + "create", headers=post_as("mario"), json={"instance": "main", "template": "odooplm-20"})
+    assert resp.status_code == 400 and "no storage" in resp.json()["error"]
+    settings.workspaces["acme"].storage = str(tmp_path / "storage")
+    settings.workspaces["acme"].limits = {"disk_gb": 10, "instances": 2}
+    page = (await client.get("/workspaces/acme", headers=basic("mario"))).text
+    assert "OdooPLM 20" in page and 'id="create-instance"' in page
+    for body, message in (({"instance": "Main", "template": "odooplm-20"}, "lower case"),
+                          ({"instance": "main", "template": "nope"}, "No template"),
+                          ({"instance": "main", "template": "odooplm-20", "values": {"IMAGE": "evil"}}, "not one of")):
+        resp = await client.post(url + "create", headers=post_as("mario"), json=body)
+        assert resp.status_code == 400 and message in resp.json()["error"], body
+    # a user of acme who is no admin there, a user of beta: refused
+    assert (await client.post(url + "create", headers=post_as("luca"), json={})).status_code == 403
+    assert (await client.post(url + "create", headers=post_as("eva"), json={})).status_code == 403
+    resp = await client.post(url + "create", headers=post_as("mario"),
+                             json={"instance": "main", "template": "odooplm-20", "values": {"INIT_LANG": "it_IT"}})
+    assert resp.status_code == 200, resp.text
+    job = await wait_job(client, resp.json()["job"])
+    assert job["status"] == "success", job["lines"]
+    assert asked[-1] == ("acme", "main", "odooplm-20", {"IMAGE": "ghcr.io/omniagit/odooplm:20.0",
+                                                        "INIT_MODULES": "plm", "INIT_LANG": "it_IT"})
+    assert settings.servers["acme-main"].active and settings.servers["acme-main"].type == "docker"
+    assert settings.workspaces["acme"].servers == ["srv", "acme-main"]
+    assert "acme-main" in [s["name"] for s in (await client.get("/api/servers", headers=basic("luca"))).json()]
+    assert (await client.get("/servers/acme-main", headers=basic("eva"))).status_code == 403
+    # its job was seen in acme while it ran
+    assert job["id"] in [j["id"] for j in (await client.get("/api/jobs", headers=basic("luca"))).json()["jobs"]]
+    # the limit of instances: srv and acme-main
+    resp = await client.post(url + "create", headers=post_as("mario"), json={"instance": "two", "template": "odooplm-20"})
+    assert resp.status_code == 400 and "instances already" in resp.json()["error"]
+    # a creation that fails leaves no server and nothing in the workspace
+    settings.workspaces["acme"].limits["instances"] = 5
+    resp = await client.post(url + "create", headers=post_as("mario"), json={"instance": "broken", "template": "odooplm-20"})
+    job = await wait_job(client, resp.json()["job"])
+    assert job["status"] == "failed" and "acme-broken" not in settings.servers
+    assert settings.workspaces["acme"].servers == ["srv", "acme-main"]
+    # remove: only an instance of the workspace (srv was not made by it)
+    resp = await client.post(url + "delete", headers=post_as("mario"), json={"server": "srv"})
+    assert resp.status_code == 404
+    resp = await client.post(url + "delete", headers=post_as("mario"), json={"server": "acme-main"})
+    job = await wait_job(client, resp.json()["job"])
+    assert job["status"] == "success" and removed == [("acme", "main")]
+    assert "acme-main" not in settings.servers and settings.workspaces["acme"].servers == ["srv"]
+
+
+async def test_workspaceops_create_instance(monkeypatch):
+    """The job's steps: the disk, the projects, each database and start;
+    the projects removed when a step fails."""
+    from pathlib import Path
+
+    from omniacli import stacktemplates, workspaceops
+    from omniacli.jobs import Job, JobFailed
+
+    template = stacktemplates.load_template(Path(__file__).parent.parent / "templates" / "odooplm-20")
+    ws = Workspace("acme", storage="/srv/omniacli", limits={"disk_gb": 20})
+    made = {"database": "main", "odoo_service": "odoo", "db_service": "db",
+            "roles": {"production": {"folder": "/srv/omniacli/acme/main/production", "http_port": 20000},
+                      "test": {"folder": "/srv/omniacli/acme/main/test", "http_port": 20002}}}
+    captured, ran = [], []
+
+    async def capture(cmd, **kw):
+        captured.append(cmd)
+        return 0, json.dumps(made if cmd[4] == "create" else {"unit": "x"})
+
+    async def run(job, cmd, check=True, **kw):
+        ran.append(cmd)
+        if "init" in cmd and fail_init:
+            raise JobFailed("init failed")
+        return 0
+    monkeypatch.setattr(workspaceops, "capture", capture)
+    monkeypatch.setattr(workspaceops, "run", run)
+    fail_init = False
+    values = {"IMAGE": "img", "INIT_MODULES": "plm", "INIT_LANG": "it_IT"}
+    data = await workspaceops.create_instance(Job(id="j", title="t", instances=[], source="s"), ws, "main", template, values)
+    assert [c[4:7] for c in captured] == [["disk", "acme", "/srv/omniacli"], ["create", "acme", "/srv/omniacli"]]
+    assert captured[0][-1] == "20" and json.loads(captured[1][-1]) == values
+    assert ran[0][-6:] == ["/srv/omniacli/acme/main/production", "init", "odoo", "main", "plm", "it_IT"]
+    assert ran[1][-2:] == ["/srv/omniacli/acme/main/production", "start"] and ran[3][-1] == "start"
+    assert data["production"]["restart"] == {"type": "compose", "service": "/srv/omniacli/acme/main/production", "sudo": True}
+    assert data["test"]["http_port"] == 20002
+    ran.clear()
+    fail_init = True
+    with pytest.raises(JobFailed):
+        await workspaceops.create_instance(Job(id="k", title="t", instances=[], source="s"), ws, "main", template, values)
+    assert ran[-1][-4:] == ["remove", "acme", "/srv/omniacli", "main"]
+    with pytest.raises(JobFailed, match="no storage"):
+        await workspaceops.create_instance(Job(id="l", title="t", instances=[], source="s"),
+                                           Workspace("beta"), "main", template, values)
