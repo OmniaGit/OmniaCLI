@@ -29,7 +29,8 @@ services:
     volumes:
       - ./data/filestore:/var/lib/odoo
       - ./config:/etc/odoo:ro
-      - ../addons:/mnt/customer-addons:ro
+      # the customer's repositories of this role (production or test)
+      - ./addons:/mnt/customer-addons:ro
     logging:
       driver: json-file
       options:

@@ -47,7 +47,8 @@ def test_the_template_of_the_repository():
     (("./data/filestore:/var/lib/odoo", "/:/host"), "is not ./<folder>"),
     (("./data/filestore:/var/lib/odoo", "../../other:/var/lib/odoo"), "leaves the instance"),
     (("./config:/etc/odoo:ro", "./config:/etc/odoo"), "read only"),
-    (("../addons:/mnt/customer-addons:ro", "../addons:/mnt/customer-addons"), "read only"),
+    (("./addons:/mnt/customer-addons:ro", "./addons:/mnt/customer-addons"), "read only"),
+    (("./addons:/mnt/customer-addons:ro", "../shared:/mnt/customer-addons"), "read only"),
     (("image: ${IMAGE}", "image: ${SECRET}"), "neither a field"),
     (("name: ${PROJECT}", "name: ${PROJECT}\nvolumes: {}"), "volumes: not allowed"),
     (("        max-file: \"5\"\n  db:", "  db:"), "logging"),
@@ -173,7 +174,10 @@ def test_create_and_remove(root, monkeypatch):
     # root's, readable by everyone: the image's user is no user of this machine
     assert oct((project / "config" / "odoo.conf").stat().st_mode & 0o777) == "0o644"
     assert (project / "data" / "filestore").is_dir() and (project / "data" / "pgdata").is_dir()
-    assert (storage / "acme" / "main" / "addons").is_dir()
+    # the customer's repositories: a folder per role; what the instance was made from
+    assert (project / "addons").is_dir() and (storage / "acme" / "main" / "test" / "addons").is_dir()
+    assert json.loads((storage / "acme" / "main" / "instance.json").read_text()) == {
+        "template": "odooplm-20", "version": made["version"], "database": "main"}
     # each role its network of the pool, the firewall on before
     assert "SUBNET=10.213.0.0/24\n" in env and made["roles"]["test"]["subnet"] == "10.213.1.0/24"
     assert root["state"]["jumps"] == {("DOCKER-USER", "OMNIACLI-WS-FWD"), ("INPUT", "OMNIACLI-WS-IN")}
@@ -280,3 +284,30 @@ def test_subnets_skip_what_is_taken(root):
     root["state"]["networks"] = "172.17.0.0/16 10.213.0.0/24 \n10.213.2.0/23 \n"
     root["state"]["ip"] = "9: br-1234    inet 10.213.1.1/24 brd 10.213.1.255 scope global br-1234\n"
     assert workspacehelper.pick_subnets(2) == ["10.213.4.0/24", "10.213.5.0/24"]
+
+
+def test_conf_names_the_repositories(root):
+    storage = root["storage"]
+    workspacehelper.disk("acme", str(storage), "2")
+    workspacehelper.create("acme", str(storage), "main", "odooplm-20", "{}")
+    conf_file = storage / "acme" / "main" / "test" / "config" / "odoo.conf"
+    password = [l for l in conf_file.read_text().splitlines() if l.startswith("admin_passwd")][0]
+    with pytest.raises(HelperError, match="no repository custom"):
+        workspacehelper.conf("acme", str(storage), "main", "test", '["custom"]')
+    (storage / "acme" / "main" / "test" / "addons" / "custom").mkdir()
+    (storage / "acme" / "main" / "test" / "addons" / "oca-web").mkdir()
+    made = workspacehelper.conf("acme", str(storage), "main", "test", '["custom", "oca-web"]')
+    text = conf_file.read_text()
+    assert made["repositories"] == ["custom", "oca-web"]
+    assert "addons_path = /mnt/odooplm-addons,/mnt/customer-addons/custom,/mnt/customer-addons/oca-web" in text
+    # the admin password is kept; production is untouched
+    assert password in text
+    assert "customer-addons" not in (storage / "acme" / "main" / "production" / "config" / "odoo.conf").read_text()
+    workspacehelper.conf("acme", str(storage), "main", "test", "[]")
+    assert "addons_path = /mnt/odooplm-addons\n" in conf_file.read_text()
+    for args, message in ((("acme", str(storage), "main", "stage", "[]"), "the role is"),
+                          (("acme", str(storage), "main", "test", '["../x"]'), "list of names"),
+                          (("acme", str(storage), "main", "test", "{"), "not JSON"),
+                          (("acme", str(storage), "nope", "test", "[]"), "no instance.json")):
+        with pytest.raises(HelperError, match=message):
+            workspacehelper.conf(*args)

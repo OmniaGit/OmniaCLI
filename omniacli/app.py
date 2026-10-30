@@ -187,6 +187,7 @@ WORKSPACE_ROUTES = frozenset({
     "/api/workspaces/{workspace}/instances/delete", "/api/workspaces/{workspace}/web/save",
     "/api/workspaces/{workspace}/web/publish", "/api/workspaces/{workspace}/web/certificate",
     "/api/workspaces/{workspace}/credentials/save", "/api/workspaces/{workspace}/credentials/delete",
+    "/api/workspaces/{workspace}/repositories/add", "/api/workspaces/{workspace}/repositories/remove",
 })
 
 
@@ -1914,6 +1915,9 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
              "templates": [t.to_dict() for t in found.values()],
              "can_create": bool(ws.storage and ws.limits.get("disk_gb")),
              "instances": [i for i in ws.instances() if workspaceops.server_name(ws, i) in settings.servers],
+             "repositories": {n: {role: [{"name": r.name, "branch": r.branch} for r in getattr(settings.servers[n], role).repositories]
+                                  for role in ROLES if getattr(settings.servers[n], role) is not None}
+                              for n in ws.servers if n in settings.servers},
              "sites": site_names(ws), "certificates": CERTIFICATES,
              "credentials": await asyncio.to_thread(workspace_credentials, ws.name),
              "instances_left": None if not ws.limits.get("instances")
@@ -2056,6 +2060,113 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         except (ValueError, IndexError):
             made = {}
         return {"ok": True, **made, "job": submit_publish(ws, f"manual: {me}").id}
+
+    def workspace_instance(ws: Workspace, payload: dict):
+        """(server name, instance) of a request on an instance of ws; a response when refused."""
+        name = str(payload.get("server") or "")
+        prefix = f"{ws.name}-"
+        if name not in ws.servers or not name.startswith(prefix) or name not in settings.servers:
+            return refuse(f"No instance {name} in workspace {ws.name}", status.HTTP_404_NOT_FOUND)
+        if any(getattr(settings.servers[name], role) is None for role in ROLES):
+            return refuse(f"{name} has no production and test")
+        if server_busy(name):
+            return refuse(f"A job is running on {name}: try again when it ends")
+        return name, name[len(prefix):]
+
+    def repository_rows(repos) -> list[dict]:
+        return [{"name": r.name, "path": str(r.path), "branch": r.branch, "remote": r.remote} for r in repos]
+
+    async def set_repositories(name: str, repositories: dict[str, list[dict]]):
+        """The repositories of the roles in the servers file; the server as it is then."""
+        async with config_lock:
+            data = server_to_dict(settings.servers[name])
+            for role, repos in repositories.items():
+                data[role]["repositories"] = repos
+            try:
+                parsed = parse_servers({name: data}, settings.logs_dir)[name]
+            except ConfigError as exc:
+                raise JobFailed(str(exc)) from None
+            error = await store({**settings.servers, name: parsed})
+        if error is not None:
+            raise JobFailed(f"the servers file was not written: {error.body.decode()}")
+        return settings.servers[name]
+
+    @app.post("/api/workspaces/{workspace}/repositories/add", dependencies=[Depends(admin)])
+    async def repository_add(workspace: str, payload: dict = Body(...), me: Principal = Depends(current_user)):
+        """A customer's repository (https, the workspace's git credentials)
+        cloned into production and test of an instance, each on its branch
+        (a test branch is merged into production's as for every server),
+        named in their odoo.conf, both restarted: its modules can then be
+        installed from Odoo's Apps."""
+        ws = a_workspace(workspace)
+        found = workspace_instance(ws, payload)
+        if not isinstance(found, tuple):
+            return found
+        name, instance = found
+        repo, url = str(payload.get("name") or "").strip(), str(payload.get("url") or "").strip()
+        branches = {role: str(payload.get(f"{role}_branch") or "").strip() for role in ROLES}
+        try:
+            for branch in branches.values():
+                workspaceops.check_repository(repo, url, branch)
+        except JobFailed as exc:
+            return refuse(str(exc))
+        server = settings.servers[name]
+        if any(r.name == repo for role in ROLES for r in getattr(server, role).repositories):
+            return refuse(f"{name} has a repository {repo} already")
+
+        async def action(job):
+            options = gitcredentials.options_for(settings, name)
+            current = {role: list(getattr(server, role).repositories) for role in ROLES}
+            cloned = {}
+            try:
+                for role in ROLES:
+                    cloned[role] = await workspaceops.clone(job, ws, instance, role, repo, url, branches[role], options)
+                for role in ROLES:
+                    await workspaceops.write_conf(job, ws, instance, role, [*(r.name for r in current[role]), repo])
+                done = await set_repositories(name, {role: [*repository_rows(current[role]), {
+                    "name": repo, "path": str(cloned[role]), "branch": branches[role], "remote": "origin"}]
+                    for role in ROLES})
+            except BaseException:
+                for role in ROLES:
+                    await workspaceops.write_conf(job, ws, instance, role, [r.name for r in current[role]])
+                    if role in cloned:
+                        workspaceops.remove_clone(cloned[role])
+                raise
+            for role in ROLES:
+                await ops.restart(job, getattr(done, role))
+            job.log(f"{repo} is in {name}: install its modules from Odoo's Apps")
+
+        job = jobs.submit(f"Add repository {repo} to {name}", [f"{name}/{role}" for role in ROLES],
+                          f"manual: {me}", action)
+        return {"job": job.id}
+
+    @app.post("/api/workspaces/{workspace}/repositories/remove", dependencies=[Depends(admin)])
+    async def repository_remove(workspace: str, payload: dict = Body(...), me: Principal = Depends(current_user)):
+        """A customer's repository out of an instance: out of the odoo.conf
+        and of the server, both roles restarted, the clones deleted."""
+        ws = a_workspace(workspace)
+        found = workspace_instance(ws, payload)
+        if not isinstance(found, tuple):
+            return found
+        name, instance = found
+        repo = str(payload.get("name") or "")
+        server = settings.servers[name]
+        if not any(r.name == repo for role in ROLES for r in getattr(server, role).repositories):
+            return refuse(f"{name} has no repository {repo}", status.HTTP_404_NOT_FOUND)
+
+        async def action(job):
+            kept = {role: [r for r in getattr(server, role).repositories if r.name != repo] for role in ROLES}
+            for role in ROLES:
+                await workspaceops.write_conf(job, ws, instance, role, [r.name for r in kept[role]])
+            done = await set_repositories(name, {role: repository_rows(kept[role]) for role in ROLES})
+            for role in ROLES:
+                await ops.restart(job, getattr(done, role))
+                workspaceops.remove_clone(workspaceops.addons_folder(ws, instance, role) / repo)
+            job.log(f"{repo} removed from {name}")
+
+        job = jobs.submit(f"Remove repository {repo} from {name}", [f"{name}/{role}" for role in ROLES],
+                          f"manual: {me}", action)
+        return {"job": job.id}
 
     def only_here(user: str, workspace: str) -> bool:
         """user is a user of workspaces only, and of this one only: its

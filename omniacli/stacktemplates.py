@@ -195,7 +195,7 @@ def check_compose(template: Template) -> list[str]:
             parts = source.split("/")
             if ".." in parts[1:] or (parts[0] == ".." and len(parts) < 2):
                 found.append(f"{where}.volumes: {source} leaves the instance's folder")
-            if (source.startswith("../") or source.rstrip("/") == "./config") and not match.group(3):
+            if (source.startswith("../") or source.rstrip("/") in ("./config", "./addons")) and not match.group(3):
                 found.append(f"{where}.volumes: {source} must be mounted read only (:ro)")
         logging = svc.get("logging") or {}
         options = logging.get("options") or {} if isinstance(logging, dict) else {}

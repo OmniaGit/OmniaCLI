@@ -20,7 +20,21 @@ A new database has the user <strong>admin</strong> with password <strong>admin</
     <tr><th>Server</th><th></th></tr>
     {% for name in servers %}
     <tr data-server="{{ name }}">
-      <td><a href="{{ prefix }}/servers/{{ name }}"><strong>{{ name }}</strong></a></td>
+      <td><a href="{{ prefix }}/servers/{{ name }}"><strong>{{ name }}</strong></a>
+        {% set roles = repositories.get(name) or {} %}
+        <div class="muted" style="margin-top: 4px">Repositories:
+          {% for r in roles.get("production", []) %}<span class="mono">{{ r.name }}</span>
+            (production {{ r.branch }}{% for t in roles.get("test", []) if t.name == r.name %}, test {{ t.branch }}{% endfor %})
+            <button type="button" class="danger" data-remove-repo data-name="{{ r.name }}"
+                    title="Out of the odoo.conf of production and test, its clones deleted">×</button>{% if not loop.last %}, {% endif %}
+          {% else %}none{% endfor %}</div>
+        <div class="add-repo" style="margin-top: 6px">
+          <input type="text" class="mono repo-url" placeholder="https://github.com/acme/odoo-custom.git" aria-label="Repository address" size="40">
+          <input type="text" class="mono repo-production" placeholder="production branch" aria-label="Production branch" size="12">
+          <input type="text" class="mono repo-test" placeholder="test branch" aria-label="Test branch" size="12">
+          <input type="text" class="mono repo-name" placeholder="name (folder)" aria-label="Name" size="12">
+          <button type="button" data-add-repo>Add repository</button>
+        </div></td>
       <td><button type="button" class="danger" data-remove-instance>Remove</button></td>
     </tr>
     {% else %}
@@ -182,6 +196,25 @@ A new database has the user <strong>admin</strong> with password <strong>admin</
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok) { errorBox.textContent = data.error || data.detail || ("Error " + resp.status); errorBox.hidden = false; return null; }
     return data;
+  }
+  for (const button of document.querySelectorAll("[data-add-repo]")) {
+    button.onclick = async () => {
+      const row = button.closest("tr"), box = button.closest(".add-repo");
+      const url = box.querySelector(".repo-url").value.trim();
+      const name = box.querySelector(".repo-name").value.trim() || url.replace(/\.git$/, "").split("/").pop();
+      const production = box.querySelector(".repo-production").value.trim();
+      const data = await postWs("repositories/add", {server: row.dataset.server, url, name, production_branch: production,
+                                                     test_branch: box.querySelector(".repo-test").value.trim() || production});
+      if (data) location.href = "{{ prefix }}/jobs/" + data.job;
+    };
+  }
+  for (const button of document.querySelectorAll("[data-remove-repo]")) {
+    button.onclick = async () => {
+      const server = button.closest("tr").dataset.server, name = button.dataset.name;
+      if (!confirm(`Remove ${name} from ${server}, production and test? Its clones are deleted; the modules installed from it stop working.`)) return;
+      const data = await postWs("repositories/remove", {server, name});
+      if (data) location.href = "{{ prefix }}/jobs/" + data.job;
+    };
   }
   for (const button of document.querySelectorAll("[data-remove-instance]")) {
     button.onclick = async () => {

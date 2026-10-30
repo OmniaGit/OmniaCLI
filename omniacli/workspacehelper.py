@@ -23,9 +23,16 @@ create: an instance of the workspace from a template, production and test,
 each a compose project <storage>/<workspace>/<instance>/<role> of root's
 (compose.yaml of the template, .env of its checked values and of what this
 helper makes: ports on 127.0.0.1, the database password, the project's
-name; config/odoo.conf; the data folders, given to the image's users), and
-<instance>/addons, the caller's, for the customer's repositories. It prints
-what it made, as JSON. The disk must be mounted, the instance must not exist.
+name; config/odoo.conf; the data folders, given to the image's users;
+addons/, the caller's, for the customer's repositories of that role, which
+OmniaCLI clones there), and <instance>/instance.json (the template and the
+database), root's. It prints what it made, as JSON. The disk must be
+mounted, the instance must not exist.
+
+conf <workspace> <storage> <instance> <role> <repositories as JSON>: the
+role's odoo.conf written again from the instance's template, its addons
+path the image's then /mnt/customer-addons/<repository> of each one named
+(folders of the role's addons/), the admin password kept.
 
 remove: docker compose down -v of both projects, then the instance's folder.
 
@@ -89,6 +96,10 @@ from .pluginstore import SYSTEM_CONFIG
 TEMPLATES = Path(os.environ.get("OMNIACLI_TEMPLATES", "/usr/share/omniacli/templates"))
 SYSTEMD = Path("/etc/systemd/system")
 ROLES = ("production", "test")
+# what an instance was made from, root's: conf writes its odoo.conf again from it
+INSTANCE_FILE = "instance.json"
+# a customer's repository, a folder of the role's addons/
+REPOSITORY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 # the ports an instance's services are published on, on 127.0.0.1
 PORTS = range(20000, 30000)
 MAX_DISK_GB = 65536
@@ -496,12 +507,15 @@ def create(name: str, storage: str, instance: str, template_name: str, values_js
             "values": values, "roles": {}}
     folder.mkdir(mode=0o755)
     try:
-        addons = folder / "addons"
-        addons.mkdir(mode=0o755)
-        os.chown(addons, caller_uid, -1)
+        _write(folder / INSTANCE_FILE, json.dumps({"template": template.name, "version": template.version,
+                                                   "database": database}) + "\n")
         for index, role in enumerate(ROLES):
             project = folder / role
             project.mkdir(mode=0o755)
+            # the customer's repositories of the role: OmniaCLI's user clones there
+            addons = project / "addons"
+            addons.mkdir(mode=0o755)
+            os.chown(addons, caller_uid, -1)
             http_port, ws_port = ports[2 * index], ports[2 * index + 1]
             env = {**values, "PROJECT": f"{name}-{instance}-{role}", "HTTP_PORT": str(http_port),
                    "WEBSOCKET_PORT": str(ws_port), "DB_PASSWORD": stacktemplates.new_password(),
@@ -523,6 +537,50 @@ def create(name: str, storage: str, instance: str, template_name: str, values_js
         shutil.rmtree(folder, ignore_errors=True)
         raise
     return made
+
+
+def _admin_password(conf: str) -> str | None:
+    for line in conf.splitlines():
+        key, _, value = line.partition("=")
+        if key.strip() == "admin_passwd" and value.strip():
+            return value.strip()
+    return None
+
+
+def conf(name: str, storage: str, instance: str, role: str, repos_json: str) -> dict:
+    image, mount = workspace(name, storage)
+    _name("instance", instance)
+    if role not in ROLES:
+        raise HelperError(f"the role is {' or '.join(ROLES)}")
+    if not mounted(image, mount):
+        raise HelperError(f"the disk of workspace {name} is not mounted")
+    folder = mount / instance
+    try:
+        meta = json.loads((folder / INSTANCE_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raise HelperError(f"{folder} holds no {INSTANCE_FILE}: not an instance made by this helper") from None
+    try:
+        repos = json.loads(repos_json)
+    except ValueError:
+        raise HelperError("the repositories are not JSON") from None
+    if not isinstance(repos, list) or not all(isinstance(r, str) and REPOSITORY.fullmatch(r) for r in repos):
+        raise HelperError("the repositories are a list of names (a-z A-Z 0-9 . _ -)")
+    project = folder / role
+    for repo in repos:
+        path = project / "addons" / repo
+        if path.is_symlink() or not path.is_dir():
+            raise HelperError(f"no repository {repo} in {project / 'addons'}")
+    template = template_named(str(meta.get("template") or ""))
+    conf_file = project / "config" / "odoo.conf"
+    try:
+        password = _admin_password(conf_file.read_text(encoding="utf-8"))
+    except OSError:
+        password = None
+    text = stacktemplates.conf_text(template, str(meta.get("database") or ""),
+                                    password or stacktemplates.new_password(), list(dict.fromkeys(repos)))
+    _write(conf_file, text, mode=0o644)
+    return {"workspace": name, "instance": instance, "role": role, "repositories": list(dict.fromkeys(repos)),
+            "template": template.name, "version": template.version}
 
 
 def remove(name: str, storage: str, instance: str) -> dict:
@@ -753,7 +811,8 @@ def owncert(name: str, storage: str, given: str | None = None) -> dict:
 
 
 ACTIONS = {"disk": (disk, 3), "create": (create, 5), "remove": (remove, 3), "web": (web, 3),
-           "owncert": (owncert, 2), "firewall": (firewall, 1), "template-install": (template_install, 1)}
+           "owncert": (owncert, 2), "firewall": (firewall, 1), "template-install": (template_install, 1),
+           "conf": (conf, 5)}
 
 
 def run(argv: list[str]) -> dict:

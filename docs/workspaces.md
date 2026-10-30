@@ -63,7 +63,8 @@ run code as OmniaCLI's user.
 <storage>/<workspace>/<instance>/production/data/filestore
 <storage>/<workspace>/<instance>/production/data/pgdata
 <storage>/<workspace>/<instance>/test/
-<storage>/<workspace>/<instance>/addons/<repo>/  # git https, written by OmniaCLI, mounted :ro
+<storage>/<workspace>/<instance>/<role>/addons/<repo>/  # git https, cloned by OmniaCLI, mounted :ro
+<storage>/<workspace>/<instance>/instance.json   # the template and database it was made from
 ```
 
 - The storage roots are listed by root in `/etc/omniacli/omniacli.yaml`

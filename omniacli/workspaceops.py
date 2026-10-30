@@ -6,6 +6,11 @@ go through the root helpers (workspacehelper.py, composehelper.py)."""
 from __future__ import annotations
 
 import json
+import os
+import re
+import shutil
+import stat
+import sys
 from pathlib import Path
 
 from . import stacktemplates, templatestore, workspacehelper
@@ -116,3 +121,67 @@ async def own_certificate(ws: Workspace, certificate: str, key: str) -> tuple[bo
 
 def instance_folder(ws: Workspace, instance: str) -> Path:
     return Path(ws.storage) / ws.name / instance
+
+
+# a customer's repository: https only, no user or token in it (they are the
+# interface's git credentials), no query
+REPOSITORY_URL = re.compile(r"https://[A-Za-z0-9.-]+(?::\d{1,5})?/[A-Za-z0-9._~/-]+")
+BRANCH = re.compile(r"[A-Za-z0-9._/-]{1,200}")
+CLONE_TIMEOUT = 1800
+
+
+def check_repository(name: str, url: str, branch: str) -> None:
+    if not workspacehelper.REPOSITORY.fullmatch(name):
+        raise JobFailed(f"{name!r} is not a repository name (a-z A-Z 0-9 . _ -)")
+    if not REPOSITORY_URL.fullmatch(url) or ".." in url:
+        raise JobFailed(f"{url!r} is not an https:// address of a repository (no user or token in it: "
+                        "those are the workspace's git credentials)")
+    if not BRANCH.fullmatch(branch) or branch.startswith(("-", "/")) or ".." in branch:
+        raise JobFailed(f"{branch!r} is not a branch name")
+
+
+def addons_folder(ws: Workspace, instance: str, role: str) -> Path:
+    return Path(ws.storage) / ws.name / instance / role / "addons"
+
+
+def _remove_tree(path: Path) -> None:
+    """A clone of OmniaCLI's user, its read-only folders and objects included."""
+    def retry(func, target, _exc):
+        for folder in (os.path.dirname(target), target):
+            if os.path.isdir(folder) and not os.path.islink(folder):
+                os.chmod(folder, stat.S_IRWXU)
+        func(target)
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=retry)
+    else:
+        shutil.rmtree(path, onerror=retry)
+
+
+async def clone(job: Job, ws: Workspace, instance: str, role: str, name: str, url: str, branch: str,
+                git_options: tuple = ()) -> Path:
+    """The customer's repository cloned, with its submodules, into the role's
+    addons/ (OmniaCLI's own folder there), with the server's git credentials."""
+    check_repository(name, url, branch)
+    target = addons_folder(ws, instance, role) / name
+    if target.exists() or target.is_symlink():
+        raise JobFailed(f"{target} exists already")
+    job.log(f"--- clone {url} ({branch}) into {target}")
+    try:
+        await run(job, ["git", *git_options, "clone", "--branch", branch, "--recurse-submodules", "--", url,
+                        str(target)], timeout=CLONE_TIMEOUT)
+    except BaseException:
+        if target.exists():
+            _remove_tree(target)
+        raise
+    return target
+
+
+async def write_conf(job: Job, ws: Workspace, instance: str, role: str, repositories: list[str]) -> dict:
+    """The role's odoo.conf again, its addons path naming these repositories."""
+    job.log(f"--- odoo.conf of {role}: the addons of {', '.join(repositories) or 'no repository'}")
+    return await _helper(job, "conf", ws.name, ws.storage, instance, role, json.dumps(repositories))
+
+
+def remove_clone(path: Path) -> None:
+    if path.exists():
+        _remove_tree(path)

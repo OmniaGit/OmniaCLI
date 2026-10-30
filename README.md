@@ -800,10 +800,25 @@ template and the fields it asks. A job then:
    a database password of its own, the project's name), `config/odoo.conf`
    (the image's addons, `proxy_mode`, `dbfilter` on the instance's database,
    `list_db = False`), the filestore and the database as folders of the
-   instance (on its disk), `addons/` for the customer's repositories;
+   instance (on its disk), `addons/` of the role for the customer's
+   repositories, and `<name>/instance.json` (the template and the database);
 3. creates each database (`odoo -i <modules>`, in a container of its own)
    and starts both; a step that fails removes what was made;
 4. adds the server, of type `docker`, to the workspace.
+
+**The customer's modules**: on the same page, **Add repository** on an
+instance takes an `https://` address (no user or token in it: those are the
+workspace's git credentials, above), a branch for production and one for
+test, and a name. A job clones it, with its submodules and those
+credentials, into `production/addons/<name>` and `test/addons/<name>` (folders
+of OmniaCLI's user, mounted read only into the containers, so no token and no
+`.git` the customer could change), has the root helper's `conf` write each
+role's `odoo.conf` again with `/mnt/customer-addons/<name>` in its addons path
+(the admin password kept), adds the repository to the server and restarts
+both; its modules are then installed from Odoo's Apps. Pull, update and the
+merge of test into production then work as for every server. **×** takes it
+out of both the same way and deletes the clones. A step that fails puts the
+`odoo.conf` back and deletes what was cloned.
 
 A new database has the user **admin** with password **admin**: change it
 at the first login. **Remove** on the same page takes down both projects,
