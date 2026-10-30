@@ -51,6 +51,11 @@ omniacli-workspaces-firewall.service that applies them at every boot before
 docker; apply: the rules only (what the unit runs); off: both removed.
 create puts them on first.
 
+template-install <template>: a template downloaded from the download
+server, checked with the key of the main configuration, into
+/var/lib/omniacli-templates/<template> (templatestore.py); of it and the
+package's, create takes the higher version.
+
 owncert: the customer's certificate and key, {certificate, key} as JSON on
 the standard input (a key is no argument: ps shows those), checked with
 openssl (the key is the certificate's, not expired), kept in
@@ -72,7 +77,7 @@ from pathlib import Path
 
 import yaml
 
-from . import composehelper, stacktemplates, workspaceweb
+from . import composehelper, stacktemplates, templatestore, workspaceweb
 from .composehelper import ENV, HelperError, caller
 from .config import (CERTIFICATES, DOMAIN_NAME, OMNIACLI_COMMAND, SUBDOMAIN, TEST_LABEL, WORKSPACE_NAME,
                      ConfigError, parse_storage_roots, web_names)
@@ -418,12 +423,7 @@ def pick_ports(count: int) -> list[int]:
     raise HelperError(f"no {count} free ports in {PORTS.start}-{PORTS.stop - 1}")
 
 
-def template_named(name: str) -> stacktemplates.Template:
-    if not stacktemplates.NAME.fullmatch(name):
-        raise HelperError(f"{name!r} is not a template name")
-    folder = TEMPLATES / name
-    if not folder.is_dir():
-        raise HelperError(f"no template {name} in {TEMPLATES}")
+def _template_in(folder: Path) -> stacktemplates.Template:
     _safe_folder(folder, "the template")
     _, uid, groups = caller()
     for file_name in stacktemplates.FILES:
@@ -433,6 +433,31 @@ def template_named(name: str) -> stacktemplates.Template:
     try:
         return stacktemplates.load_template(folder)
     except stacktemplates.TemplateError as exc:
+        raise HelperError(str(exc)) from None
+
+
+def template_named(name: str) -> stacktemplates.Template:
+    """The package's template or the one installed from the download
+    server (templatestore.py), the higher version."""
+    if not stacktemplates.NAME.fullmatch(name):
+        raise HelperError(f"{name!r} is not a template name")
+    found = None
+    for base in (TEMPLATES, templatestore.INSTALLED):
+        folder = base / name
+        if folder.is_symlink() or not folder.is_dir():
+            continue
+        template = _template_in(folder)
+        if found is None or stacktemplates.version_key(template.version) > stacktemplates.version_key(found.version):
+            found = template
+    if found is None:
+        raise HelperError(f"no template {name} in {TEMPLATES} or {templatestore.INSTALLED}")
+    return found
+
+
+def template_install(name: str) -> dict:
+    try:
+        return templatestore.install(name)
+    except templatestore.StoreError as exc:
         raise HelperError(str(exc)) from None
 
 
@@ -728,7 +753,7 @@ def owncert(name: str, storage: str, given: str | None = None) -> dict:
 
 
 ACTIONS = {"disk": (disk, 3), "create": (create, 5), "remove": (remove, 3), "web": (web, 3),
-           "owncert": (owncert, 2), "firewall": (firewall, 1)}
+           "owncert": (owncert, 2), "firewall": (firewall, 1), "template-install": (template_install, 1)}
 
 
 def run(argv: list[str]) -> dict:

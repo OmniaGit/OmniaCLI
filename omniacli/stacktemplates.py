@@ -16,13 +16,21 @@ What a template's compose.yaml may hold is a closed list (check_compose):
 root runs it, so a template, signed or not, may not open the machine. Every
 value of a field is checked against the field (its choices or pattern), and
 reaches .env only, never compose.yaml.
+
+Published (templatestore.py), a template is an archive of its three files,
+omniacli-template-<name>.tar.gz, made by pack (the release script runs
+`omniacli template-pack`) and read back by unpack, which takes those three
+regular files and nothing else.
 """
 
 from __future__ import annotations
 
+import gzip
+import io
 import json
 import re
 import secrets
+import tarfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -222,18 +230,80 @@ def new_password() -> str:
     return secrets.token_urlsafe(24)
 
 
+def version_key(version: str) -> tuple:
+    """2026.1.10 after 2026.1.9; a version not of numbers comes first."""
+    parts = str(version).split(".")
+    return tuple(int(p) for p in parts) if all(p.isdigit() for p in parts) else ()
+
+
 def available(folders: list[Path]) -> dict[str, Template]:
-    """The templates of folders (the first one of a name wins); a folder
-    that is not a valid template is left out."""
+    """The templates of folders: of two with one name (the package's and a
+    downloaded one) the higher version, the first folder's when equal; a
+    folder that is not a valid template is left out."""
     found: dict[str, Template] = {}
     for base in folders:
         if not base.is_dir():
             continue
         for folder in sorted(base.iterdir()):
-            if folder.name in found or not folder.is_dir():
+            if not folder.is_dir() or folder.is_symlink():
                 continue
             try:
-                found[folder.name] = load_template(folder)
+                template = load_template(folder)
             except TemplateError:
                 continue
+            if folder.name not in found or version_key(template.version) > version_key(found[folder.name].version):
+                found[folder.name] = template
     return found
+
+
+# --- published: an archive of the three files ------------------------------
+
+ARCHIVE_PREFIX = "omniacli-template-"
+ARCHIVE_SUFFIX = ".tar.gz"
+MAX_FILE = 256 * 1024
+
+
+def archive_name(name: str) -> str:
+    return f"{ARCHIVE_PREFIX}{name}{ARCHIVE_SUFFIX}"
+
+
+def pack(folder: Path, dest_dir: Path) -> dict:
+    """The archive of the template in folder, into dest_dir, once it checks;
+    the same bytes for the same files (no time, no owner). Its entry of the
+    index: name, label, description, version, file."""
+    template = load_template(folder)
+    meta = json.loads((Path(folder) / "template.json").read_text(encoding="utf-8"))
+    path = Path(dest_dir) / archive_name(template.name)
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w", format=tarfile.USTAR_FORMAT) as tar:
+        for name in sorted(FILES):
+            data = (Path(folder) / name).read_bytes()
+            if len(data) > MAX_FILE:
+                raise TemplateError(f"{folder}/{name}: more than {MAX_FILE} bytes")
+            info = tarfile.TarInfo(name)
+            info.size, info.mode, info.mtime = len(data), 0o644, 0
+            tar.addfile(info, io.BytesIO(data))
+    with open(path, "wb") as raw, gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as out:
+        out.write(buffer.getvalue())
+    return {"name": template.name, "label": template.label, "description": str(meta.get("description") or ""),
+            "version": template.version, "file": path.name}
+
+
+def unpack(archive: Path, dest: Path) -> None:
+    """The three files of a template's archive into the folder dest (made
+    here); anything else in the archive refuses it."""
+    try:
+        with tarfile.open(archive, "r:gz") as tar:
+            members = tar.getmembers()
+            if sorted(m.name for m in members) != sorted(FILES):
+                raise TemplateError(f"{archive.name} holds {', '.join(sorted(m.name for m in members))}, "
+                                    f"not {', '.join(sorted(FILES))}")
+            dest.mkdir(mode=0o755)
+            for member in members:
+                if not member.isreg() or member.size > MAX_FILE:
+                    raise TemplateError(f"{archive.name}: {member.name} is not a file of at most {MAX_FILE} bytes")
+                data = tar.extractfile(member).read(MAX_FILE + 1)
+                (dest / member.name).write_bytes(data)
+                (dest / member.name).chmod(0o644)
+    except (tarfile.TarError, OSError, EOFError) as exc:
+        raise TemplateError(f"{archive.name}: not a template's archive: {exc}") from None

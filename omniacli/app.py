@@ -32,7 +32,7 @@ from starlette.background import BackgroundTask
 from starlette.requests import HTTPConnection
 
 from . import (checks, consumer, disks, linkcopy, ops, packages, plugins, pluginstore, puller, publisher,
-               schedules, selflog, shell, stacktemplates, tunnel, workspaceops)
+               schedules, selflog, shell, stacktemplates, templatestore, tunnel, workspacehelper, workspaceops)
 from .accesslog import AccessLog
 from .diskhistory import DiskHistory, DiskRecorder
 from .auth import ROLES as ACCESS_ROLES
@@ -1703,8 +1703,55 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             {"workspaces": workspace_rows(), "workspaces_file": settings.workspaces_file,
              "servers": sorted(settings.servers), "users": sorted(settings.users),
              "user_roles": {n: settings.user_role(n) for n in settings.users},
-             "storage_roots": settings.storage_roots, "roles": ACCESS_ROLES, "limits": WORKSPACE_LIMITS},
+             "storage_roots": settings.storage_roots, "roles": ACCESS_ROLES, "limits": WORKSPACE_LIMITS,
+             "templates": await asyncio.to_thread(template_rows),
+             "templates_index": templatestore.index_url(settings.plugin_source)},
         )
+
+    def template_rows() -> list[dict]:
+        """The templates here: the package's and those downloaded, and which one is used."""
+        package = stacktemplates.available([workspacehelper.TEMPLATES])
+        downloaded = stacktemplates.available([templatestore.INSTALLED])
+        used = workspaceops.templates()
+        return [{"name": name, "label": used[name].label, "package": package[name].version if name in package else None,
+                 "downloaded": downloaded[name].version if name in downloaded else None,
+                 "used": used[name].version} for name in sorted(used)]
+
+    @app.get("/api/templates/available", dependencies=[Depends(admin)])
+    async def templates_available():
+        """The templates published for download (signed), with the version used here."""
+        try:
+            found = await templatestore.available(settings.plugin_source)
+        except pluginstore.StoreError as exc:
+            return refuse(str(exc), status.HTTP_502_BAD_GATEWAY)
+        used = await asyncio.to_thread(workspaceops.templates)
+        return {"index": templatestore.index_url(settings.plugin_source),
+                "templates": [{**t, "used": used[t["name"]].version if t["name"] in used else None} for t in found]}
+
+    @app.post("/api/templates/{name}/install")
+    async def template_install(name: str, user: Principal = Depends(admin)):
+        """Download a published template, check it, and install it through
+        the root helper: new instances are made from it (the higher version)."""
+        try:
+            found = {t["name"]: t for t in await templatestore.available(settings.plugin_source)}
+        except pluginstore.StoreError as exc:
+            return refuse(str(exc), status.HTTP_502_BAD_GATEWAY)
+        template = found.get(name)
+        if template is None:
+            return refuse(f"The index publishes no template {name}", status.HTTP_404_NOT_FOUND)
+        if template.get("error"):
+            return refuse(f"{name}: {template['error']}")
+
+        async def action(job):
+            manifest = await templatestore.download(job, settings.plugin_source, template,
+                                                    templatestore.templates_dir(settings.jobs_dir))
+            await ops.run(job, workspaceops.helper("template-install", name), timeout=workspaceops.HELPER_TIMEOUT)
+            job.result = {"template": name, "version": manifest["version"]}
+            job.log(f"Template {name} {manifest['version']} installed: new instances are made from it")
+
+        job = jobs.submit(f"Install template {name} {template.get('version', '')}".strip(), ["omniacli/templates"],
+                          f"manual: {user}", action)
+        return {"job": job.id}
 
     @app.post("/api/workspaces/save", dependencies=[Depends(admin)])
     async def workspace_save(payload: dict = Body(...), me: Principal = Depends(current_user)):

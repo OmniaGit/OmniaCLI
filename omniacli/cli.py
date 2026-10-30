@@ -154,6 +154,21 @@ def _plugin_install(args) -> int:
     return 0
 
 
+def _template_pack(args) -> int:
+    """The archive of a template, checked, into a folder: what the release
+    script publishes (templatestore.py). Its index entry, as JSON."""
+    import json
+
+    from . import stacktemplates
+
+    try:
+        print(json.dumps(stacktemplates.pack(Path(args.folder), Path(args.dest))))
+    except stacktemplates.TemplateError as exc:
+        print(f"template-pack: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def _compose_helper(args) -> int:
     """As root (sudo): an action on a compose project, which must be safe
     from the user who called sudo (composehelper.py)."""
@@ -225,6 +240,12 @@ def main(argv: list[str] | None = None) -> int:
                                  "cannot change (start, stop, restart, state)")
     helper.add_argument("args", nargs=argparse.REMAINDER, help="<project folder> <action> [arguments]")
     helper.set_defaults(func=_compose_helper)
+
+    pack = sub.add_parser("template-pack",
+                          help="the archive of a workspace template, checked, for the download server")
+    pack.add_argument("folder", help="the template's folder (templates/<name>)")
+    pack.add_argument("dest", help="the folder the archive is written into")
+    pack.set_defaults(func=_template_pack)
 
     workspace = sub.add_parser("workspace-helper",
                                help="as root: a workspace's virtual disk, and its instances made from a "

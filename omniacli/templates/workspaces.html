@@ -19,6 +19,25 @@ workspace at most. Saved in <span class="mono">{{ workspaces_file }}</span>.</p>
 <h2 style="margin-top: 24px">Known now</h2>
 <p class="muted">Servers: {% for s in servers %}<span class="mono">{{ s }}</span>{% if not loop.last %}, {% endif %}{% else %}none{% endfor %}.<br>
 Users of workspaces: {% for u in users if user_roles[u] == "workspace" %}<span class="mono">{{ u }}</span>{% if not loop.last %}, {% endif %}{% else %}none (create them on the Users page with role workspace, or let a workspace's admin create them){% endfor %}.</p>
+<h2 style="margin-top: 24px">Templates</h2>
+<p class="muted">What new instances are made from: the package's, and those downloaded from
+<span class="mono">{{ templates_index }}</span> (signed, checked with <span class="mono">plugins.public_key</span>
+of the main configuration). Of the two, the higher version is used; the instances made before keep their files.</p>
+<div class="panel">
+  <div class="scroll">
+  <table id="templates">
+    <tr><th>Template</th><th>Package</th><th>Downloaded</th><th>Used</th><th>Published</th><th></th></tr>
+    {% for t in templates %}
+    <tr data-template="{{ t.name }}"><td><strong>{{ t.name }}</strong><br><span class="muted">{{ t.label }}</span></td>
+      <td class="mono">{{ t.package or "" }}</td><td class="mono">{{ t.downloaded or "" }}</td>
+      <td class="mono">{{ t.used }}</td><td class="mono published"></td><td class="install"></td></tr>
+    {% else %}
+    <tr><td colspan="6" class="muted">No template here.</td></tr>
+    {% endfor %}
+  </table>
+  </div>
+  <div class="actions"><button type="button" id="look-templates">Look for published templates</button></div>
+</div>
 <template id="ws-template">
   <fieldset class="group-box">
     <legend><input type="text" class="name mono" placeholder="name: a-z 0-9 -" aria-label="Workspace name"></legend>
@@ -95,6 +114,40 @@ Users of workspaces: {% for u in users if user_roles[u] == "workspace" %}<span c
     list.appendChild(box);
     return box;
   }
+  const table = document.getElementById("templates");
+  document.getElementById("look-templates").onclick = async () => {
+    errorBox.hidden = true;
+    const resp = await fetch("{{ prefix }}/api/templates/available");
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) { errorBox.textContent = data.error || data.detail || ("Error " + resp.status); errorBox.hidden = false; return; }
+    for (const t of data.templates) {
+      let row = table.querySelector(`tr[data-template="${CSS.escape(t.name)}"]`);
+      if (!row) {
+        row = table.insertRow(-1);
+        row.dataset.template = t.name;
+        for (let i = 0; i < 6; i++) row.insertCell();
+        row.cells[0].innerHTML = "<strong></strong><br><span class=\"muted\"></span>";
+        row.cells[0].querySelector("strong").textContent = t.name;
+        row.cells[0].querySelector("span").textContent = t.label;
+        row.cells[4].className = "mono published"; row.cells[5].className = "install";
+      }
+      row.querySelector(".published").textContent = t.error ? "error: " + t.error : t.version;
+      const cell = row.querySelector(".install");
+      cell.textContent = "";
+      if (!t.error) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = t.used === t.version ? "Install again" : "Install";
+        button.onclick = async () => {
+          const r = await fetch(`{{ prefix }}/api/templates/${encodeURIComponent(t.name)}/install`, {method: "POST"});
+          const d = await r.json().catch(() => ({}));
+          if (!r.ok) { errorBox.textContent = d.error || d.detail || ("Error " + r.status); errorBox.hidden = false; return; }
+          location.href = "{{ prefix }}/jobs/" + d.job;
+        };
+        cell.appendChild(button);
+      }
+    }
+  };
   for (const ws of {{ workspaces | tojson }}) addWorkspace(ws, false);
   document.getElementById("add").onclick = () => addWorkspace({}, true).querySelector(".name").focus();
 })();

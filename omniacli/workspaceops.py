@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from . import stacktemplates, workspacehelper
+from . import stacktemplates, templatestore, workspacehelper
 from .config import OMNIACLI_COMMAND, Workspace
 from .jobs import Job, JobFailed
 from .ops import capture, run
@@ -29,7 +29,7 @@ def compose(project: str, *args: str) -> list[str]:
 
 def templates() -> dict[str, stacktemplates.Template]:
     """The templates the root helper creates instances from."""
-    return stacktemplates.available([workspacehelper.TEMPLATES])
+    return stacktemplates.available([workspacehelper.TEMPLATES, templatestore.INSTALLED])
 
 
 def server_name(ws: Workspace, instance: str) -> str:

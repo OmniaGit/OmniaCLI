@@ -801,7 +801,7 @@ customer's addons read only, logging `json-file` with `max-size` and
 `max-file`. The first template is `odooplm-20` (the DockerOdooPLM image of
 Odoo 20, PostgreSQL 17).
 
-The root helper, `omniacli workspace-helper disk|create|remove|web|owncert|firewall`
+The root helper, `omniacli workspace-helper disk|create|remove|web|owncert|firewall|template-install`
 (`workspacehelper.py`), takes names only (workspace, instance, template), a
 storage of `workspaces.storage` of the main configuration, which only root
 writes, a template of the package's folder, and refuses a folder or a
@@ -818,6 +818,27 @@ omniacli ALL=(root) NOPASSWD: /opt/omniacli/venv/bin/omniacli compose-helper /sr
 
 Without it, nothing is granted: give it only where workspaces are wanted,
 since root runs what these helpers make.
+
+#### Templates published for download
+
+New templates and new versions come from the download server as the
+plugins do (`templatestore.py`), next to the plugins' index:
+`omniacli-templates.json` and one archive per template,
+`omniacli-template-<name>.tar.gz` (its three files, made by `omniacli
+template-pack`, which checks them first), each with its signed manifest,
+whose version is the template's. **Settings › Workspaces › Templates**
+(the machine's admins) lists the templates here (the package's, the
+downloaded ones, the one used) and, with **Look for published templates**,
+those published, with their signed version; **Install** runs a job: the
+archive downloaded into `templates/<name>/` next to the jobs and checked
+against its signed manifest, then the root helper's `template-install`
+copies it into a folder of root's, checks it again with
+`plugins.public_key` of the main configuration, unpacks its three files
+(nothing else is taken), loads it (the compose rules) and puts it in
+`/var/lib/omniacli-templates/<name>`, root's. Of a template there and in the
+package the **higher version** is used; the instances made before keep their
+own files. OmniaConfigurator3's `Setup/release.py` (target `templates`)
+publishes them.
 
 #### The network of the workspaces' containers
 
