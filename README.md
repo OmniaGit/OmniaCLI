@@ -801,7 +801,7 @@ customer's addons read only, logging `json-file` with `max-size` and
 `max-file`. The first template is `odooplm-20` (the DockerOdooPLM image of
 Odoo 20, PostgreSQL 17).
 
-The root helper, `omniacli workspace-helper disk|create|remove|web|owncert`
+The root helper, `omniacli workspace-helper disk|create|remove|web|owncert|firewall`
 (`workspacehelper.py`), takes names only (workspace, instance, template), a
 storage of `workspaces.storage` of the main configuration, which only root
 writes, a template of the package's folder, and refuses a folder or a
@@ -818,6 +818,31 @@ omniacli ALL=(root) NOPASSWD: /opt/omniacli/venv/bin/omniacli compose-helper /sr
 
 Without it, nothing is granted: give it only where workspaces are wanted,
 since root runs what these helpers make.
+
+#### The network of the workspaces' containers
+
+A workspace's containers reach the internet (pip, git over https, DNS) and
+nothing else: not this machine, not the LAN, not the other containers of
+the machine. Every project of a workspace has a network of its own, a /24
+of one pool (`workspaces.network` in the main configuration,
+`10.213.0.0/16` when not set; `SUBNET` in its `.env`, required by the
+compose rules as the template's only network), which may not overlap a
+network of this machine. The root helper's `firewall` makes two chains for
+the pool:
+
+- `OMNIACLI-WS-FWD`, jumped from `DOCKER-USER`: the replies pass, what goes
+  to the pool itself is left to docker's rules (which keep its networks
+  apart), what goes to a private address (`10/8`, `172.16/12`,
+  `192.168/16`, `169.254/16`, `100.64/10`) is dropped;
+- `OMNIACLI-WS-IN`, jumped first from `INPUT`: the replies pass (nginx
+  reaches Odoo through docker's proxy on `127.0.0.1`, the answer comes in
+  from the container), anything else from the pool to this machine is
+  dropped.
+
+The first instance turns it on (`firewall on`): the rules, and the unit
+`omniacli-workspaces-firewall.service`, which applies them again at every
+boot before docker (`firewall apply`). `firewall off` removes both. IPv4
+only: the projects' networks have no IPv6.
 
 #### Domains of a workspace
 

@@ -1,8 +1,14 @@
 # OdooPLM 20 (DockerOdooPLM image) and PostgreSQL 17: a template of OmniaCLI's
 # workspaces (docs/workspaces.md). OmniaCLI writes .env (the variables below)
 # and config/odoo.conf; filestore and database are folders of the instance,
-# on its workspace's disk; the ports listen on this machine only.
+# on its workspace's disk; the ports listen on this machine only, the network
+# is one OmniaCLI's firewall knows (SUBNET).
 name: ${PROJECT}
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: ${SUBNET}
 services:
   odoo:
     image: ${IMAGE}

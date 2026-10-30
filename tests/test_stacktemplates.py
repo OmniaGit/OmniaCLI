@@ -100,7 +100,7 @@ def root(monkeypatch, tmp_path):
     monkeypatch.setattr(workspacehelper, "caller", lambda: ("omniacli", 0, [0]))
     monkeypatch.setattr(workspacehelper.os, "chown", lambda *args: None)
     monkeypatch.setattr(workspacehelper, "pick_ports", lambda count: list(range(20000, 20000 + count)))
-    calls, state = [], {"mounted": False}
+    calls, state = [], {"mounted": False, "jumps": set(), "ip": "", "networks": ""}
 
     def run(*cmd, check=True):
         calls.append(list(cmd))
@@ -108,7 +108,20 @@ def root(monkeypatch, tmp_path):
             return "srv-acme.mount\n"
         if cmd[:3] == ("systemctl", "enable", "--now"):
             state["mounted"] = True
+        if cmd[:3] == ("iptables", "-w", "-I"):
+            state["jumps"].add((cmd[3], cmd[-1]))
+        if cmd[:3] == ("iptables", "-w", "-D"):
+            state["jumps"].discard((cmd[3], cmd[-1]))
+        if cmd[:2] == ("ip", "-4"):
+            return state["ip"]
+        if cmd[:3] == ("docker", "network", "ls"):
+            return "abc\n" if state["networks"] else ""
+        if cmd[:3] == ("docker", "network", "inspect"):
+            return state["networks"]
         return ""
+    # the main configuration of the test: no workspaces.network (the default pool)
+    monkeypatch.setattr(workspacehelper, "_system", lambda config=None: {})
+    monkeypatch.setattr(workspacehelper, "_has_jump", lambda parent, chain: (parent, chain) in state["jumps"])
     monkeypatch.setattr(workspacehelper, "_run", run)
     monkeypatch.setattr(workspacehelper, "mounted", lambda image, mount: state["mounted"])
     monkeypatch.setattr(workspacehelper, "loop_of", lambda image: "/dev/loop9")
@@ -161,6 +174,10 @@ def test_create_and_remove(root, monkeypatch):
     assert oct((project / "config" / "odoo.conf").stat().st_mode & 0o777) == "0o644"
     assert (project / "data" / "filestore").is_dir() and (project / "data" / "pgdata").is_dir()
     assert (storage / "acme" / "main" / "addons").is_dir()
+    # each role its network of the pool, the firewall on before
+    assert "SUBNET=10.213.0.0/24\n" in env and made["roles"]["test"]["subnet"] == "10.213.1.0/24"
+    assert root["state"]["jumps"] == {("DOCKER-USER", "OMNIACLI-WS-FWD"), ("INPUT", "OMNIACLI-WS-IN")}
+    assert (root["systemd"] / workspacehelper.FIREWALL_UNIT).is_file()
     # the two roles have their own password
     test_env = (storage / "acme" / "main" / "test" / ".env").read_text()
     password = [line for line in env.splitlines() if line.startswith("DB_PASSWORD=")][0]
@@ -200,3 +217,66 @@ def test_run_needs_root(monkeypatch):
     monkeypatch.setattr(workspacehelper.os, "geteuid", lambda: 1000)
     with pytest.raises(HelperError, match="as root"):
         workspacehelper.run(["disk", "acme", "/srv", "1"])
+
+
+def test_compose_needs_the_network_of_the_pool(tmp_path):
+    text = (REPO_TEMPLATES / "odooplm-20" / "compose.yaml").read_text()
+    for compose in (text.replace("networks:\n  default:\n    ipam:\n      config:\n        - subnet: ${SUBNET}\n", ""),
+                    text.replace("- subnet: ${SUBNET}", "- subnet: 10.0.0.0/24"),
+                    text.replace("networks:\n  default:", "networks:\n  lan:\n    external: true\n  default:")):
+        folder = copy_template(tmp_path / str(len(compose)), compose)
+        with pytest.raises(stacktemplates.TemplateError, match="networks: must be exactly"):
+            stacktemplates.load_template(folder)
+
+
+def test_firewall_rules():
+    rules = workspacehelper.firewall_rules(workspacehelper.ipaddress.ip_network("10.213.0.0/16"))
+    forward, inbound = rules["OMNIACLI-WS-FWD"], rules["OMNIACLI-WS-IN"]
+    replies = ["-s", "10.213.0.0/16", "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "RETURN"]
+    # replies first; the pool to itself left to docker; then every private range dropped
+    assert forward[0] == replies and forward[1] == ["-s", "10.213.0.0/16", "-d", "10.213.0.0/16", "-j", "RETURN"]
+    assert [r[3] for r in forward[2:]] == list(workspacehelper.PRIVATE) and {r[-1] for r in forward[2:]} == {"DROP"}
+    assert inbound == [replies, ["-s", "10.213.0.0/16", "-j", "DROP"]]
+
+
+def test_firewall_on_and_off(root, monkeypatch):
+    calls, state = root["calls"], root["state"]
+    made = workspacehelper.firewall("on")
+    assert made["pool"] == "10.213.0.0/16"
+    assert ["iptables", "-w", "-A", "OMNIACLI-WS-IN", "-s", "10.213.0.0/16", "-j", "DROP"] in calls
+    assert ["iptables", "-w", "-I", "INPUT", "1", "-j", "OMNIACLI-WS-IN"] in calls
+    unit = (root["systemd"] / workspacehelper.FIREWALL_UNIT).read_text()
+    assert "Before=docker.service" in unit and "workspace-helper firewall apply" in unit
+    assert "WantedBy=multi-user.target docker.service" in unit
+    # again: the chains flushed and filled, the jumps not doubled
+    calls.clear()
+    workspacehelper.firewall("apply")
+    assert ["iptables", "-w", "-F", "OMNIACLI-WS-FWD"] in calls and not [c for c in calls if c[2] == "-I"]
+    workspacehelper.firewall("off")
+    assert state["jumps"] == set() and not (root["systemd"] / workspacehelper.FIREWALL_UNIT).exists()
+    assert ["iptables", "-w", "-X", "OMNIACLI-WS-IN"] in calls
+    with pytest.raises(HelperError, match="on, apply or off"):
+        workspacehelper.firewall("maybe")
+
+
+@pytest.mark.parametrize("pool, ip, message", [
+    ("8.8.0.0/16", "", "not a private IPv4"), ("10.213.0.0/25", "", "not a private IPv4"),
+    ("nope", "", "not a network"),
+    ("10.0.0.0/8", "3: lxcbr0    inet 10.0.3.1/24 brd 10.0.3.255 scope global lxcbr0\n", "overlaps networks of this machine"),
+])
+def test_firewall_pool_refused(root, monkeypatch, pool, ip, message):
+    monkeypatch.setattr(workspacehelper, "_system", lambda config=None: {"workspaces": {"network": pool}})
+    root["state"]["ip"] = ip
+    with pytest.raises(HelperError, match=message):
+        workspacehelper.firewall("on")
+
+
+def test_firewall_pool_holds_its_own_bridges(root):
+    root["state"]["ip"] = "9: br-1234    inet 10.213.0.1/24 brd 10.213.0.255 scope global br-1234\n"
+    assert workspacehelper.firewall("apply")["firewall"] == "on"
+
+
+def test_subnets_skip_what_is_taken(root):
+    root["state"]["networks"] = "172.17.0.0/16 10.213.0.0/24 \n10.213.2.0/23 \n"
+    root["state"]["ip"] = "9: br-1234    inet 10.213.1.1/24 brd 10.213.1.255 scope global br-1234\n"
+    assert workspacehelper.pick_subnets(2) == ["10.213.4.0/24", "10.213.5.0/24"]

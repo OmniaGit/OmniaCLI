@@ -4,8 +4,8 @@ Design, decided with Matteo on 2026-10-29, one choice at a time. Every
 statement marked *verified* was checked as written; *not verified* ones must
 be tried before code rests on them. What is implemented is described in the
 README (Workspaces): phases 1 (workspaces and their users), 2 (the virtual
-disk, the instances from templates) and 3 (nginx and the certificates) are
-done; the firewall, copying production to test, the editable Odoo
+disk, the instances from templates), 3 (nginx and the certificates) and 4
+(the firewall) are done; copying production to test, the editable Odoo
 parameters and the publication of the templates are not yet.
 
 ## Goal
@@ -252,9 +252,24 @@ neutralize` (`odoo/cli/neutralize.py` exists in Odoo 18).
   not reachable, its `0.0.0.0` ports (SSH 22, an Odoo on 8069) and the
   internet are. Each compose project has its own network; the databases are
   not published.
-- An egress firewall (`DOCKER-USER`) keeps the workspaces' containers from
-  reaching the host and the LAN; only the internet stays (pip, git https).
-  *Not verified.*
+- An egress firewall keeps the workspaces' containers from reaching the
+  host and the LAN; only the internet stays (pip, git https, DNS). The
+  projects' networks are /24s of one pool (`workspaces.network`, default
+  `10.213.0.0/16`), so the rules are fixed: `OMNIACLI-WS-FWD` from
+  `DOCKER-USER` (replies pass, the pool to itself left to docker, private
+  ranges dropped) and `OMNIACLI-WS-IN` first in `INPUT` (replies pass, the
+  rest dropped: container→host traffic is INPUT, and nginx's answers from
+  Odoo come back that way), applied again at boot by
+  `omniacli-workspaces-firewall.service` before docker. *Verified* on
+  2026-10-30 (docker 28.3.3, iptables-nft): database, internet and DNS
+  reached; the host's LAN address, the LAN gateway, the other project and
+  another container of the machine blocked; the host still reaches the
+  instance on 127.0.0.1; containers outside the pool untouched; the unit
+  puts the rules back. *Not verified:* docker keeping `DOCKER-USER`'s rules
+  across its own restart (Debian's Docker 28 source says it does not touch
+  them), the order at boot, the host's address on the project's bridge
+  (the test found no gateway to try: the rule does not depend on the
+  destination).
 
 ### Domains and nginx
 

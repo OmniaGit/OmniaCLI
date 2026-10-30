@@ -38,6 +38,19 @@ file before is put back; then, for certificate letsencrypt, certbot
 site again with https. No domain or no instance: the site and its
 certificate are removed.
 
+firewall on|apply|off: the workspaces' containers reach the internet only.
+Their networks are /24s of one pool (workspaces.network of the main
+configuration, 10.213.0.0/16 when not set; create gives each project its
+own, SUBNET in .env); chain OMNIACLI-WS-FWD, jumped from DOCKER-USER, drops
+what they send to private addresses (the LAN, other networks of the
+machine) but to the pool itself (docker's own rules decide between its
+networks), OMNIACLI-WS-IN, jumped first from INPUT, drops what they send to
+this machine; replies pass in both (nginx reaches Odoo through docker-proxy,
+the answer comes in from the container). on: the rules, and the unit
+omniacli-workspaces-firewall.service that applies them at every boot before
+docker; apply: the rules only (what the unit runs); off: both removed.
+create puts them on first.
+
 owncert: the customer's certificate and key, {certificate, key} as JSON on
 the standard input (a key is no argument: ps shows those), checked with
 openssl (the key is the certificate's, not expired), kept in
@@ -46,6 +59,7 @@ openssl (the key is the certificate's, not expired), kept in
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import re
@@ -60,8 +74,8 @@ import yaml
 
 from . import composehelper, stacktemplates, workspaceweb
 from .composehelper import ENV, HelperError, caller
-from .config import (CERTIFICATES, DOMAIN_NAME, SUBDOMAIN, TEST_LABEL, WORKSPACE_NAME, ConfigError,
-                     parse_storage_roots, web_names)
+from .config import (CERTIFICATES, DOMAIN_NAME, OMNIACLI_COMMAND, SUBDOMAIN, TEST_LABEL, WORKSPACE_NAME,
+                     ConfigError, parse_storage_roots, web_names)
 from .pluginstore import SYSTEM_CONFIG
 
 # the templates root runs: the package's (build_deb.sh), root's. sudo does
@@ -80,6 +94,14 @@ OWN_CERTS = Path("/etc/omniacli/certs")
 EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}")
 # a certificate with its chain and its key, on the standard input
 MAX_PEM = 256 * 1024
+# the networks of the workspaces' projects: a /24 each of one pool
+NETWORK_POOL = "10.213.0.0/16"
+SUBNET_PREFIX = 24
+FIREWALL_UNIT = "omniacli-workspaces-firewall.service"
+CHAIN_FORWARD = "OMNIACLI-WS-FWD"
+CHAIN_INPUT = "OMNIACLI-WS-IN"
+# what a workspace's container may not reach (but the pool: docker decides)
+PRIVATE = ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "100.64.0.0/10")
 
 
 def _tool(name: str) -> str:
@@ -226,6 +248,141 @@ def disk(name: str, storage: str, size_gb: str) -> dict:
     return {"workspace": name, "image": str(image), "mount": str(mount), "unit": unit, "size_gb": int(size_gb)}
 
 
+def network_pool() -> ipaddress.IPv4Network:
+    value = str((_system().get("workspaces") or {}).get("network") or NETWORK_POOL)
+    try:
+        pool = ipaddress.ip_network(value)
+    except ValueError:
+        raise HelperError(f"workspaces.network of {SYSTEM_CONFIG}: {value!r} is not a network (a.b.c.d/n)") from None
+    if pool.version != 4 or not pool.is_private or pool.prefixlen > SUBNET_PREFIX:
+        raise HelperError(f"workspaces.network of {SYSTEM_CONFIG}: {value} is not a private IPv4 network "
+                          f"of /{SUBNET_PREFIX} or larger")
+    return pool
+
+
+def firewall_rules(pool: ipaddress.IPv4Network) -> dict[str, list[list[str]]]:
+    """The rules of the two chains, as iptables arguments after -A <chain>."""
+    src = ["-s", str(pool)]
+    replies = [*src, "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "RETURN"]
+    return {
+        CHAIN_FORWARD: [replies, [*src, "-d", str(pool), "-j", "RETURN"],
+                        *([*src, "-d", net, "-j", "DROP"] for net in PRIVATE)],
+        CHAIN_INPUT: [replies, [*src, "-j", "DROP"]],
+    }
+
+
+def _iptables(*args: str, check: bool = True) -> str:
+    return _run("iptables", "-w", *args, check=check)
+
+
+def _jumps() -> list[tuple[str, str]]:
+    return [("DOCKER-USER", CHAIN_FORWARD), ("INPUT", CHAIN_INPUT)]
+
+
+def _has_jump(parent: str, chain: str) -> bool:
+    return subprocess.run([_tool("iptables"), "-w", "-C", parent, "-j", chain], env=ENV,
+                          capture_output=True).returncode == 0
+
+
+def firewall_in_place() -> bool:
+    return all(_has_jump(parent, chain) for parent, chain in _jumps())
+
+
+def _host_networks() -> list[tuple[str, ipaddress.IPv4Network]]:
+    found = []
+    for line in _run("ip", "-4", "-o", "addr", "show").splitlines():
+        parts = line.split()
+        if len(parts) > 3 and parts[2] == "inet":
+            found.append((parts[1], ipaddress.ip_interface(parts[3]).network))
+    return found
+
+
+def firewall_apply() -> dict:
+    pool = network_pool()
+    # the pool is the workspaces' own: on this machine only their bridges are in it
+    clash = [f"{iface} {net}" for iface, net in _host_networks()
+             if net.overlaps(pool) and not (iface.startswith("br-") and net.subnet_of(pool))]
+    if clash:
+        raise HelperError(f"workspaces.network {pool} overlaps networks of this machine: {', '.join(clash)}")
+    for chain, rules in firewall_rules(pool).items():
+        _iptables("-N", chain, check=False)
+        _iptables("-F", chain)
+        for rule in rules:
+            _iptables("-A", chain, *rule)
+    # docker makes DOCKER-USER, and keeps its rules; at boot this runs first
+    _iptables("-N", "DOCKER-USER", check=False)
+    for parent, chain in _jumps():
+        if not _has_jump(parent, chain):
+            _iptables("-I", parent, "1", "-j", chain)
+    return {"firewall": "on", "pool": str(pool), "chains": [CHAIN_FORWARD, CHAIN_INPUT]}
+
+
+def firewall_unit_text() -> str:
+    return ("# written by omniacli workspace-helper: the firewall of the workspaces' containers\n"
+            "[Unit]\nDescription=OmniaCLI: the workspaces' containers reach the internet only\n"
+            "Before=docker.service\n"
+            f"[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart={OMNIACLI_COMMAND} workspace-helper firewall apply\n"
+            "[Install]\nWantedBy=multi-user.target docker.service\n")
+
+
+def firewall(mode: str) -> dict:
+    if mode == "apply":
+        return firewall_apply()
+    unit = SYSTEMD / FIREWALL_UNIT
+    if mode == "on":
+        made = firewall_apply()
+        _write(unit, firewall_unit_text())
+        _run("systemctl", "daemon-reload")
+        _run("systemctl", "enable", FIREWALL_UNIT)
+        return {**made, "unit": FIREWALL_UNIT}
+    if mode == "off":
+        for parent, chain in _jumps():
+            while _has_jump(parent, chain):
+                _iptables("-D", parent, "-j", chain)
+            _iptables("-F", chain, check=False)
+            _iptables("-X", chain, check=False)
+        if unit.exists():
+            _run("systemctl", "disable", FIREWALL_UNIT, check=False)
+            unit.unlink()
+            _run("systemctl", "daemon-reload")
+        return {"firewall": "off"}
+    raise HelperError("firewall on, apply or off")
+
+
+def _taken_subnets() -> list[ipaddress.IPv4Network]:
+    """The networks of the workspaces' projects (.env) and of docker."""
+    taken = []
+    for root in storage_roots():
+        for env_file in Path(root).glob("*/*/*/.env"):
+            try:
+                value = _env(env_file.parent).get("SUBNET", "")
+                taken.append(ipaddress.ip_network(value))
+            except (OSError, ValueError):
+                continue
+    ids = _run("docker", "network", "ls", "-q").split()
+    if ids:
+        out = _run("docker", "network", "inspect", "-f", "{{range .IPAM.Config}}{{.Subnet}} {{end}}", *ids)
+        for value in out.split():
+            try:
+                taken.append(ipaddress.ip_network(value))
+            except ValueError:
+                continue
+    return [net for net in taken if net.version == 4]
+
+
+def pick_subnets(count: int) -> list[str]:
+    pool = network_pool()
+    taken = _taken_subnets() + [net for _, net in _host_networks()]
+    found = []
+    for subnet in pool.subnets(new_prefix=SUBNET_PREFIX):
+        if not any(subnet.overlaps(net) for net in taken):
+            found.append(str(subnet))
+            taken.append(subnet)
+            if len(found) == count:
+                return found
+    raise HelperError(f"no {count} free /{SUBNET_PREFIX} networks in {pool}")
+
+
 def _taken_ports() -> set[int]:
     """The ports the instances of every workspace were given (their .env)."""
     taken = set()
@@ -305,6 +462,9 @@ def create(name: str, storage: str, instance: str, template_name: str, values_js
         raise HelperError(str(exc)) from None
     _, caller_uid, _ = caller()
     ports = pick_ports(2 * len(ROLES))
+    if not firewall_in_place():
+        firewall("on")
+    subnets = pick_subnets(len(ROLES))
     database = instance.replace("-", "_")
     made = {"workspace": name, "instance": instance, "template": template.name, "version": template.version,
             "database": database, "odoo_service": template.odoo_service, "db_service": template.db_service,
@@ -319,7 +479,8 @@ def create(name: str, storage: str, instance: str, template_name: str, values_js
             project.mkdir(mode=0o755)
             http_port, ws_port = ports[2 * index], ports[2 * index + 1]
             env = {**values, "PROJECT": f"{name}-{instance}-{role}", "HTTP_PORT": str(http_port),
-                   "WEBSOCKET_PORT": str(ws_port), "DB_PASSWORD": stacktemplates.new_password()}
+                   "WEBSOCKET_PORT": str(ws_port), "DB_PASSWORD": stacktemplates.new_password(),
+                   "SUBNET": subnets[index]}
             _write(project / "compose.yaml", template.compose)
             _write(project / ".env", stacktemplates.env_text(env), mode=0o600)
             (project / "config").mkdir(mode=0o755)
@@ -331,7 +492,8 @@ def create(name: str, storage: str, instance: str, template_name: str, values_js
                 path.mkdir(mode=0o755, parents=True)
                 if item["owner"]:
                     os.chown(path, *_owner(item["owner"]))
-            made["roles"][role] = {"folder": str(project), "http_port": http_port, "websocket_port": ws_port}
+            made["roles"][role] = {"folder": str(project), "http_port": http_port, "websocket_port": ws_port,
+                                   "subnet": subnets[index]}
     except BaseException:
         shutil.rmtree(folder, ignore_errors=True)
         raise
@@ -566,7 +728,7 @@ def owncert(name: str, storage: str, given: str | None = None) -> dict:
 
 
 ACTIONS = {"disk": (disk, 3), "create": (create, 5), "remove": (remove, 3), "web": (web, 3),
-           "owncert": (owncert, 2)}
+           "owncert": (owncert, 2), "firewall": (firewall, 1)}
 
 
 def run(argv: list[str]) -> dict:

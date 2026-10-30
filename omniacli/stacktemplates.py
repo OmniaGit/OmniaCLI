@@ -32,12 +32,15 @@ FILES = ("template.json", "compose.yaml", "odoo.conf.in")
 NAME = re.compile(r"[a-z0-9][a-z0-9.-]{0,62}")
 FIELD_NAME = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
 # the variables OmniaCLI gives every instance (in .env and odoo.conf)
-GENERATED = ("PROJECT", "HTTP_PORT", "WEBSOCKET_PORT", "DB_PASSWORD")
+GENERATED = ("PROJECT", "HTTP_PORT", "WEBSOCKET_PORT", "DB_PASSWORD", "SUBNET")
 CONF_PLACEHOLDERS = ("ADDONS_PATH", "DB_NAME", "ADMIN_PASSWD")
 # a value of a field: one line, no quote that .env would read
 VALUE = re.compile(r"[^\n\r\"'`$\\]{0,200}")
 # what a template's compose.yaml may hold, and nothing else
-TOP_KEYS = {"name", "services"}
+TOP_KEYS = {"name", "services", "networks"}
+# the project's one network: a /24 of the workspaces' pool, which the
+# firewall knows (workspacehelper.firewall); required, nothing else
+NETWORKS = {"default": {"ipam": {"config": [{"subnet": "${SUBNET}"}]}}}
 SERVICE_KEYS = {"image", "restart", "depends_on", "ports", "environment", "volumes", "healthcheck",
                 "logging", "command", "user", "working_dir", "labels", "stop_grace_period"}
 # a port: on this machine only, its number from .env
@@ -164,6 +167,8 @@ def check_compose(template: Template) -> list[str]:
     if not isinstance(data, dict) or not isinstance(data.get("services"), dict):
         return ["no services"]
     found += [f"{key}: not allowed (only {', '.join(sorted(TOP_KEYS))})" for key in data if key not in TOP_KEYS]
+    if data.get("networks") != NETWORKS:
+        found.append("networks: must be exactly default with ipam.config [subnet: ${SUBNET}]")
     for svc_name, svc in data["services"].items():
         where = f"services.{svc_name}"
         if not isinstance(svc, dict):
