@@ -41,8 +41,11 @@ def test_the_template_of_the_repository():
 
 
 @pytest.mark.parametrize("change, message", [
-    (("    restart: unless-stopped\n    depends_on:", "    privileged: true\n    restart: unless-stopped\n    depends_on:"),
+    (("    cgroup_parent: ${SLICE}\n    depends_on:", "    cgroup_parent: ${SLICE}\n    privileged: true\n    depends_on:"),
      "privileged: not allowed"),
+    (("    cgroup_parent: ${SLICE}\n    depends_on:", "    depends_on:"), "cgroup_parent: must be"),
+    (("    cgroup_parent: ${SLICE}\n    environment:", "    cgroup_parent: system.slice\n    environment:"),
+     "cgroup_parent: must be"),
     (('"127.0.0.1:${HTTP_PORT}:8069"', '"0.0.0.0:${HTTP_PORT}:8069"'), "is not 127.0.0.1"),
     (("./data/filestore:/var/lib/odoo", "/:/host"), "is not ./<folder>"),
     (("./data/filestore:/var/lib/odoo", "../../other:/var/lib/odoo"), "leaves the instance"),
@@ -162,6 +165,9 @@ def test_create_and_remove(root, monkeypatch):
     with pytest.raises(HelperError, match="not mounted"):
         workspacehelper.create("acme", str(storage), "main", "odooplm-20", "{}")
     workspacehelper.disk("acme", str(storage), "2")
+    with pytest.raises(HelperError, match="limits first"):
+        workspacehelper.create("acme", str(storage), "main", "odooplm-20", "{}")
+    workspacehelper.limits("acme", "2", "4")
     made = workspacehelper.create("acme", str(storage), "main", "odooplm-20", json.dumps({"INIT_LANG": "it_IT"}))
     assert made["database"] == "main" and made["values"]["INIT_LANG"] == "it_IT"
     assert made["roles"]["production"]["http_port"] == 20000 and made["roles"]["test"]["websocket_port"] == 20003
@@ -178,6 +184,8 @@ def test_create_and_remove(root, monkeypatch):
     assert (project / "addons").is_dir() and (storage / "acme" / "main" / "test" / "addons").is_dir()
     assert json.loads((storage / "acme" / "main" / "instance.json").read_text()) == {
         "template": "odooplm-20", "version": made["version"], "database": "main"}
+    # every container in the workspace's slice
+    assert "SLICE=omniacli_acme.slice\n" in env
     # each role its network of the pool, the firewall on before
     assert "SUBNET=10.213.0.0/24\n" in env and made["roles"]["test"]["subnet"] == "10.213.1.0/24"
     assert root["state"]["jumps"] == {("DOCKER-USER", "OMNIACLI-WS-FWD"), ("INPUT", "OMNIACLI-WS-IN")}
@@ -211,6 +219,23 @@ def test_the_template_is_refused_when_the_caller_may_change_it(root, monkeypatch
     monkeypatch.setattr(workspacehelper, "caller", lambda: ("omniacli", os.getuid(), [os.getgid()]))
     with pytest.raises(HelperError, match="writable by the caller"):
         workspacehelper.template_named("odooplm-20")
+
+
+def test_limits(root):
+    made = workspacehelper.limits("acme-shop", "1.5", "4")
+    assert made == {"workspace": "acme-shop", "slice": "omniacli_acme_shop.slice", "cpus": 1.5, "memory_gb": 4}
+    unit = (root["systemd"] / "omniacli_acme_shop.slice").read_text()
+    assert "[Slice]\nCPUQuota=150%\nMemoryMax=4294967296\nMemorySwapMax=0\n" in unit
+    assert root["calls"][-1] == ["systemctl", "daemon-reload"]
+    # 0: no limit, the unit written again
+    workspacehelper.limits("acme-shop", "0", "0")
+    unit = (root["systemd"] / "omniacli_acme_shop.slice").read_text()
+    assert "[Slice]\nCPUQuota=\nMemoryMax=infinity\nMemorySwapMax=infinity\n" in unit
+    for args, message in ((("Acme", "1", "1"), "not a workspace name"), (("acme", "-1", "1"), "CPU is 0"),
+                          (("acme", "1", "x"), "memory is 0"), (("acme", "nan", "1"), "CPU is 0"),
+                          (("acme", "1", "inf"), "memory is 0")):
+        with pytest.raises(HelperError, match=message):
+            workspacehelper.limits(*args)
 
 
 def test_run_needs_root(monkeypatch):
@@ -293,6 +318,7 @@ def _conf(storage, role, **spec):
 def test_conf_names_the_repositories(root):
     storage = root["storage"]
     workspacehelper.disk("acme", str(storage), "2")
+    workspacehelper.limits("acme", "0", "0")
     workspacehelper.create("acme", str(storage), "main", "odooplm-20", "{}")
     conf_file = storage / "acme" / "main" / "test" / "config" / "odoo.conf"
     password = [l for l in conf_file.read_text().splitlines() if l.startswith("admin_passwd")][0]
@@ -321,6 +347,7 @@ def test_conf_names_the_repositories(root):
 def test_conf_sets_the_parameters(root):
     storage = root["storage"]
     workspacehelper.disk("acme", str(storage), "2")
+    workspacehelper.limits("acme", "0", "0")
     workspacehelper.create("acme", str(storage), "main", "odooplm-20", "{}")
     project = storage / "acme" / "main" / "test"
     (project / "addons" / "custom").mkdir()

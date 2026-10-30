@@ -41,7 +41,7 @@ FILES = ("template.json", "compose.yaml", "odoo.conf.in")
 NAME = re.compile(r"[a-z0-9][a-z0-9.-]{0,62}")
 FIELD_NAME = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
 # the variables OmniaCLI gives every instance (in .env and odoo.conf)
-GENERATED = ("PROJECT", "HTTP_PORT", "WEBSOCKET_PORT", "DB_PASSWORD", "SUBNET")
+GENERATED = ("PROJECT", "HTTP_PORT", "WEBSOCKET_PORT", "DB_PASSWORD", "SUBNET", "SLICE")
 CONF_PLACEHOLDERS = ("ADDONS_PATH", "DB_NAME", "ADMIN_PASSWD")
 # a value of a field: one line, no quote that .env would read
 VALUE = re.compile(r"[^\n\r\"'`$\\]{0,200}")
@@ -51,7 +51,9 @@ TOP_KEYS = {"name", "services", "networks"}
 # firewall knows (workspacehelper.firewall); required, nothing else
 NETWORKS = {"default": {"ipam": {"config": [{"subnet": "${SUBNET}"}]}}}
 SERVICE_KEYS = {"image", "restart", "depends_on", "ports", "environment", "volumes", "healthcheck",
-                "logging", "command", "user", "working_dir", "labels", "stop_grace_period"}
+                "logging", "command", "user", "working_dir", "labels", "stop_grace_period", "cgroup_parent"}
+# every service in the workspace's systemd slice: its CPU and memory limits
+CGROUP_PARENT = "${SLICE}"
 # a port: on this machine only, its number from .env
 PORT = re.compile(r"127\.0\.0\.1:\$\{[A-Z][A-Z0-9_]*\}:\d{1,5}")
 # a mount: a folder of the instance (./ of its role, ../ of the instance)
@@ -274,6 +276,8 @@ def check_compose(template: Template) -> list[str]:
             found.append(f"{where}: not a mapping")
             continue
         found += [f"{where}.{key}: not allowed" for key in svc if key not in SERVICE_KEYS]
+        if svc.get("cgroup_parent") != CGROUP_PARENT:
+            found.append(f"{where}.cgroup_parent: must be {CGROUP_PARENT} (the workspace's CPU and memory)")
         for port in svc.get("ports") or []:
             if not (isinstance(port, str) and PORT.fullmatch(port)):
                 found.append(f"{where}.ports: {port!r} is not 127.0.0.1:${{VARIABLE}}:<port>")

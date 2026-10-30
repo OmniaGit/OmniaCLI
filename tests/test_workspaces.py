@@ -241,6 +241,36 @@ async def test_workspaces_page_and_api(workspaces, client, env):
     assert (await client.post("/api/workspaces/save", headers=post_as("mario"), json={"name": "x"})).status_code == 403
 
 
+async def test_cpu_and_memory_applied_when_changed(workspaces, client, env, monkeypatch):
+    """The machine's admins change the CPU or memory of a workspace with
+    instances: a job writes its slice again; other changes do not."""
+    from omniacli import workspaceops
+
+    settings = env["settings"]
+    resp = await client.post("/api/servers/save", headers=POST, json={
+        "original": None, "name": "acme-main", "server": server_to_dict(settings.servers["srv"])})
+    assert resp.status_code == 200, resp.text
+    applied = []
+
+    async def apply_limits(job, ws):
+        applied.append(dict(ws.limits))
+        return {}
+    monkeypatch.setattr(workspaceops, "apply_limits", apply_limits)
+    body = {"name": "acme", "label": "ACME", "domain": "acme.example.com", "servers": ["srv", "acme-main"],
+            "members": {"mario": "admin", "luca": "user"}}
+    resp = await client.post("/api/workspaces/save", headers=POST,
+                             json={**body, "limits": {"cpus": "2", "memory_gb": "4"}})
+    assert resp.status_code == 200, resp.text
+    job = await wait_job(client, resp.json()["job"])
+    assert job["status"] == "success" and applied == [{"cpus": 2, "memory_gb": 4}]
+    resp = await client.post("/api/workspaces/save", headers=POST,
+                             json={**body, "label": "Acme", "limits": {"cpus": "2", "memory_gb": "4"}})
+    assert resp.json() == {"ok": True} and len(applied) == 1
+    resp = await client.post("/api/workspaces/save", headers=POST, json={**body, "limits": {"cpus": "2"}})
+    await wait_job(client, resp.json()["job"])
+    assert applied[-1] == {"cpus": 2}
+
+
 async def test_servers_keep_or_leave_their_workspace(workspaces, client, env):
     settings = env["settings"]
     server = server_to_dict(settings.servers["srv"])
@@ -358,7 +388,7 @@ async def test_workspaceops_create_instance(monkeypatch):
     from omniacli.jobs import Job, JobFailed
 
     template = stacktemplates.load_template(Path(__file__).parent.parent / "templates" / "odooplm-20")
-    ws = Workspace("acme", storage="/srv/omniacli", limits={"disk_gb": 20})
+    ws = Workspace("acme", storage="/srv/omniacli", limits={"disk_gb": 20, "cpus": 2})
     made = {"database": "main", "odoo_service": "odoo", "db_service": "db",
             "roles": {"production": {"folder": "/srv/omniacli/acme/main/production", "http_port": 20000},
                       "test": {"folder": "/srv/omniacli/acme/main/test", "http_port": 20002}}}
@@ -378,8 +408,9 @@ async def test_workspaceops_create_instance(monkeypatch):
     fail_init = False
     values = {"IMAGE": "img", "INIT_MODULES": "plm", "INIT_LANG": "it_IT"}
     data = await workspaceops.create_instance(Job(id="j", title="t", instances=[], source="s"), ws, "main", template, values)
-    assert [c[4:7] for c in captured] == [["disk", "acme", "/srv/omniacli"], ["create", "acme", "/srv/omniacli"]]
-    assert captured[0][-1] == "20" and json.loads(captured[1][-1]) == values
+    assert [c[4:7] for c in captured] == [["disk", "acme", "/srv/omniacli"], ["limits", "acme", "2"],
+                                          ["create", "acme", "/srv/omniacli"]]
+    assert captured[0][-1] == "20" and captured[1][-1] == "0" and json.loads(captured[2][-1]) == values
     assert ran[0][-6:] == ["/srv/omniacli/acme/main/production", "init", "odoo", "main", "plm", "it_IT"]
     assert ran[1][-2:] == ["/srv/omniacli/acme/main/production", "start"] and ran[3][-1] == "start"
     assert data["production"]["restart"] == {"type": "compose", "service": "/srv/omniacli/acme/main/production", "sudo": True}

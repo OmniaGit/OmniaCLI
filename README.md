@@ -777,8 +777,11 @@ workspaces:
 
 The domain gives the instances their names on the internet (Domains of a
 workspace, below); the storage and the limits of disk and instances apply to
-the instances created from templates (below); the limits of CPU and memory
-are not applied yet. A domain may not be under another workspace's
+the instances created from templates (below), and so do those of CPU and
+memory: `cpus` cores and `memory_gb` GB (no swap) for all the workspace's
+containers together, one systemd slice `omniacli_<workspace>.slice` written
+by the root helper's `limits` when an instance is created and when the
+limits change (a job; the containers running take them). A domain may not be under another workspace's
 (`shop.acme.it` under `acme.it`): their names would meet.
 
 #### Instances created from templates
@@ -850,13 +853,14 @@ by the package in `/usr/share/omniacli/templates`, root's): `template.json`
 list (`stacktemplates.check_compose`): the services' keys of a list (no
 `privileged`, `cap_add`, `devices`, `network_mode`, `pid`, `build`,
 `env_file`...), no top-level key but `name` and `services`, ports
-`127.0.0.1:${VARIABLE}:<port>` only, mounts of the instance's own folders
+`127.0.0.1:${VARIABLE}:<port>` only, every service in the workspace's
+slice (`cgroup_parent: ${SLICE}`), mounts of the instance's own folders
 only (`./…` and `../…`, never out of it), the configuration and the
 customer's addons read only, logging `json-file` with `max-size` and
 `max-file`. The first template is `odooplm-20` (the DockerOdooPLM image of
 Odoo 20, PostgreSQL 17).
 
-The root helper, `omniacli workspace-helper disk|create|remove|web|owncert|firewall|template-install`
+The root helper, `omniacli workspace-helper disk|limits|create|remove|web|owncert|firewall|template-install|conf`
 (`workspacehelper.py`), takes names only (workspace, instance, template), a
 storage of `workspaces.storage` of the main configuration, which only root
 writes, a template of the package's folder, and refuses a folder or a

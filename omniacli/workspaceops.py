@@ -52,6 +52,20 @@ async def _helper(job: Job, *args: str) -> dict:
         raise JobFailed(f"workspace-helper {args[0]} answered no JSON: {out}") from None
 
 
+def _limit(ws: Workspace, key: str) -> str:
+    return f"{ws.limits.get(key) or 0:g}"
+
+
+async def apply_limits(job: Job, ws: Workspace) -> dict:
+    """The workspace's CPU and memory: its systemd slice, written again;
+    the containers running in it take the new limits."""
+    cpus, memory = _limit(ws, "cpus"), _limit(ws, "memory_gb")
+    job.log(f"--- the CPU and memory of workspace {ws.name}: "
+            + (f"{cpus} cores" if cpus != "0" else "CPU not limited") + ", "
+            + (f"{memory} GB" if memory != "0" else "memory not limited"))
+    return await _helper(job, "limits", ws.name, cpus, memory)
+
+
 async def create_instance(job: Job, ws: Workspace, instance: str, template: stacktemplates.Template,
                           values: dict[str, str]) -> dict:
     """The disk, the two projects, their databases, started: the server's
@@ -60,6 +74,7 @@ async def create_instance(job: Job, ws: Workspace, instance: str, template: stac
         raise JobFailed(f"workspace {ws.name} has no storage or no disk limit: the machine's admins set them")
     job.log(f"--- the disk of workspace {ws.name} ({ws.limits['disk_gb']:g} GB, in {ws.storage})")
     await _helper(job, "disk", ws.name, ws.storage, str(int(ws.limits["disk_gb"])))
+    await apply_limits(job, ws)
     job.log(f"--- instance {instance} from template {template.name} {template.version}")
     made = await _helper(job, "create", ws.name, ws.storage, instance, template.name, json.dumps(values))
     try:

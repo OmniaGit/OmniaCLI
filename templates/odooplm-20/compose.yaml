@@ -2,7 +2,8 @@
 # workspaces (docs/workspaces.md). OmniaCLI writes .env (the variables below)
 # and config/odoo.conf; filestore and database are folders of the instance,
 # on its workspace's disk; the ports listen on this machine only, the network
-# is one OmniaCLI's firewall knows (SUBNET).
+# is one OmniaCLI's firewall knows (SUBNET), the containers are in the
+# workspace's systemd slice, its CPU and memory (SLICE).
 name: ${PROJECT}
 networks:
   default:
@@ -13,6 +14,7 @@ services:
   odoo:
     image: ${IMAGE}
     restart: unless-stopped
+    cgroup_parent: ${SLICE}
     depends_on:
       db:
         condition: service_healthy
@@ -39,6 +41,7 @@ services:
   db:
     image: postgres:17
     restart: unless-stopped
+    cgroup_parent: ${SLICE}
     environment:
       POSTGRES_DB: postgres
       POSTGRES_USER: odoo

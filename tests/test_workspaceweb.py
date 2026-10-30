@@ -111,6 +111,7 @@ def web_root(root, monkeypatch, tmp_path):
     monkeypatch.setattr(workspacehelper, "_tool", lambda name: shutil.which(name) or name)
     monkeypatch.setattr(workspacehelper, "_system", lambda config=None: {"workspaces": {"acme_email": "ops@acme.it"}})
     workspacehelper.disk("acme", str(root["storage"]), "2")
+    workspacehelper.limits("acme", "0", "0")
     workspacehelper.create("acme", str(root["storage"]), "main", "odooplm-20", "{}")
     # the site of the workspace in the dump is its own: not another's
     state = {"dump": DUMP.replace("/etc/nginx/conf.d/omniacli-acme.conf", str(tmp_path / "nginx" / "omniacli-acme.conf")),

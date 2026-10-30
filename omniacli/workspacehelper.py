@@ -5,6 +5,7 @@
     omniacli workspace-helper disk <workspace> <storage> <size in GB>
     omniacli workspace-helper create <workspace> <storage> <instance> <template> <values as JSON>
     omniacli workspace-helper remove <workspace> <storage> <instance>
+    omniacli workspace-helper limits <workspace> <cpus> <memory in GB>
 
 OmniaCLI runs it with sudo (sudoers: README, Workspaces). It takes no path
 and no command of the caller's: a workspace and an instance are names
@@ -19,15 +20,21 @@ of docker.service); the empty folder beneath is immutable, so nothing is
 written there while the disk is not mounted. Again with a larger size, it
 grows the disk, mounted; a disk is never made smaller.
 
+limits: the CPU and memory of all the workspace's containers together, a
+systemd slice /etc/systemd/system/omniacli_<workspace>.slice (CPUQuota of
+<cpus> cores, MemoryMax of <memory> GB and no swap; 0 is no limit) the
+templates put every service in (cgroup_parent: ${SLICE}); written again
+with other limits, they apply to the containers running.
+
 create: an instance of the workspace from a template, production and test,
 each a compose project <storage>/<workspace>/<instance>/<role> of root's
 (compose.yaml of the template, .env of its checked values and of what this
 helper makes: ports on 127.0.0.1, the database password, the project's
-name; config/odoo.conf; the data folders, given to the image's users;
+name, the workspace's slice; config/odoo.conf; the data folders, given to the image's users;
 addons/, the caller's, for the customer's repositories of that role, which
 OmniaCLI clones there), and <instance>/instance.json (the template and the
 database), root's. It prints what it made, as JSON. The disk must be
-mounted, the instance must not exist.
+mounted and the slice written (limits), the instance must not exist.
 
 conf <workspace> <storage> <instance> <role> <JSON>: the role's odoo.conf
 written again from the instance's template, the admin password kept. The
@@ -109,6 +116,9 @@ REPOSITORY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 # the ports an instance's services are published on, on 127.0.0.1
 PORTS = range(20000, 30000)
 MAX_DISK_GB = 65536
+# the workspace's CPU and memory: cores and GB, 0 no limit
+MAX_CPUS = 1024
+MAX_MEMORY_GB = 65536
 GB = 1024 ** 3
 NGINX_SITES = Path("/etc/nginx/conf.d")
 LETSENCRYPT = Path("/etc/letsencrypt/live")
@@ -221,6 +231,40 @@ def _write(path: Path, text: str, mode: int = 0o644, uid: int = 0, gid: int = 0)
     os.chown(tmp, uid, gid)
     os.chmod(tmp, mode)
     os.replace(tmp, path)
+
+
+def slice_name(name: str) -> str:
+    """The workspace's slice: a - in a slice's name puts it in another
+    (omniacli-acme-shop.slice in omniacli-acme.slice), hence _, which no
+    workspace name holds."""
+    return "omniacli_" + _name("workspace", name).replace("-", "_") + ".slice"
+
+
+def slice_text(name: str, cpus: float, memory_gb: float) -> str:
+    return ("# written by omniacli workspace-helper: the CPU and memory of workspace " + name + "\n"
+            "[Unit]\nDescription=OmniaCLI workspace " + name + "\n[Slice]\n"
+            + (f"CPUQuota={round(cpus * 100)}%\n" if cpus else "CPUQuota=\n")
+            + (f"MemoryMax={int(memory_gb * GB)}\nMemorySwapMax=0\n" if memory_gb
+               else "MemoryMax=infinity\nMemorySwapMax=infinity\n"))
+
+
+def _amount(what: str, value: str, top: int) -> float:
+    try:
+        number = float(value)
+    except ValueError:
+        number = -1
+    if not 0 <= number <= top:
+        raise HelperError(f"the {what} is 0 (no limit) to {top}, not {value!r}")
+    return number
+
+
+def limits(name: str, cpus: str, memory_gb: str) -> dict:
+    unit = slice_name(name)
+    cores = _amount("CPU", cpus, MAX_CPUS)
+    memory = _amount("memory", memory_gb, MAX_MEMORY_GB)
+    _write(SYSTEMD / unit, slice_text(name, cores, memory))
+    _run("systemctl", "daemon-reload")
+    return {"workspace": name, "slice": unit, "cpus": cores, "memory_gb": memory}
 
 
 def disk(name: str, storage: str, size_gb: str) -> dict:
@@ -492,6 +536,8 @@ def create(name: str, storage: str, instance: str, template_name: str, values_js
     if folder.exists() or folder.is_symlink():
         raise HelperError(f"{folder} exists already")
     template = template_named(template_name)
+    if not (SYSTEMD / slice_name(name)).is_file():
+        raise HelperError(f"workspace {name} has no slice: workspace-helper limits first")
     try:
         given = json.loads(values_json)
     except ValueError:
@@ -525,7 +571,7 @@ def create(name: str, storage: str, instance: str, template_name: str, values_js
             http_port, ws_port = ports[2 * index], ports[2 * index + 1]
             env = {**values, "PROJECT": f"{name}-{instance}-{role}", "HTTP_PORT": str(http_port),
                    "WEBSOCKET_PORT": str(ws_port), "DB_PASSWORD": stacktemplates.new_password(),
-                   "SUBNET": subnets[index]}
+                   "SUBNET": subnets[index], "SLICE": slice_name(name)}
             _write(project / "compose.yaml", template.compose)
             _write(project / ".env", stacktemplates.env_text(env), mode=0o600)
             (project / "config").mkdir(mode=0o755)
@@ -851,8 +897,8 @@ def owncert(name: str, storage: str, given: str | None = None) -> dict:
             "names": [part.strip()[4:] for part in alt.replace("\n", ",").split(",") if part.strip().startswith("DNS:")]}
 
 
-ACTIONS = {"disk": (disk, 3), "create": (create, 5), "remove": (remove, 3), "web": (web, 3),
-           "owncert": (owncert, 2), "firewall": (firewall, 1), "template-install": (template_install, 1),
+ACTIONS = {"disk": (disk, 3), "limits": (limits, 3), "create": (create, 5), "remove": (remove, 3),
+           "web": (web, 3), "owncert": (owncert, 2), "firewall": (firewall, 1), "template-install": (template_install, 1),
            "conf": (conf, 5)}
 
 

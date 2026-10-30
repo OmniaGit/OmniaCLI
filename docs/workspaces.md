@@ -119,6 +119,36 @@ run code as OmniaCLI's user.
   the ordering with docker, `chattr +i` on the mount point, online growth,
   PostgreSQL and Odoo on the mounted disk, a full disk.
 
+### CPU and memory: a systemd slice per workspace
+
+- The limits `cpus` and `memory_gb` hold all the workspace's containers
+  together, production and test of every instance: the root helper's
+  `limits` writes `/etc/systemd/system/omniacli_<workspace>.slice`
+  (`CPUQuota` of the cores, `MemoryMax` of the GB, `MemorySwapMax=0`; a limit
+  not set is none), and every service of a template is put in it by
+  `cgroup_parent: ${SLICE}` (required by `check_compose`).
+- `_`, not `-`: in a slice's name `-` makes a child (`omniacli-acme-shop.slice`
+  would be inside `omniacli-acme.slice`), and no workspace name holds `_`.
+- Written when an instance is created and when the machine's admins change
+  the limits of a workspace with instances (a job).
+- No swap: a workspace over its memory has a container killed (Odoo or
+  PostgreSQL, the kernel's choice), docker restarts it
+  (`restart: unless-stopped`). `workers × limit_memory_hard` is checked
+  against `memory_gb` for one role; the workspace's roles together are not.
+- *Verified* (root, systemd 247, docker 28.3.3 with the systemd cgroup
+  driver, cgroup v2): two containers started with `--cgroup-parent` of the
+  slice are inside it, the slice's `memory.max` and `cpu.max` are the unit's,
+  a container asking 300 MB in a slice of 256 MB is killed (`OOMKilled`), a
+  busy loop in a slice of 50% uses 50% of a core. Through OmniaCLI
+  (`phase8`): the four containers of an instance of `odooplm-20` 2026.1.4
+  are in `omniacli_<workspace>.slice`, Odoo answers; `limits` again with the
+  containers running (1.5 cores, 3 GB → 0.5, 2 GB → none) changes the
+  slice's `cpu.max` and `memory.max` at once, after `daemon-reload` only,
+  Odoo not restarted.
+- *Not verified*: a reboot (the slice is loaded when docker starts the
+  first container in it); the workspace's slice when the workspace is
+  deleted (it stays, as its disk does).
+
 ## Templates
 
 - Downloaded signed from the download server, like the plugins: an index and

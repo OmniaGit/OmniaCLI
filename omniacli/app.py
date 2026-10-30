@@ -1882,9 +1882,25 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             refused = await store_workspaces(found)
             if refused:
                 return refused
-        if before is not None and before.domain != ws.domain and ws.instances():
-            return {"ok": True, "job": submit_publish(ws, f"manual: {me}").id}
-        return {"ok": True}
+        if before is None or not ws.instances():
+            return {"ok": True}
+        names = before.domain != ws.domain
+        resources = any(before.limits.get(k) != ws.limits.get(k) for k in ("cpus", "memory_gb"))
+        if not (names or resources):
+            return {"ok": True}
+
+        async def action(job):
+            current = settings.workspaces.get(ws.name)
+            if current is None:
+                raise JobFailed(f"no workspace {ws.name}")
+            if resources:
+                await workspaceops.apply_limits(job, current)
+            if names:
+                job.result = await workspaceops.publish(job, current)
+        job = jobs.submit(f"Workspace {ws.name}: " + ", ".join(
+            [w for w, on in (("CPU and memory", resources), ("names", names)) if on]),
+            [f"{s}/{r}" for s in ws.servers for r in ROLES], f"manual: {me}", action)
+        return {"ok": True, "job": job.id}
 
     @app.post("/api/workspaces/delete", dependencies=[Depends(admin)])
     async def workspace_delete(payload: dict = Body(...)):
