@@ -151,16 +151,17 @@ async def run(
 
 async def capture(
     cmd: list[str], cwd: Path | None = None, timeout: float | None = None,
-    env: dict | None = None,
+    env: dict | None = None, input: bytes | None = None,
 ) -> tuple[int, str]:
-    """Run a command quietly and return (exit code, stripped output)."""
+    """Run a command quietly and return (exit code, stripped output); input
+    is its standard input (none: nothing to read)."""
     cwd = _cwd(cmd, cwd)
     try:
         proc = await asyncio.create_subprocess_exec(
             *[str(c) for c in cmd],
             cwd=cwd,
             env=env or _ENV,
-            stdin=asyncio.subprocess.DEVNULL,
+            stdin=asyncio.subprocess.DEVNULL if input is None else asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             start_new_session=True,
@@ -168,7 +169,7 @@ async def capture(
     except OSError as exc:
         return 127, str(exc)
     try:
-        out, _ = await asyncio.wait_for(proc.communicate(), timeout)
+        out, _ = await asyncio.wait_for(proc.communicate(input), timeout)
     except asyncio.TimeoutError:
         await _terminate(proc)
         return 124, f"no answer within {timeout:.0f} s"

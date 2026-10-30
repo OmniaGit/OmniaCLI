@@ -291,8 +291,14 @@ async def test_create_and_remove_an_instance(workspaces, client, env, monkeypatc
 
     async def remove_instance(job, ws, instance):
         removed.append((ws.name, instance))
+    published = []
+
+    async def publish(job, ws):
+        published.append(list(ws.servers))
+        return {}
     monkeypatch.setattr(workspaceops, "create_instance", create_instance)
     monkeypatch.setattr(workspaceops, "remove_instance", remove_instance)
+    monkeypatch.setattr(workspaceops, "publish", publish)
     url = "/api/workspaces/acme/instances/"
     # the workspace needs its storage and disk limit
     resp = await client.post(url + "create", headers=post_as("mario"), json={"instance": "main", "template": "odooplm-20"})
@@ -318,6 +324,8 @@ async def test_create_and_remove_an_instance(workspaces, client, env, monkeypatc
                                                         "INIT_MODULES": "plm", "INIT_LANG": "it_IT"})
     assert settings.servers["acme-main"].active and settings.servers["acme-main"].type == "docker"
     assert settings.workspaces["acme"].servers == ["srv", "acme-main"]
+    # acme has a domain: its names published with the new instance
+    assert published == [["srv", "acme-main"]]
     assert "acme-main" in [s["name"] for s in (await client.get("/api/servers", headers=basic("luca"))).json()]
     assert (await client.get("/servers/acme-main", headers=basic("eva"))).status_code == 403
     # its job was seen in acme while it ran
@@ -338,6 +346,7 @@ async def test_create_and_remove_an_instance(workspaces, client, env, monkeypatc
     job = await wait_job(client, resp.json()["job"])
     assert job["status"] == "success" and removed == [("acme", "main")]
     assert "acme-main" not in settings.servers and settings.workspaces["acme"].servers == ["srv"]
+    assert published[-1] == ["srv"]
 
 
 async def test_workspaceops_create_instance(monkeypatch):

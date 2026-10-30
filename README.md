@@ -753,10 +753,11 @@ workspaces:
     - /media/disk2/omniacli
 ```
 
-The domain is kept for what comes next (each instance on its own name, with
-nginx); the storage and the limits of disk and instances apply to the
-instances created from templates (below); the limits of CPU and memory are
-not applied yet.
+The domain gives the instances their names on the internet (Domains of a
+workspace, below); the storage and the limits of disk and instances apply to
+the instances created from templates (below); the limits of CPU and memory
+are not applied yet. A domain may not be under another workspace's
+(`shop.acme.it` under `acme.it`): their names would meet.
 
 #### Instances created from templates
 
@@ -800,7 +801,7 @@ customer's addons read only, logging `json-file` with `max-size` and
 `max-file`. The first template is `odooplm-20` (the DockerOdooPLM image of
 Odoo 20, PostgreSQL 17).
 
-The root helper, `omniacli workspace-helper disk|create|remove`
+The root helper, `omniacli workspace-helper disk|create|remove|web|owncert`
 (`workspacehelper.py`), takes names only (workspace, instance, template), a
 storage of `workspaces.storage` of the main configuration, which only root
 writes, a template of the package's folder, and refuses a folder or a
@@ -817,6 +818,56 @@ omniacli ALL=(root) NOPASSWD: /opt/omniacli/venv/bin/omniacli compose-helper /sr
 
 Without it, nothing is granted: give it only where workspaces are wanted,
 since root runs what these helpers make.
+
+#### Domains of a workspace
+
+The workspace's domain (set by the machine's admins) gives its instances
+their names; the workspace's admins choose the rest on its page (**Names**):
+
+| Name | Goes to |
+|---|---|
+| `<domain>`, `test.<domain>` | production and test of the **main instance** (none chosen: these names go nowhere) |
+| `<instance>.<domain>`, `<instance>.test.<domain>` | production and test of every instance |
+| `<sub>.<domain>`, `<sub>.test.<domain>` | a **subdomain**: production and test of the instance it is given to |
+
+A subdomain is one label (`a-z 0-9 -`), never `test` nor an instance's name;
+an instance may not be named `test` or as a subdomain. **Save and publish**
+runs a job: the root helper's `web` writes the workspace's nginx site,
+`/etc/nginx/conf.d/omniacli-<workspace>.conf`, from the names and the ports
+it reads itself from the instances on the disk (`.env`); a name another site
+of nginx answers on (`nginx -T`: the same name, or a wildcard of it) is
+refused; `nginx -t`, or the site before is put back; then nginx is reloaded.
+Port 80 answers the challenges of Let's Encrypt (from
+`/var/lib/omniacli-acme`) and sends the rest to https; 443 proxies to the
+instance on `127.0.0.1` (the headers of `proxy_mode`, `/websocket` upgraded:
+to the http port when `workers` is 0, as in the template, to the websocket
+port otherwise). Once, the helper adds `/etc/nginx/conf.d/omniacli.conf`
+with `server_names_hash_bucket_size 256` (nginx's 64 does not hold these
+names), unless the machine's nginx sets it already. The job runs again when
+an instance is created or removed and when the domain changes; **Publish
+again** after the DNS records are made.
+
+The certificate, one for all the names of the workspace:
+
+- **Let's Encrypt** (the default): `certbot certonly --webroot --cert-name
+  omniacli-<workspace>`, renewed by certbot's own timer, nginx reloaded by
+  its deploy hook. Every name needs a DNS record pointing to this machine,
+  and port 80 must be open to the internet. Until the certificate is there,
+  port 80 answers 503 and there is no https. Optional, in the main
+  configuration: `workspaces.acme_email`, the account's address (Let's
+  Encrypt no longer mails about expiring certificates; without it the
+  account has none).
+- **The customer's own**: the certificate with its chain and its private key
+  (PEM, no passphrase), pasted on the page: they reach the helper's
+  `owncert` on its standard input (never as arguments, which `ps` shows),
+  which checks with openssl that the key is the certificate's and that it
+  has not expired, and keeps them in `/etc/omniacli/certs/<workspace>/`,
+  root's only. The names it covers are shown once it is uploaded;
+  renewing it is the customer's.
+
+A workspace without a domain or without instances has no site, and its
+certificate of Let's Encrypt is deleted. nginx and certbot are the
+machine's (`apt install nginx certbot`): the package does not install them.
 
 A user of workspaces reaches, of a server of its workspaces: the server
 page, its log, start, stop, restart, and with its role there pull, update,

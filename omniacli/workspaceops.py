@@ -83,5 +83,36 @@ async def remove_instance(job: Job, ws: Workspace, instance: str) -> None:
     await _helper(job, "remove", ws.name, ws.storage, instance)
 
 
+def web_spec(ws: Workspace) -> str:
+    """The names of the workspace for the root helper (it reads the ports)."""
+    return json.dumps({"domain": ws.domain, "main": ws.main, "subdomains": ws.subdomains,
+                       "certificate": ws.certificate})
+
+
+async def publish(job: Job, ws: Workspace) -> dict:
+    """The workspace's nginx site and its certificate: a certificate that
+    fails leaves the site on http (port 80 answers 503 until then)."""
+    if not ws.storage:
+        job.log(f"--- workspace {ws.name} has no storage: no site")
+        return {}
+    job.log(f"--- the names of workspace {ws.name}" + (f" under {ws.domain}" if ws.domain else ": none (no domain)"))
+    made = await _helper(job, "web", ws.name, ws.storage, web_spec(ws))
+    for name in made.get("names", []):
+        job.log(("https://" if made.get("https") else "http://") + name)
+    job.log(f"nginx: {made.get('nginx')}")
+    if made.get("certificate_error"):
+        job.log(f"The certificate is not there yet: {made['certificate_error']}")
+    return made
+
+
+async def own_certificate(ws: Workspace, certificate: str, key: str) -> tuple[bool, str]:
+    """The customer's certificate to the root helper, on its standard input."""
+    if not ws.storage:
+        return False, f"workspace {ws.name} has no storage"
+    code, out = await capture(helper("owncert", ws.name, ws.storage), timeout=HELPER_TIMEOUT,
+                              input=json.dumps({"certificate": certificate, "key": key}).encode())
+    return code == 0, out
+
+
 def instance_folder(ws: Workspace, instance: str) -> Path:
     return Path(ws.storage) / ws.name / instance

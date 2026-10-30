@@ -28,12 +28,27 @@ name; config/odoo.conf; the data folders, given to the image's users), and
 what it made, as JSON. The disk must be mounted, the instance must not exist.
 
 remove: docker compose down -v of both projects, then the instance's folder.
+
+web: the workspace's nginx site, /etc/nginx/conf.d/omniacli-<workspace>.conf,
+from the names of <spec> ({domain, main, subdomains, certificate}: README,
+Domains of a workspace) and the ports of the instances on its disk, read
+here; a name another site of nginx answers on is refused; nginx -t, or the
+file before is put back; then, for certificate letsencrypt, certbot
+(--webroot, one certificate omniacli-<workspace> for all the names) and the
+site again with https. No domain or no instance: the site and its
+certificate are removed.
+
+owncert: the customer's certificate and key, {certificate, key} as JSON on
+the standard input (a key is no argument: ps shows those), checked with
+openssl (the key is the certificate's, not expired), kept in
+/etc/omniacli/certs/<workspace>/, root's only.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import socket
 import stat
@@ -43,9 +58,10 @@ from pathlib import Path
 
 import yaml
 
-from . import composehelper, stacktemplates
+from . import composehelper, stacktemplates, workspaceweb
 from .composehelper import ENV, HelperError, caller
-from .config import WORKSPACE_NAME, parse_storage_roots
+from .config import (CERTIFICATES, DOMAIN_NAME, SUBDOMAIN, TEST_LABEL, WORKSPACE_NAME, ConfigError,
+                     parse_storage_roots, web_names)
 from .pluginstore import SYSTEM_CONFIG
 
 # the templates root runs: the package's (build_deb.sh), root's. sudo does
@@ -58,6 +74,12 @@ ROLES = ("production", "test")
 PORTS = range(20000, 30000)
 MAX_DISK_GB = 65536
 GB = 1024 ** 3
+NGINX_SITES = Path("/etc/nginx/conf.d")
+LETSENCRYPT = Path("/etc/letsencrypt/live")
+OWN_CERTS = Path("/etc/omniacli/certs")
+EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}")
+# a certificate with its chain and its key, on the standard input
+MAX_PEM = 256 * 1024
 
 
 def _tool(name: str) -> str:
@@ -74,11 +96,16 @@ def _run(*cmd: str, check: bool = True) -> str:
     return done.stdout
 
 
-def storage_roots(config: Path = SYSTEM_CONFIG) -> tuple[str, ...]:
+def _system(config: Path = SYSTEM_CONFIG) -> dict:
     try:
         data = yaml.safe_load(config.read_text(encoding="utf-8")) or {}
     except (OSError, yaml.YAMLError) as exc:
         raise HelperError(f"cannot read {config}: {exc}") from None
+    return data if isinstance(data, dict) else {}
+
+
+def storage_roots(config: Path = SYSTEM_CONFIG) -> tuple[str, ...]:
+    data = _system(config)
     try:
         return parse_storage_roots(data.get("workspaces"))
     except Exception as exc:  # noqa: BLE001 - ConfigError, reported as the helper's
@@ -333,7 +360,216 @@ def remove(name: str, storage: str, instance: str) -> dict:
     return {"workspace": name, "instance": instance, "removed": str(folder)}
 
 
-ACTIONS = {"disk": (disk, 3), "create": (create, 5), "remove": (remove, 3)}
+def _env(project: Path) -> dict[str, str]:
+    values = {}
+    for line in (project / ".env").read_text(encoding="utf-8").splitlines():
+        key, sep, value = line.partition("=")
+        if sep:
+            values[key.strip()] = value.strip()
+    return values
+
+
+def instances_on_disk(mount: Path) -> list[str]:
+    """The instances of a mounted workspace: <instance>/<role>/.env of every role."""
+    return sorted(p.name for p in mount.iterdir()
+                  if WORKSPACE_NAME.fullmatch(p.name) and not p.is_symlink() and p.is_dir()
+                  and all((p / role / ".env").is_file() for role in ROLES))
+
+
+def web_spec(spec_json: str, instances: list[str]) -> dict:
+    """The names asked for, checked against what is on the disk."""
+    try:
+        spec = json.loads(spec_json)
+    except ValueError:
+        raise HelperError("the names are not JSON") from None
+    if not isinstance(spec, dict):
+        raise HelperError("the names are not a JSON object")
+    domain = str(spec.get("domain") or "")
+    if domain and not DOMAIN_NAME.fullmatch(domain):
+        raise HelperError(f"{domain!r} is not a domain name")
+    main = str(spec.get("main") or "")
+    if main and main not in instances:
+        raise HelperError(f"{main!r} is not an instance of the workspace")
+    subdomains = spec.get("subdomains") or {}
+    if not isinstance(subdomains, dict):
+        raise HelperError("the subdomains are not a JSON object")
+    for sub, target in subdomains.items():
+        if not SUBDOMAIN.fullmatch(str(sub)) or sub == TEST_LABEL or sub in instances:
+            raise HelperError(f"{sub!r} is not a subdomain the workspace may have")
+        if target not in instances:
+            raise HelperError(f"subdomain {sub}: {target!r} is not an instance of the workspace")
+    certificate = str(spec.get("certificate") or "letsencrypt")
+    if certificate not in CERTIFICATES:
+        raise HelperError(f"the certificate is one of {', '.join(CERTIFICATES)}")
+    return {"domain": domain, "main": main, "subdomains": {str(k): str(v) for k, v in subdomains.items()},
+            "certificate": certificate}
+
+
+def _sites(mount: Path, spec: dict, instances: list[str]) -> list[dict]:
+    try:
+        sites = web_names(spec["domain"], instances, spec["main"], spec["subdomains"])
+    except ConfigError as exc:
+        raise HelperError(str(exc)) from None
+    for site in sites:
+        project = mount / site["instance"] / site["role"]
+        env = _env(project)
+        try:
+            conf = (project / "config" / "odoo.conf").read_text(encoding="utf-8")
+        except OSError:
+            conf = ""
+        if not (env.get("HTTP_PORT", "").isdigit() and env.get("WEBSOCKET_PORT", "").isdigit()):
+            raise HelperError(f"{project}/.env has no HTTP_PORT or WEBSOCKET_PORT")
+        site["http_port"] = int(env["HTTP_PORT"])
+        site["websocket_port"] = int(env["WEBSOCKET_PORT"]) if workspaceweb.workers(conf) else None
+    return sites
+
+
+def _tls(name: str, certificate: str) -> tuple[str, str] | None:
+    folder = OWN_CERTS / name if certificate == "own" else LETSENCRYPT / f"omniacli-{name}"
+    chain, key = folder / "fullchain.pem", folder / "privkey.pem"
+    return (str(chain), str(key)) if chain.is_file() and key.is_file() else None
+
+
+def _nginx_reload() -> str:
+    if _run("systemctl", "is-active", "nginx", check=False).strip() != "active":
+        return "nginx is not running: the site is written, it is read when nginx starts"
+    _run("systemctl", "reload", "nginx")
+    return "nginx reloaded"
+
+
+def _put_site(path: Path, text: str | None) -> str:
+    """The site written (None: removed), nginx -t, or the file before back."""
+    before = path.read_text(encoding="utf-8") if path.is_file() else None
+    if text == before:
+        return "the site is unchanged"
+    if text is None:
+        path.unlink()
+    else:
+        _write(path, text)
+    test = subprocess.run([_tool("nginx"), "-t"], env=ENV, capture_output=True, text=True)
+    if test.returncode:
+        if before is None:
+            path.unlink(missing_ok=True)
+        else:
+            _write(path, before)
+        raise HelperError(f"nginx -t refused the site, the one before is back: {test.stderr.strip()}")
+    return _nginx_reload()
+
+
+def _certbot(name: str, names: list[str]) -> str | None:
+    """Let's Encrypt's certificate for names: None, or why it failed."""
+    email = str((_system().get("workspaces") or {}).get("acme_email") or "")
+    if email and not EMAIL.fullmatch(email):
+        raise HelperError(f"workspaces.acme_email of {SYSTEM_CONFIG} is not an email address")
+    cmd = [_tool("certbot"), "certonly", "--webroot", "-w", workspaceweb.ACME_ROOT,
+           "--cert-name", f"omniacli-{name}", "--non-interactive", "--agree-tos", "--keep-until-expiring",
+           "--deploy-hook", "systemctl reload nginx",
+           *(["-m", email] if email else ["--register-unsafely-without-email"])]
+    for host in names:
+        cmd += ["-d", host]
+    done = subprocess.run(cmd, env=ENV, capture_output=True, text=True)
+    return (done.stderr or done.stdout).strip() or f"certbot failed ({done.returncode})" if done.returncode else None
+
+
+def _hash_bucket(dump: str) -> None:
+    """The names of a workspace are longer than nginx's default (64) holds:
+    omniacli.conf sets more, once, unless the machine's nginx sets it (a
+    second time is an error)."""
+    path = NGINX_SITES / "omniacli.conf"
+    if path.exists() or re.search(r"^\s*server_names_hash_bucket_size\s", dump, re.MULTILINE):
+        return
+    _write(path, "# written by omniacli workspace-helper: room for the long names of the workspaces\n"
+                 f"server_names_hash_bucket_size {workspaceweb.HASH_BUCKET};\n")
+
+
+def web(name: str, storage: str, spec_json: str) -> dict:
+    image, mount = workspace(name, storage)
+    path = NGINX_SITES / f"omniacli-{name}.conf"
+    instances = instances_on_disk(mount) if mounted(image, mount) else []
+    spec = web_spec(spec_json, instances)
+    made = {"workspace": name, "site": str(path), "names": [], "https": False, "certificate_error": None}
+    if not spec["domain"] or not instances:
+        made["nginx"] = _put_site(path, None) if path.exists() else "no site"
+        lineage = LETSENCRYPT / f"omniacli-{name}"
+        if lineage.exists():
+            _run("certbot", "delete", "--cert-name", f"omniacli-{name}", "--non-interactive")
+        return made
+    sites = _sites(mount, spec, instances)
+    names = [n for site in sites for n in site["names"]]
+    made["names"] = names
+    dump = subprocess.run([_tool("nginx"), "-T"], env=ENV, capture_output=True, text=True)
+    if dump.returncode:
+        raise HelperError(f"nginx -T: {dump.stderr.strip()}")
+    taken = workspaceweb.clashes(names, workspaceweb.names_elsewhere(dump.stdout, str(path)))
+    if taken:
+        raise HelperError("names other sites of nginx answer on: " + ", ".join(taken))
+    _hash_bucket(dump.stdout)
+    acme = Path(workspaceweb.ACME_ROOT)
+    acme.mkdir(mode=0o755, exist_ok=True)
+    ipv6 = Path("/proc/net/if_inet6").exists()
+    tls = _tls(name, spec["certificate"])
+    made["nginx"] = _put_site(path, workspaceweb.conf_text(name, sites, tls, ipv6))
+    if spec["certificate"] == "letsencrypt":
+        made["certificate_error"] = _certbot(name, names)
+        if made["certificate_error"] is None and tls is None:
+            tls = _tls(name, spec["certificate"])
+            made["nginx"] = _put_site(path, workspaceweb.conf_text(name, sites, tls, ipv6))
+    elif tls is None:
+        made["certificate_error"] = "no certificate of the customer's yet: upload it"
+    made["https"] = tls is not None
+    return made
+
+
+def _openssl(*args: str) -> str:
+    done = subprocess.run([_tool("openssl"), *args], env=ENV, capture_output=True, text=True,
+                          stdin=subprocess.DEVNULL)
+    if done.returncode:
+        raise HelperError(f"openssl {args[0]}: {(done.stderr or done.stdout).strip()}")
+    return done.stdout
+
+
+def owncert(name: str, storage: str, given: str | None = None) -> dict:
+    workspace(name, storage)
+    text = sys.stdin.read(MAX_PEM + 1) if given is None else given
+    if len(text) > MAX_PEM:
+        raise HelperError(f"more than {MAX_PEM // 1024} KB on the standard input")
+    try:
+        data = json.loads(text)
+    except ValueError:
+        raise HelperError("the standard input is not JSON {certificate, key}") from None
+    if not isinstance(data, dict):
+        raise HelperError("the standard input is not JSON {certificate, key}")
+    chain, key = str(data.get("certificate") or ""), str(data.get("key") or "")
+    if "-----BEGIN CERTIFICATE-----" not in chain or "PRIVATE KEY-----" not in key:
+        raise HelperError("a certificate (PEM, with its chain) and its private key (PEM) are needed")
+    OWN_CERTS.mkdir(mode=0o700, parents=True, exist_ok=True)
+    folder = OWN_CERTS / name
+    folder.mkdir(mode=0o700, exist_ok=True)
+    os.chmod(folder, 0o700)
+    new_chain, new_key = folder / "fullchain.pem.new", folder / "privkey.pem.new"
+    try:
+        _write(new_chain, chain.strip() + "\n", mode=0o600)
+        _write(new_key, key.strip() + "\n", mode=0o600)
+        if _openssl("x509", "-in", str(new_chain), "-noout", "-pubkey") != \
+                _openssl("pkey", "-in", str(new_key), "-pubout", "-passin", "pass:"):
+            raise HelperError("the key is not the certificate's")
+        if subprocess.run([_tool("openssl"), "x509", "-in", str(new_chain), "-noout", "-checkend", "0"],
+                          env=ENV, capture_output=True, stdin=subprocess.DEVNULL).returncode:
+            raise HelperError("the certificate has expired")
+        not_after = _openssl("x509", "-in", str(new_chain), "-noout", "-enddate").strip().partition("=")[2]
+        alt = subprocess.run([_tool("openssl"), "x509", "-in", str(new_chain), "-noout", "-ext", "subjectAltName"],
+                             env=ENV, capture_output=True, text=True, stdin=subprocess.DEVNULL).stdout
+        os.replace(new_chain, folder / "fullchain.pem")
+        os.replace(new_key, folder / "privkey.pem")
+    finally:
+        new_chain.unlink(missing_ok=True)
+        new_key.unlink(missing_ok=True)
+    return {"workspace": name, "not_after": not_after,
+            "names": [part.strip()[4:] for part in alt.replace("\n", ",").split(",") if part.strip().startswith("DNS:")]}
+
+
+ACTIONS = {"disk": (disk, 3), "create": (create, 5), "remove": (remove, 3), "web": (web, 3),
+           "owncert": (owncert, 2)}
 
 
 def run(argv: list[str]) -> dict:

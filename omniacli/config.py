@@ -10,7 +10,7 @@ import os
 import re
 import shutil
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -908,6 +908,12 @@ DOMAIN_NAME = re.compile(r"(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\
 MEMBER_NAME = re.compile(r"[A-Za-z0-9._@-]{1,64}")
 # what a workspace may use; a limit not set is no limit
 WORKSPACE_LIMITS = ("disk_gb", "cpus", "memory_gb", "instances")
+# a subdomain of a workspace's domain (and of test.<domain>): one label
+SUBDOMAIN = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
+# the label of the test names, never an instance's or a subdomain's
+TEST_LABEL = "test"
+# where the certificate of a workspace's names comes from
+CERTIFICATES = ("letsencrypt", "own")
 
 
 @dataclass
@@ -924,6 +930,16 @@ class Workspace:
     limits: dict[str, float] = field(default_factory=dict)
     servers: list[str] = field(default_factory=list)
     members: dict[str, str] = field(default_factory=dict)  # {user name: role}
+    # the names (README, Domains of a workspace): the instance on <domain>
+    # and test.<domain>, the subdomains {<sub>: instance}, the certificate
+    main: str = ""
+    subdomains: dict[str, str] = field(default_factory=dict)
+    certificate: str = "letsencrypt"
+
+    def instances(self) -> list[str]:
+        """The instances of the workspace: its servers <name>-<instance>."""
+        prefix = f"{self.name}-"
+        return [s[len(prefix):] for s in self.servers if s.startswith(prefix) and len(s) > len(prefix)]
 
     def to_dict(self) -> dict:
         data: dict[str, Any] = {"label": self.label}
@@ -935,6 +951,12 @@ class Workspace:
             data["limits"] = dict(self.limits)
         data["servers"] = list(self.servers)
         data["members"] = dict(self.members)
+        if self.main:
+            data["main"] = self.main
+        if self.subdomains:
+            data["subdomains"] = dict(self.subdomains)
+        if self.certificate != "letsencrypt":
+            data["certificate"] = self.certificate
         return data
 
 
@@ -978,7 +1000,25 @@ def parse_workspace(name: str, data: dict, storage_roots: tuple[str, ...] = ()) 
         if not MEMBER_NAME.fullmatch(user):
             raise ConfigError(f"{where}.members: {user!r} is not a user name")
         members[user] = _access_role(f"{where}.members.{user}", role)
-    return Workspace(name, label, domain, storage, limits, list(dict.fromkeys(servers)), members)
+    ws = Workspace(name, label, domain, storage, limits, list(dict.fromkeys(servers)), members)
+    instances = ws.instances()
+    main = str(data.get("main") or "").strip()
+    if main and main not in instances:
+        raise ConfigError(f"{where}.main: {main} is not an instance of the workspace")
+    subdomains = {}
+    for sub, instance in (data.get("subdomains") or {}).items():
+        sub, instance = str(sub).strip().lower(), str(instance or "").strip()
+        if not SUBDOMAIN.fullmatch(sub) or sub == TEST_LABEL:
+            raise ConfigError(f"{where}.subdomains: {sub!r} is not a subdomain (one label a-z 0-9 -, not {TEST_LABEL})")
+        if sub in instances:
+            raise ConfigError(f"{where}.subdomains: {sub} is the name of an instance already")
+        if instance not in instances:
+            raise ConfigError(f"{where}.subdomains.{sub}: {instance!r} is not an instance of the workspace")
+        subdomains[sub] = instance
+    certificate = str(data.get("certificate") or "letsencrypt")
+    if certificate not in CERTIFICATES:
+        raise ConfigError(f"{where}.certificate: one of {', '.join(CERTIFICATES)}, not {certificate!r}")
+    return replace(ws, main=main, subdomains=subdomains, certificate=certificate)
 
 
 def parse_workspaces(data, storage_roots: tuple[str, ...] = ()) -> dict[str, Workspace]:
@@ -997,6 +1037,28 @@ def parse_workspaces(data, storage_roots: tuple[str, ...] = ()) -> dict[str, Wor
         if ws.domain and ws.domain in domains:
             raise ConfigError(f"domain {ws.domain} is in two workspaces: {domains[ws.domain]} and {ws.name}")
         domains[ws.domain] = ws.name
+    # every name of a workspace is under its domain: no domain under another's
+    for domain, ws_name in domains.items():
+        for other, other_ws in domains.items():
+            if domain and other and domain != other and domain.endswith("." + other):
+                raise ConfigError(f"domain {domain} of workspace {ws_name} is under {other} of workspace {other_ws}")
+    return found
+
+
+def web_names(domain: str, instances, main: str = "", subdomains: dict[str, str] | None = None) -> list[dict]:
+    """The names each instance and role of a workspace answers on:
+    [{instance, role, names}], production first. The main instance takes
+    <domain> and test.<domain>; every instance <instance>.<domain> and
+    <instance>.test.<domain>; a subdomain <sub>.<domain> and <sub>.test.<domain>."""
+    found = []
+    for instance in instances:
+        subs = [sub for sub, target in (subdomains or {}).items() if target == instance]
+        for role, base in (("production", domain), ("test", f"{TEST_LABEL}.{domain}")):
+            names = ([base] if instance == main else []) + [f"{label}.{base}" for label in (instance, *subs)]
+            long = [n for n in names if len(n) > 253]
+            if long:
+                raise ConfigError(f"{long[0]} is longer than a domain name may be (253)")
+            found.append({"instance": instance, "role": role, "names": names})
     return found
 
 

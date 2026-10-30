@@ -45,6 +45,67 @@ A new database has the user <strong>admin</strong> with password <strong>admin</
   <div class="actions"><button type="button" id="create-instance">Create</button></div>
   {% endif %}
 </div>
+<h2>Names</h2>
+<div class="panel" style="margin-bottom: 16px" id="names">
+  {% if not ws.domain %}
+  <p class="muted">The workspace has no domain yet: the machine's administrators set it.</p>
+  {% else %}
+  <p class="muted">Under <strong>{{ ws.domain }}</strong>: the main instance answers on <span class="mono">{{ ws.domain }}</span>
+  and <span class="mono">test.{{ ws.domain }}</span>, every instance on <span class="mono">&lt;instance&gt;.{{ ws.domain }}</span>
+  and <span class="mono">&lt;instance&gt;.test.{{ ws.domain }}</span>, a subdomain on <span class="mono">&lt;sub&gt;.{{ ws.domain }}</span>
+  and <span class="mono">&lt;sub&gt;.test.{{ ws.domain }}</span>. Each name needs a DNS record pointing to this machine,
+  and the certificate of Let's Encrypt port 80 open to the internet.</p>
+  {% if sites %}
+  <div class="scroll">
+  <table>
+    <tr><th>Instance</th><th>Role</th><th>Names</th></tr>
+    {% for site in sites %}
+    <tr><td>{{ site.instance }}</td><td>{{ site.role }}</td>
+      <td class="mono">{% for n in site.names %}<a href="https://{{ n }}/" target="_blank" rel="noopener">{{ n }}</a>{% if not loop.last %}<br>{% endif %}{% endfor %}</td></tr>
+    {% endfor %}
+  </table>
+  </div>
+  {% endif %}
+  <div class="form-grid" style="margin-top: 8px">
+    <label for="main-instance">Main instance</label>
+    <select id="main-instance"><option value="">(none)</option>
+      {% for i in instances %}<option {% if i == ws.main %}selected{% endif %}>{{ i }}</option>{% endfor %}</select>
+    <label for="certificate">Certificate</label>
+    <select id="certificate">
+      <option value="letsencrypt" {% if ws.certificate == "letsencrypt" %}selected{% endif %}>Let's Encrypt (made and renewed by this machine)</option>
+      <option value="own" {% if ws.certificate == "own" %}selected{% endif %}>the customer's own</option>
+    </select>
+  </div>
+  <h3>Subdomains</h3>
+  <div class="scroll">
+  <table id="subdomains">
+    <tr><th>Subdomain</th><th>Instance</th><th></th></tr>
+    {% for sub, target in ws.subdomains.items() %}
+    <tr data-sub><td><input type="text" class="mono sub" value="{{ sub }}" aria-label="Subdomain"></td>
+      <td><select class="target" aria-label="Instance of the subdomain">{% for i in instances %}<option {% if i == target %}selected{% endif %}>{{ i }}</option>{% endfor %}</select></td>
+      <td><button type="button" class="danger" data-drop-sub>Remove</button></td></tr>
+    {% endfor %}
+  </table>
+  </div>
+  <div class="actions">
+    {% if instances %}<button type="button" id="add-sub">Add subdomain</button>{% endif %}
+    <button type="button" id="save-names">Save and publish</button>
+    {% if instances %}<button type="button" id="publish-names">Publish again</button>{% endif %}
+  </div>
+  {% if ws.certificate == "own" %}
+  <h3>The customer's certificate</h3>
+  <p class="muted">PEM: the certificate with its chain, and its private key (not protected by a passphrase).
+  It should list every name above.</p>
+  <div class="form-grid">
+    <label for="own-cert">Certificate</label>
+    <textarea id="own-cert" class="mono" rows="6" placeholder="-----BEGIN CERTIFICATE-----"></textarea>
+    <label for="own-key">Private key</label>
+    <textarea id="own-key" class="mono" rows="6" placeholder="-----BEGIN PRIVATE KEY-----"></textarea>
+  </div>
+  <div class="actions"><button type="button" id="upload-cert">Upload and publish</button></div>
+  {% endif %}
+  {% endif %}
+</div>
 <h2>Users</h2>
 <div class="panel">
   <div class="scroll">
@@ -156,6 +217,48 @@ A new database has the user <strong>admin</strong> with password <strong>admin</
       if (data) location.href = "{{ prefix }}/jobs/" + data.job;
     };
   }
+  const instances = {{ instances | tojson }};
+  const subTable = document.getElementById("subdomains");
+  function bindDrop(row) { row.querySelector("[data-drop-sub]").onclick = () => row.remove(); }
+  if (subTable) for (const row of subTable.querySelectorAll("[data-sub]")) bindDrop(row);
+  const addSub = document.getElementById("add-sub");
+  if (addSub) addSub.onclick = () => {
+    const row = subTable.insertRow(-1);
+    row.dataset.sub = "";
+    const input = document.createElement("input");
+    input.type = "text"; input.className = "mono sub"; input.setAttribute("aria-label", "Subdomain");
+    const select = document.createElement("select");
+    select.className = "target"; select.setAttribute("aria-label", "Instance of the subdomain");
+    for (const i of instances) { const o = document.createElement("option"); o.textContent = i; select.appendChild(o); }
+    const drop = document.createElement("button");
+    drop.type = "button"; drop.className = "danger"; drop.dataset.dropSub = ""; drop.textContent = "Remove";
+    row.insertCell().appendChild(input); row.insertCell().appendChild(select); row.insertCell().appendChild(drop);
+    bindDrop(row);
+  };
+  const saveNames = document.getElementById("save-names");
+  if (saveNames) saveNames.onclick = async () => {
+    const subdomains = {};
+    for (const row of subTable.querySelectorAll("[data-sub]")) {
+      const sub = row.querySelector(".sub").value.trim().toLowerCase();
+      if (sub) subdomains[sub] = row.querySelector(".target").value;
+    }
+    const data = await postWs("web/save", {main: document.getElementById("main-instance").value, subdomains,
+                                           certificate: document.getElementById("certificate").value});
+    if (data) data.job ? location.href = "{{ prefix }}/jobs/" + data.job : location.reload();
+  };
+  const publishNames = document.getElementById("publish-names");
+  if (publishNames) publishNames.onclick = async () => {
+    const data = await postWs("web/publish", {});
+    if (data) location.href = "{{ prefix }}/jobs/" + data.job;
+  };
+  const uploadCert = document.getElementById("upload-cert");
+  if (uploadCert) uploadCert.onclick = async () => {
+    const data = await postWs("web/certificate", {certificate: document.getElementById("own-cert").value,
+                                                  key: document.getElementById("own-key").value});
+    if (!data) return;
+    alert(`Certificate valid until ${data.not_after}, for: ${(data.names || []).join(", ") || "no DNS name"}`);
+    location.href = "{{ prefix }}/jobs/" + data.job;
+  };
   document.getElementById("add-user").onclick = async () => {
     const body = {name: document.getElementById("new-user").value.trim(), role: document.getElementById("new-user-role").value,
                   password: document.getElementById("new-user-password").value, new: true};

@@ -49,11 +49,13 @@ from .config import (
     USER_ROLES,
     WORKSPACE_LIMITS,
     Access,
+    CERTIFICATES,
     ConfigError,
     Instance,
     LinkAccess,
     LinkTarget,
     Settings,
+    TEST_LABEL,
     TOKEN_DEFAULT_ROLE,
     WORKSPACE_NAME,
     Workspace,
@@ -73,6 +75,7 @@ from .config import (
     save_links,
     save_options,
     save_publications,
+    web_names,
     save_pullers,
     save_servers,
     save_workspaces,
@@ -181,7 +184,8 @@ WORKSPACE_ROUTES = frozenset({
     "/servers/{server}/{role}/log", "/api/servers/{server}/{role}/log",
     "/workspaces/{workspace}", "/api/workspaces/{workspace}/members/save",
     "/api/workspaces/{workspace}/members/delete", "/api/workspaces/{workspace}/instances/create",
-    "/api/workspaces/{workspace}/instances/delete",
+    "/api/workspaces/{workspace}/instances/delete", "/api/workspaces/{workspace}/web/save",
+    "/api/workspaces/{workspace}/web/publish", "/api/workspaces/{workspace}/web/certificate",
 })
 
 
@@ -1653,10 +1657,40 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
                 names = [s for s in ws.servers if new is None or s != new]
                 if old is not None:
                     names = [n for n in (new if s == old else s for s in names) if n is not None]
-                changed[ws.name] = dataclasses.replace(ws, servers=names)
+                changed[ws.name] = names_follow(ws, dataclasses.replace(ws, servers=names), old, new)
             if changed == settings.workspaces:
                 return None
             return await store_workspaces(changed)
+
+    def names_follow(before: Workspace, ws: Workspace, old: str | None, new: str | None) -> Workspace:
+        """The main instance and the subdomains of ws after the server old
+        became new (None: deleted): renamed with it, or dropped."""
+        prefix = f"{ws.name}-"
+        gone = old[len(prefix):] if old and old in before.servers and old.startswith(prefix) else None
+        now = new[len(prefix):] if new and new in ws.servers and new.startswith(prefix) else None
+        main = (now or "") if gone and ws.main == gone else ws.main
+        subdomains = {sub: (now if gone and target == gone else target) for sub, target in ws.subdomains.items()}
+        instances = ws.instances()
+        return dataclasses.replace(
+            ws, main=main if main in instances else "",
+            subdomains={s: t for s, t in subdomains.items() if t in instances and s not in instances})
+
+    def submit_publish(ws: Workspace, source: str):
+        """A job: the workspace's nginx site and certificate, as it is when the job runs."""
+        async def action(job):
+            current = settings.workspaces.get(ws.name)
+            if current is None:
+                raise JobFailed(f"no workspace {ws.name}")
+            job.result = await workspaceops.publish(job, current)
+        return jobs.submit(f"Names of workspace {ws.name}", [f"{s}/{r}" for s in ws.servers for r in ROLES],
+                           source, action)
+
+    def site_names(ws: Workspace) -> list[dict]:
+        try:
+            return web_names(ws.domain, [i for i in ws.instances() if workspaceops.server_name(ws, i) in settings.servers],
+                             ws.main, ws.subdomains) if ws.domain else []
+        except ConfigError:
+            return []
 
     def workspace_rows() -> list[dict]:
         return [{**ws.to_dict(), "name": ws.name} for ws in sorted(settings.workspaces.values(), key=lambda w: w.name)]
@@ -1673,7 +1707,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         )
 
     @app.post("/api/workspaces/save", dependencies=[Depends(admin)])
-    async def workspace_save(payload: dict = Body(...)):
+    async def workspace_save(payload: dict = Body(...), me: Principal = Depends(current_user)):
         """Create (new: true) or change a workspace: its servers and members
         must exist, a server and a domain are in one workspace only."""
         name = str(payload.get("name") or "").strip()
@@ -1684,6 +1718,10 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             if not new and name not in settings.workspaces:
                 return refuse(f"No workspace {name}", status.HTTP_404_NOT_FOUND)
             data = {key: payload.get(key) for key in ("label", "domain", "storage", "limits", "servers", "members")}
+            before = settings.workspaces.get(name)
+            if before is not None:
+                # the names are the workspace's admins' (its page)
+                data.update(main=before.main, subdomains=before.subdomains, certificate=before.certificate)
             try:
                 found = parse_workspaces({**{n: ws.to_dict() for n, ws in settings.workspaces.items()}, name: data},
                                          settings.storage_roots)
@@ -1696,7 +1734,12 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             strangers = [u for u in ws.members if u not in settings.users]
             if strangers:
                 return refuse(f"No user {', '.join(strangers)}")
-            return await store_workspaces(found) or {"ok": True}
+            refused = await store_workspaces(found)
+            if refused:
+                return refused
+        if before is not None and before.domain != ws.domain and ws.instances():
+            return {"ok": True, "job": submit_publish(ws, f"manual: {me}").id}
+        return {"ok": True}
 
     @app.post("/api/workspaces/delete", dependencies=[Depends(admin)])
     async def workspace_delete(payload: dict = Body(...)):
@@ -1728,6 +1771,8 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
              "servers": [n for n in ws.servers if n in settings.servers],
              "templates": [t.to_dict() for t in found.values()],
              "can_create": bool(ws.storage and ws.limits.get("disk_gb")),
+             "instances": [i for i in ws.instances() if workspaceops.server_name(ws, i) in settings.servers],
+             "sites": site_names(ws), "certificates": CERTIFICATES,
              "instances_left": None if not ws.limits.get("instances")
              else int(ws.limits["instances"]) - len([n for n in ws.servers if n in settings.servers])},
         )
@@ -1741,6 +1786,9 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         instance = str(payload.get("instance") or "").strip()
         if not WORKSPACE_NAME.fullmatch(instance):
             return refuse("An instance's name is 1-32 lower case letters, digits and -")
+        if instance == TEST_LABEL or instance in ws.subdomains:
+            return refuse(f"{instance} is {'the name of the test sites' if instance == TEST_LABEL else 'a subdomain'} "
+                          "of the workspace: an instance needs another name")
         name = workspaceops.server_name(ws, instance)
         template = (await asyncio.to_thread(workspaceops.templates)).get(str(payload.get("template") or ""))
         if template is None:
@@ -1778,6 +1826,12 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             job.result = {"server": name}
             job.log(f"Server {name}: production at http://127.0.0.1:{parsed.production.options.http_port}, "
                     f"test at http://127.0.0.1:{parsed.test.options.http_port}")
+            current = settings.workspaces.get(ws.name)
+            if current is not None and current.domain:
+                try:
+                    await workspaceops.publish(job, current)
+                except JobFailed as exc:
+                    job.log(f"The instance runs, its names are not published: {exc}")
 
         job = jobs.submit(f"Create {name} from {template.name}", [f"{name}/production", f"{name}/test"],
                           f"manual: {me}", action)
@@ -1804,9 +1858,61 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
                 raise JobFailed(f"the instance is removed, but the servers file was not written: {error.body.decode()}")
             await rename_in_workspaces(name, None)
             job.log(f"Server {name} removed")
+            current = settings.workspaces.get(ws.name)
+            if current is not None:
+                try:
+                    await workspaceops.publish(job, current)
+                except JobFailed as exc:
+                    job.log(f"The names of the workspace are not published again: {exc}")
 
         job = jobs.submit(f"Remove {name}", [f"{name}/production", f"{name}/test"], f"manual: {me}", action)
         return {"job": job.id}
+
+    @app.post("/api/workspaces/{workspace}/web/save", dependencies=[Depends(admin)])
+    async def web_save(workspace: str, payload: dict = Body(...), me: Principal = Depends(current_user)):
+        """The names of the workspace (its admins): the main instance, the
+        subdomains, where the certificate comes from; then a job publishes them."""
+        async with workspaces_lock:
+            ws = a_workspace(workspace)
+            data = {**ws.to_dict(), "main": payload.get("main") or "",
+                    "subdomains": payload.get("subdomains") or {}, "certificate": payload.get("certificate")}
+            try:
+                found = parse_workspaces({**{n: w.to_dict() for n, w in settings.workspaces.items()}, workspace: data},
+                                         settings.storage_roots)
+            except ConfigError as exc:
+                return refuse(str(exc))
+            ws = found[workspace]
+            refused = await store_workspaces(found)
+            if refused:
+                return refused
+        if not ws.domain or not ws.instances():
+            return {"ok": True}
+        return {"ok": True, "job": submit_publish(ws, f"manual: {me}").id}
+
+    @app.post("/api/workspaces/{workspace}/web/publish", dependencies=[Depends(admin)])
+    async def web_publish(workspace: str, me: Principal = Depends(current_user)):
+        """The names published again (after the DNS records were made, a certificate failed)."""
+        ws = a_workspace(workspace)
+        if not ws.storage:
+            return refuse(f"Workspace {ws.name} has no storage: the machine's admins set it")
+        return {"job": submit_publish(ws, f"manual: {me}").id}
+
+    @app.post("/api/workspaces/{workspace}/web/certificate", dependencies=[Depends(admin)])
+    async def web_certificate(workspace: str, payload: dict = Body(...), me: Principal = Depends(current_user)):
+        """The customer's own certificate (PEM, with its chain) and key; the
+        names are then published with it."""
+        ws = a_workspace(workspace)
+        if ws.certificate != "own":
+            return refuse("The workspace takes its certificate from Let's Encrypt: choose its own certificate first")
+        ok, out = await workspaceops.own_certificate(ws, str(payload.get("certificate") or ""),
+                                                     str(payload.get("key") or ""))
+        if not ok:
+            return refuse(out.removeprefix("workspace-helper: "))
+        try:
+            made = json.loads(out.splitlines()[-1])
+        except (ValueError, IndexError):
+            made = {}
+        return {"ok": True, **made, "job": submit_publish(ws, f"manual: {me}").id}
 
     def only_here(user: str, workspace: str) -> bool:
         """user is a user of workspaces only, and of this one only: its
