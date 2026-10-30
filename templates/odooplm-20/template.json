@@ -1,7 +1,7 @@
 {
   "name": "odooplm-20",
   "label": "OdooPLM 20 (Odoo 20 + PostgreSQL 17)",
-  "version": "2026.1.2",
+  "version": "2026.1.3",
   "type": "docker",
   "odoo_service": "odoo",
   "db_service": "db",
@@ -18,5 +18,24 @@
      "pattern": "[a-z0-9_]+(,[a-z0-9_]+)*"},
     {"name": "INIT_LANG", "label": "Language loaded at the creation", "default": "",
      "choices": ["", "it_IT", "en_US", "de_DE", "fr_FR", "es_ES"]}
+  ],
+  "parameters": [
+    {"name": "workers", "label": "Workers (0: threaded)", "type": "int", "default": 0, "min": 0, "max": 8},
+    {"name": "max_cron_threads", "label": "Cron threads", "type": "int", "default": 2, "min": 0, "max": 4},
+    {"name": "limit_time_cpu", "label": "CPU time of a request, s (workers only)", "type": "int", "default": 60, "min": 60, "max": 3600},
+    {"name": "limit_time_real", "label": "Real time of a request, s", "type": "int", "default": 120, "min": 120, "max": 7200},
+    {"name": "limit_time_real_cron", "label": "Real time of a cron, s (-1: as a request)", "type": "int", "default": -1, "min": -1, "max": 7200},
+    {"name": "limit_time_worker_cron", "label": "Life of a cron worker, s (0: no limit)", "type": "int", "default": 0, "min": 0, "max": 86400},
+    {"name": "limit_memory_soft", "label": "Memory of a worker, soft, MB", "type": "mb", "default": 2048, "min": 512, "max": 8192},
+    {"name": "limit_memory_hard", "label": "Memory of a worker, hard, MB", "type": "mb", "default": 2560, "min": 1024, "max": 8192},
+    {"name": "limit_request", "label": "Requests a worker serves", "type": "int", "default": 65536, "min": 1024, "max": 1000000},
+    {"name": "db_maxconn", "label": "Database connections", "type": "int", "default": 64, "min": 8, "max": 64},
+    {"name": "smtp_server", "label": "SMTP server", "type": "text", "default": "localhost"},
+    {"name": "smtp_port", "label": "SMTP port", "type": "int", "default": 25, "min": 1, "max": 65535},
+    {"name": "smtp_ssl", "label": "SMTP over SSL", "type": "bool", "default": false},
+    {"name": "smtp_user", "label": "SMTP user", "type": "text", "default": ""},
+    {"name": "smtp_password", "label": "SMTP password", "type": "password", "default": ""},
+    {"name": "email_from", "label": "Email from", "type": "text", "default": ""},
+    {"name": "from_filter", "label": "From filter", "type": "text", "default": ""}
   ]
 }

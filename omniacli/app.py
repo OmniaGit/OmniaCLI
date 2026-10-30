@@ -188,6 +188,7 @@ WORKSPACE_ROUTES = frozenset({
     "/api/workspaces/{workspace}/web/publish", "/api/workspaces/{workspace}/web/certificate",
     "/api/workspaces/{workspace}/credentials/save", "/api/workspaces/{workspace}/credentials/delete",
     "/api/workspaces/{workspace}/repositories/add", "/api/workspaces/{workspace}/repositories/remove",
+    "/api/workspaces/{workspace}/parameters/save",
 })
 
 
@@ -1860,7 +1861,8 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
                 return refuse(f"A workspace named {name} already exists")
             if not new and name not in settings.workspaces:
                 return refuse(f"No workspace {name}", status.HTTP_404_NOT_FOUND)
-            data = {key: payload.get(key) for key in ("label", "domain", "storage", "limits", "servers", "members")}
+            data = {key: payload.get(key) for key in ("label", "domain", "storage", "limits", "servers", "members",
+                                                       "parameter_bounds")}
             before = settings.workspaces.get(name)
             if before is not None:
                 # the names are the workspace's admins' (its page)
@@ -1915,6 +1917,8 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
              "templates": [t.to_dict() for t in found.values()],
              "can_create": bool(ws.storage and ws.limits.get("disk_gb")),
              "instances": [i for i in ws.instances() if workspaceops.server_name(ws, i) in settings.servers],
+             "parameters": {n: {role: role_parameters(ws, n[len(ws.name) + 1:], role) for role in ROLES}
+                            for n in ws.servers if n in settings.servers and n.startswith(f"{ws.name}-")},
              "repositories": {n: {role: [{"name": r.name, "branch": r.branch} for r in getattr(settings.servers[n], role).repositories]
                                   for role in ROLES if getattr(settings.servers[n], role) is not None}
                               for n in ws.servers if n in settings.servers},
@@ -2166,6 +2170,82 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
 
         job = jobs.submit(f"Remove repository {repo} from {name}", [f"{name}/{role}" for role in ROLES],
                           f"manual: {me}", action)
+        return {"job": job.id}
+
+    def instance_template(ws: Workspace, instance: str):
+        """The template an instance was made from (the higher version installed), or None."""
+        try:
+            meta = json.loads((Path(ws.storage) / ws.name / instance / workspacehelper.INSTANCE_FILE).read_text())
+        except (OSError, ValueError):
+            return None
+        return workspaceops.templates().get(str(meta.get("template") or ""))
+
+    def role_parameters(ws: Workspace, instance: str, role: str) -> dict | None:
+        """What the page shows of a role: each parameter with its value (a
+        password: whether it is set), the debug switch."""
+        template = instance_template(ws, instance)
+        if template is None or not template.parameters:
+            return None
+        state = workspacehelper.role_state(Path(ws.storage) / ws.name / instance / role)
+        rows = []
+        for param in template.parameters:
+            value = state["parameters"].get(param.name, param.default)
+            bounds = ws.parameter_bounds.get(param.name) or [param.min, param.max]
+            rows.append({**param.to_dict(), "min": bounds[0], "max": bounds[1],
+                         "value": "" if param.type == "password" else value,
+                         "set": bool(value) if param.type == "password" else None})
+        return {"parameters": rows, "debug": state["debug"]}
+
+    @app.post("/api/workspaces/{workspace}/parameters/save", dependencies=[Depends(admin)])
+    async def parameters_save(workspace: str, payload: dict = Body(...), me: Principal = Depends(current_user)):
+        """The editable Odoo parameters and the debug log of a role of an
+        instance: checked against the template's bounds or the workspace's,
+        and workers x limit_memory_hard against the workspace's memory; the
+        helper writes its odoo.conf again, the role is restarted (and the
+        workspace's names published again: the websocket follows workers)."""
+        ws = a_workspace(workspace)
+        found = workspace_instance(ws, payload)
+        if not isinstance(found, tuple):
+            return found
+        name, instance = found
+        role = str(payload.get("role") or "")
+        if role not in ROLES:
+            return refuse(f"The role is {' or '.join(ROLES)}")
+        template = await asyncio.to_thread(instance_template, ws, instance)
+        if template is None:
+            return refuse(f"{name} was not made from a template installed here")
+        given = {str(k): v for k, v in (payload.get("parameters") or {}).items()}
+        saved = workspacehelper.role_state(Path(ws.storage) / ws.name / instance / role)["parameters"]
+        for param in template.parameters:
+            # a password left empty keeps the one saved
+            if param.type == "password" and not str(given.get(param.name) or "") and saved.get(param.name):
+                given[param.name] = saved[param.name]
+        bounds = {k: tuple(v) for k, v in ws.parameter_bounds.items()}
+        try:
+            values = template.parameter_values(given, bounds)
+        except stacktemplates.TemplateError as exc:
+            return refuse(str(exc))
+        memory = ws.limits.get("memory_gb")
+        workers, hard = values.get("workers") or 0, values.get("limit_memory_hard") or 0
+        if memory and workers and workers * hard > memory * 1024:
+            return refuse(f"{workers} workers x {hard} MB is more than the workspace's {memory:g} GB: the kernel "
+                          "would kill Odoo instead of Odoo stopping one request")
+        debug = bool(payload.get("debug"))
+
+        async def action(job):
+            await workspaceops._helper(job, "conf", ws.name, ws.storage, instance, role, json.dumps(
+                {"parameters": given, "debug": debug, "bounds": ws.parameter_bounds}))
+            await ops.restart(job, getattr(settings.servers[name], role))
+            current = settings.workspaces.get(ws.name)
+            if current is not None and current.domain:
+                try:
+                    await workspaceops.publish(job, current)
+                except JobFailed as exc:
+                    job.log(f"The names of the workspace are not published again: {exc}")
+            if not workers and values.get("limit_time_cpu"):
+                job.log("Note: with workers = 0 Odoo does not apply limit_time_cpu (only with workers)")
+
+        job = jobs.submit(f"Odoo parameters of {name}/{role}", [f"{name}/{role}"], f"manual: {me}", action)
         return {"job": job.id}
 
     def only_here(user: str, workspace: str) -> bool:

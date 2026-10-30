@@ -820,6 +820,24 @@ merge of test into production then work as for every server. **×** takes it
 out of both the same way and deletes the clones. A step that fails puts the
 `odoo.conf` back and deletes what was cloned.
 
+**Odoo parameters**: each role of an instance has, on the same page, the
+Odoo options its template lets the workspace's admins change, with their
+bounds (`odooplm-20`: `workers`, `max_cron_threads`, the `limit_time_*` and
+`limit_memory_*`, `limit_request`, `db_maxconn`, the SMTP server and
+`email_from`; the defaults are Odoo 20's), and a **debug log** switch
+(`log_level = debug`). The machine's admins may set other bounds for a
+workspace (**Bounds of the Odoo parameters** on Settings › Workspaces, one
+`name min max` per line). Saved, the values are checked (`workers ×
+limit_memory_hard` may not exceed the workspace's `memory_gb`: the kernel
+would kill Odoo instead of Odoo stopping one request), the root helper's
+`conf` writes the role's `odoo.conf` again (what OmniaCLI needs, the
+database, the addons, the admin password, is never among them) and keeps
+them in `<role>/omniacli.json`, the role is restarted and the workspace's
+names published again (with workers the websocket goes to Odoo's 8072). A
+password left empty keeps the one saved; with `workers = 0` Odoo does not
+apply `limit_time_cpu`. The SMTP password is in `odoo.conf`, which is
+readable by everyone on the machine (`0644`).
+
 A new database has the user **admin** with password **admin**: change it
 at the first login. **Remove** on the same page takes down both projects,
 deletes their databases, files and folders, then the server.

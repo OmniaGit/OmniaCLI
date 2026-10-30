@@ -944,6 +944,9 @@ class Workspace:
     main: str = ""
     subdomains: dict[str, str] = field(default_factory=dict)
     certificate: str = "letsencrypt"
+    # the bounds of the editable Odoo parameters for this workspace, set by
+    # the machine's admins over the template's: {name: [min, max]}
+    parameter_bounds: dict[str, list[int]] = field(default_factory=dict)
 
     def instances(self) -> list[str]:
         """The instances of the workspace: its servers <name>-<instance>."""
@@ -966,6 +969,8 @@ class Workspace:
             data["subdomains"] = dict(self.subdomains)
         if self.certificate != "letsencrypt":
             data["certificate"] = self.certificate
+        if self.parameter_bounds:
+            data["parameter_bounds"] = {k: list(v) for k, v in self.parameter_bounds.items()}
         return data
 
 
@@ -1027,7 +1032,16 @@ def parse_workspace(name: str, data: dict, storage_roots: tuple[str, ...] = ()) 
     certificate = str(data.get("certificate") or "letsencrypt")
     if certificate not in CERTIFICATES:
         raise ConfigError(f"{where}.certificate: one of {', '.join(CERTIFICATES)}, not {certificate!r}")
-    return replace(ws, main=main, subdomains=subdomains, certificate=certificate)
+    bounds = {}
+    for key, value in (data.get("parameter_bounds") or {}).items():
+        try:
+            low, high = (int(v) for v in value)
+        except (TypeError, ValueError):
+            raise ConfigError(f"{where}.parameter_bounds.{key}: [min, max], two whole numbers") from None
+        if not re.fullmatch(r"[a-z_]{1,40}", str(key)) or low > high:
+            raise ConfigError(f"{where}.parameter_bounds.{key}: a parameter name and min <= max")
+        bounds[str(key)] = [low, high]
+    return replace(ws, main=main, subdomains=subdomains, certificate=certificate, parameter_bounds=bounds)
 
 
 def parse_workspaces(data, storage_roots: tuple[str, ...] = ()) -> dict[str, Workspace]:

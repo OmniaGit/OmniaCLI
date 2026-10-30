@@ -286,6 +286,10 @@ def test_subnets_skip_what_is_taken(root):
     assert workspacehelper.pick_subnets(2) == ["10.213.4.0/24", "10.213.5.0/24"]
 
 
+def _conf(storage, role, **spec):
+    return workspacehelper.conf("acme", str(storage), "main", role, json.dumps(spec))
+
+
 def test_conf_names_the_repositories(root):
     storage = root["storage"]
     workspacehelper.disk("acme", str(storage), "2")
@@ -293,21 +297,54 @@ def test_conf_names_the_repositories(root):
     conf_file = storage / "acme" / "main" / "test" / "config" / "odoo.conf"
     password = [l for l in conf_file.read_text().splitlines() if l.startswith("admin_passwd")][0]
     with pytest.raises(HelperError, match="no repository custom"):
-        workspacehelper.conf("acme", str(storage), "main", "test", '["custom"]')
+        _conf(storage, "test", repositories=["custom"])
     (storage / "acme" / "main" / "test" / "addons" / "custom").mkdir()
     (storage / "acme" / "main" / "test" / "addons" / "oca-web").mkdir()
-    made = workspacehelper.conf("acme", str(storage), "main", "test", '["custom", "oca-web"]')
+    made = _conf(storage, "test", repositories=["custom", "oca-web"])
     text = conf_file.read_text()
     assert made["repositories"] == ["custom", "oca-web"]
     assert "addons_path = /mnt/odooplm-addons,/mnt/customer-addons/custom,/mnt/customer-addons/oca-web" in text
     # the admin password is kept; production is untouched
     assert password in text
     assert "customer-addons" not in (storage / "acme" / "main" / "production" / "config" / "odoo.conf").read_text()
-    workspacehelper.conf("acme", str(storage), "main", "test", "[]")
+    _conf(storage, "test", repositories=[])
     assert "addons_path = /mnt/odooplm-addons\n" in conf_file.read_text()
-    for args, message in ((("acme", str(storage), "main", "stage", "[]"), "the role is"),
-                          (("acme", str(storage), "main", "test", '["../x"]'), "list of names"),
+    for args, message in ((("acme", str(storage), "main", "stage", "{}"), "the role is"),
+                          (("acme", str(storage), "main", "test", '{"repositories": ["../x"]}'), "list of names"),
                           (("acme", str(storage), "main", "test", "{"), "not JSON"),
-                          (("acme", str(storage), "nope", "test", "[]"), "no instance.json")):
+                          (("acme", str(storage), "main", "test", "[]"), "JSON object"),
+                          (("acme", str(storage), "nope", "test", "{}"), "no instance.json")):
         with pytest.raises(HelperError, match=message):
             workspacehelper.conf(*args)
+
+
+def test_conf_sets_the_parameters(root):
+    storage = root["storage"]
+    workspacehelper.disk("acme", str(storage), "2")
+    workspacehelper.create("acme", str(storage), "main", "odooplm-20", "{}")
+    project = storage / "acme" / "main" / "test"
+    (project / "addons" / "custom").mkdir()
+    _conf(storage, "test", repositories=["custom"])
+    made = _conf(storage, "test", parameters={"workers": 2, "limit_memory_hard": 3072, "smtp_password": "s3cret",
+                                              "smtp_ssl": "on"}, debug=True)
+    text = (project / "config" / "odoo.conf").read_text()
+    assert "workers = 2\n" in text and "limit_memory_hard = 3221225472\n" in text and "smtp_ssl = True\n" in text
+    assert "smtp_password = s3cret\n" in text and text.endswith("log_level = debug\n")
+    # the repositories given before stay; the password is never given back
+    assert "/mnt/customer-addons/custom" in text and made["parameters"]["smtp_password"] == ""
+    state = json.loads((project / "omniacli.json").read_text())
+    assert state["parameters"] == {"workers": 2, "limit_memory_hard": 3072, "smtp_password": "s3cret", "smtp_ssl": True}
+    # a later change of the repositories keeps the parameters and the debug switch
+    _conf(storage, "test", repositories=[])
+    text = (project / "config" / "odoo.conf").read_text()
+    assert "workers = 2\n" in text and "log_level = debug" in text
+    _conf(storage, "test", parameters={}, debug=False)
+    text = (project / "config" / "odoo.conf").read_text()
+    assert "workers = 0\n" in text and "log_level" not in text and "smtp_password" not in text
+    # the template's bounds, or the workspace's
+    for parameters, message in (({"workers": 9}, "between 0 and 8"), ({"limit_time_cpu": "x"}, "whole number"),
+                                ({"email_from": "a\nadmin_passwd = x"}, "one line"), ({"data_dir": "/"}, "no editable")):
+        with pytest.raises(HelperError, match=message):
+            _conf(storage, "test", parameters=parameters)
+    _conf(storage, "test", parameters={"workers": 12}, bounds={"workers": [0, 16]})
+    assert "workers = 12\n" in (project / "config" / "odoo.conf").read_text()

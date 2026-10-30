@@ -32,6 +32,7 @@ import re
 import secrets
 import tarfile
 from dataclasses import dataclass, field
+from typing import Any
 from pathlib import Path
 
 import yaml
@@ -82,6 +83,64 @@ class Field:
         return value
 
 
+# the Odoo options a workspace's admin may change (docs/workspaces.md,
+# Editable Odoo parameters): never what OmniaCLI needs (addons_path,
+# data_dir, the database, http, proxy_mode, logfile, admin_passwd)
+EDITABLE = ("workers", "max_cron_threads", "limit_time_cpu", "limit_time_real", "limit_time_real_cron",
+            "limit_time_worker_cron", "limit_memory_soft", "limit_memory_hard", "limit_request", "db_maxconn",
+            "smtp_server", "smtp_port", "smtp_ssl", "smtp_user", "smtp_password", "email_from", "from_filter")
+PARAMETER_TYPES = ("int", "mb", "bool", "text", "password")
+# a text of odoo.conf: one line, printable, no ; or # that would start a comment
+TEXT = re.compile(r"[^\x00-\x1f\x7f;#]{0,200}")
+
+
+@dataclass
+class Parameter:
+    """An Odoo option the workspace's admin may set: int (with bounds), mb
+    (megabytes, written in bytes), bool, text, password (never shown back)."""
+    name: str
+    label: str
+    type: str
+    default: Any
+    min: int | None = None
+    max: int | None = None
+
+    def check(self, value, bounds: tuple | None = None) -> Any:
+        """The value, checked (bounds: the workspace's (min, max), else the template's)."""
+        low, high = bounds if bounds else (self.min, self.max)
+        if self.type in ("int", "mb"):
+            try:
+                number = int(str(value).strip())
+            except ValueError:
+                raise TemplateError(f"{self.label}: {value!r} is not a whole number") from None
+            if (low is not None and number < low) or (high is not None and number > high):
+                raise TemplateError(f"{self.label}: {number} is not between {low} and {high}")
+            return number
+        if self.type == "bool":
+            if isinstance(value, bool):
+                return value
+            if str(value).lower() in ("true", "1", "on", "yes"):
+                return True
+            if str(value).lower() in ("false", "0", "off", "no", ""):
+                return False
+            raise TemplateError(f"{self.label}: {value!r} is not yes or no")
+        text = str(value if value is not None else "").strip()
+        if not TEXT.fullmatch(text):
+            raise TemplateError(f"{self.label}: one line of at most 200 characters, without ; or #")
+        return text
+
+    def conf_value(self, value) -> str:
+        if self.type == "mb":
+            return str(int(value) * 1024 * 1024)
+        if self.type == "bool":
+            return "True" if value else "False"
+        return str(value)
+
+    def to_dict(self) -> dict:
+        return {"name": self.name, "label": self.label, "type": self.type,
+                "default": "" if self.type == "password" else self.default, "min": self.min, "max": self.max}
+
+
 @dataclass
 class Template:
     folder: Path
@@ -96,6 +155,19 @@ class Template:
     fields: list[Field]
     compose: str
     conf: str
+    parameters: list[Parameter] = field(default_factory=list)
+
+    def parameter(self, name: str) -> Parameter | None:
+        return next((p for p in self.parameters if p.name == name), None)
+
+    def parameter_values(self, given: dict, bounds: dict | None = None) -> dict:
+        """The editable parameters: given ones checked, the others their default."""
+        unknown = set(given) - {p.name for p in self.parameters}
+        if unknown:
+            raise TemplateError(f"{self.name} has no editable parameter {', '.join(sorted(unknown))}")
+        bounds = bounds or {}
+        return {p.name: p.check(given[p.name], bounds.get(p.name)) if p.name in given else p.default
+                for p in self.parameters}
 
     def values(self, given: dict) -> dict[str, str]:
         """The fields' values, checked; a field not given takes its default."""
@@ -107,7 +179,8 @@ class Template:
     def to_dict(self) -> dict:
         return {"name": self.name, "label": self.label, "version": self.version,
                 "fields": [{"name": f.name, "label": f.label, "default": f.default, "choices": f.choices,
-                            "pattern": f.pattern} for f in self.fields]}
+                            "pattern": f.pattern} for f in self.fields],
+                "parameters": [p.to_dict() for p in self.parameters]}
 
 
 def load_template(folder: Path) -> Template:
@@ -148,13 +221,31 @@ def load_template(folder: Path) -> Template:
         if owner and not re.fullmatch(r"\d{1,9}:\d{1,9}", owner):
             raise TemplateError(f"{name}: data owner {owner!r} is not uid:gid")
         data.append({"path": path, "owner": owner})
+    parameters = []
+    conf_keys = {line.partition("=")[0].strip() for line in (folder / "odoo.conf.in").read_text(encoding="utf-8").splitlines()}
+    for item in meta.get("parameters") or []:
+        item = item if isinstance(item, dict) else {}
+        key, kind = str(item.get("name") or ""), str(item.get("type") or "")
+        if key not in EDITABLE or key in conf_keys or key in (p.name for p in parameters):
+            raise TemplateError(f"{name}: parameter {key!r} is not one of {', '.join(EDITABLE)} "
+                                "(once, and not in odoo.conf.in)")
+        if kind not in PARAMETER_TYPES:
+            raise TemplateError(f"{name}: parameter {key}: type {kind!r} is not one of {', '.join(PARAMETER_TYPES)}")
+        low, high = item.get("min"), item.get("max")
+        param = Parameter(key, str(item.get("label") or key), kind, None,
+                          int(low) if low is not None else None, int(high) if high is not None else None)
+        try:
+            param.default = param.check(item.get("default", ""))
+        except TemplateError as exc:
+            raise TemplateError(f"{name}: the default of {exc}") from None
+        parameters.append(param)
     template = Template(
         folder=folder, name=name, label=str(meta.get("label") or name), version=str(meta.get("version") or ""),
         odoo_service=str(meta.get("odoo_service") or "odoo"), db_service=str(meta.get("db_service") or "db"),
         addons_path=[str(p) for p in meta.get("addons_path") or []],
         customer_addons=str(meta.get("customer_addons") or ""), data=data, fields=fields,
         compose=(folder / "compose.yaml").read_text(encoding="utf-8"),
-        conf=(folder / "odoo.conf.in").read_text(encoding="utf-8"))
+        conf=(folder / "odoo.conf.in").read_text(encoding="utf-8"), parameters=parameters)
     found = check_compose(template)
     if found:
         raise TemplateError(f"{name}: its compose.yaml is refused:\n  " + "\n  ".join(found))
@@ -218,12 +309,25 @@ def env_text(values: dict[str, str]) -> str:
     return "".join(f"{key}={value}\n" for key, value in values.items())
 
 
-def conf_text(template: Template, database: str, admin_password: str, customer_repos: list[str]) -> str:
-    """The Odoo configuration: the image's addons, then the customer's repositories."""
+def conf_text(template: Template, database: str, admin_password: str, customer_repos: list[str],
+              parameters: dict | None = None, debug: bool = False) -> str:
+    """The Odoo configuration: the image's addons, then the customer's
+    repositories; then the editable parameters (checked: parameter_values)
+    and, with debug, log_level = debug."""
     addons = [*template.addons_path,
               *(f"{template.customer_addons}/{repo}" for repo in customer_repos if template.customer_addons)]
     values = {"ADDONS_PATH": ",".join(addons), "DB_NAME": database, "ADMIN_PASSWD": admin_password}
-    return PLACEHOLDER.sub(lambda m: values[m.group(1)], template.conf)
+    text = PLACEHOLDER.sub(lambda m: values[m.group(1)], template.conf)
+    lines = []
+    for name, value in (parameters or {}).items():
+        param = template.parameter(name)
+        if param is not None and not (param.type in ("text", "password") and value == ""):
+            lines.append(f"{name} = {param.conf_value(value)}")
+    if debug:
+        lines.append("log_level = debug")
+    if lines:
+        text = text.rstrip("\n") + "\n; the parameters set on the workspace's page\n" + "\n".join(lines) + "\n"
+    return text
 
 
 def new_password() -> str:

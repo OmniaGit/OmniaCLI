@@ -179,7 +179,7 @@ async def clone(job: Job, ws: Workspace, instance: str, role: str, name: str, ur
 async def write_conf(job: Job, ws: Workspace, instance: str, role: str, repositories: list[str]) -> dict:
     """The role's odoo.conf again, its addons path naming these repositories."""
     job.log(f"--- odoo.conf of {role}: the addons of {', '.join(repositories) or 'no repository'}")
-    return await _helper(job, "conf", ws.name, ws.storage, instance, role, json.dumps(repositories))
+    return await _helper(job, "conf", ws.name, ws.storage, instance, role, json.dumps({"repositories": repositories}))
 
 
 def remove_clone(path: Path) -> None:

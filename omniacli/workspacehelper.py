@@ -29,10 +29,14 @@ OmniaCLI clones there), and <instance>/instance.json (the template and the
 database), root's. It prints what it made, as JSON. The disk must be
 mounted, the instance must not exist.
 
-conf <workspace> <storage> <instance> <role> <repositories as JSON>: the
-role's odoo.conf written again from the instance's template, its addons
-path the image's then /mnt/customer-addons/<repository> of each one named
-(folders of the role's addons/), the admin password kept.
+conf <workspace> <storage> <instance> <role> <JSON>: the role's odoo.conf
+written again from the instance's template, the admin password kept. The
+JSON may hold repositories (the addons path: the image's, then
+/mnt/customer-addons/<repository> of each, folders of the role's addons/),
+parameters (the template's editable Odoo options, checked against its
+bounds, or against bounds {name: [min, max]} the workspace's admins of the
+machine set) and debug (log_level = debug); what it leaves out stays as it
+was, kept in <role>/omniacli.json, root's.
 
 remove: docker compose down -v of both projects, then the instance's folder.
 
@@ -98,6 +102,8 @@ SYSTEMD = Path("/etc/systemd/system")
 ROLES = ("production", "test")
 # what an instance was made from, root's: conf writes its odoo.conf again from it
 INSTANCE_FILE = "instance.json"
+# what a role was given (repositories, parameters, debug): conf's own record
+ROLE_FILE = "omniacli.json"
 # a customer's repository, a folder of the role's addons/
 REPOSITORY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 # the ports an instance's services are published on, on 127.0.0.1
@@ -547,7 +553,18 @@ def _admin_password(conf: str) -> str | None:
     return None
 
 
-def conf(name: str, storage: str, instance: str, role: str, repos_json: str) -> dict:
+def role_state(project: Path) -> dict:
+    """What conf gave the role last: repositories, parameters, debug."""
+    try:
+        data = json.loads((project / ROLE_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = {}
+    data = data if isinstance(data, dict) else {}
+    return {"repositories": list(data.get("repositories") or []), "parameters": dict(data.get("parameters") or {}),
+            "debug": bool(data.get("debug"))}
+
+
+def conf(name: str, storage: str, instance: str, role: str, spec_json: str) -> dict:
     image, mount = workspace(name, storage)
     _name("instance", instance)
     if role not in ROLES:
@@ -560,27 +577,51 @@ def conf(name: str, storage: str, instance: str, role: str, repos_json: str) -> 
     except (OSError, ValueError):
         raise HelperError(f"{folder} holds no {INSTANCE_FILE}: not an instance made by this helper") from None
     try:
-        repos = json.loads(repos_json)
+        spec = json.loads(spec_json)
     except ValueError:
-        raise HelperError("the repositories are not JSON") from None
+        raise HelperError("the configuration is not JSON") from None
+    if not isinstance(spec, dict):
+        raise HelperError("the configuration is a JSON object {repositories, parameters, debug, bounds}")
+    project = folder / role
+    state = role_state(project)
+    repos = spec.get("repositories", state["repositories"])
     if not isinstance(repos, list) or not all(isinstance(r, str) and REPOSITORY.fullmatch(r) for r in repos):
         raise HelperError("the repositories are a list of names (a-z A-Z 0-9 . _ -)")
-    project = folder / role
+    repos = list(dict.fromkeys(repos))
     for repo in repos:
         path = project / "addons" / repo
         if path.is_symlink() or not path.is_dir():
             raise HelperError(f"no repository {repo} in {project / 'addons'}")
     template = template_named(str(meta.get("template") or ""))
+    given = spec.get("parameters", state["parameters"])
+    bounds = spec.get("bounds") or {}
+    if not isinstance(given, dict) or not isinstance(bounds, dict):
+        raise HelperError("the parameters and the bounds are JSON objects")
+    try:
+        bounds = {str(k): (int(v[0]), int(v[1])) for k, v in bounds.items()}
+    except (TypeError, ValueError, IndexError):
+        raise HelperError("the bounds are {name: [min, max]}") from None
+    # the parameters given are the whole set (the others take their default);
+    # not given, those saved before that this template still has
+    saved = {k: v for k, v in state["parameters"].items() if template.parameter(k) is not None}
+    try:
+        values = template.parameter_values(given if "parameters" in spec else saved, bounds)
+    except stacktemplates.TemplateError as exc:
+        raise HelperError(str(exc)) from None
+    debug = bool(spec.get("debug", state["debug"]))
     conf_file = project / "config" / "odoo.conf"
     try:
         password = _admin_password(conf_file.read_text(encoding="utf-8"))
     except OSError:
         password = None
     text = stacktemplates.conf_text(template, str(meta.get("database") or ""),
-                                    password or stacktemplates.new_password(), list(dict.fromkeys(repos)))
+                                    password or stacktemplates.new_password(), repos, values, debug)
     _write(conf_file, text, mode=0o644)
-    return {"workspace": name, "instance": instance, "role": role, "repositories": list(dict.fromkeys(repos)),
-            "template": template.name, "version": template.version}
+    kept = {k: v for k, v in values.items() if v != template.parameter(k).default}
+    _write(project / ROLE_FILE, json.dumps({"repositories": repos, "parameters": kept, "debug": debug}) + "\n")
+    return {"workspace": name, "instance": instance, "role": role, "repositories": repos,
+            "parameters": {k: ("" if template.parameter(k).type == "password" and v else v) for k, v in values.items()},
+            "debug": debug, "template": template.name, "version": template.version}
 
 
 def remove(name: str, storage: str, instance: str) -> dict:

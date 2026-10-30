@@ -55,6 +55,8 @@ of the main configuration). Of the two, the higher version is used; the instance
       <textarea class="servers mono" rows="3" aria-label="Servers"></textarea>
       <label>Users, one per line: <span class="mono">name role</span></label>
       <textarea class="members mono" rows="3" placeholder="mario admin" aria-label="Users"></textarea>
+      <label>Bounds of the Odoo parameters, one per line: <span class="mono">name min max</span> (empty: the template's)</label>
+      <textarea class="bounds mono" rows="2" placeholder="workers 0 16" aria-label="Bounds of the Odoo parameters"></textarea>
     </div>
     <div class="actions" style="margin: 8px 0 0">
       <button type="button" class="save">Save</button>
@@ -91,6 +93,7 @@ of the main configuration). Of the two, the higher version is used; the instance
     for (const input of box.querySelectorAll(".limit")) input.value = (ws.limits || {})[input.dataset.limit] ?? "";
     field("servers").value = (ws.servers || []).join("\n");
     field("members").value = Object.entries(ws.members || {}).map(([n, r]) => `${n} ${r}`).join("\n");
+    field("bounds").value = Object.entries(ws.parameter_bounds || {}).map(([n, [a, b]]) => `${n} ${a} ${b}`).join("\n");
     if (isNew) field("users-link").remove(); else field("users-link").href = "{{ prefix }}/workspaces/" + encodeURIComponent(ws.name);
     field("save").onclick = async () => {
       const members = {};
@@ -100,9 +103,14 @@ of the main configuration). Of the two, the higher version is used; the instance
       }
       const limits = {};
       for (const input of box.querySelectorAll(".limit")) if (input.value !== "") limits[input.dataset.limit] = input.value;
+      const parameter_bounds = {};
+      for (const line of field("bounds").value.split("\n").map((l) => l.trim()).filter(Boolean)) {
+        const [name, low, high] = line.split(/\s+/);
+        parameter_bounds[name] = [low, high];
+      }
       const storage = field("storage").disabled ? "" : field("storage").value;
       const body = {name: field("name").value.trim(), new: isNew, label: field("label").value.trim(),
-                    domain: field("domain").value.trim(), storage, limits, members,
+                    domain: field("domain").value.trim(), storage, limits, members, parameter_bounds,
                     servers: field("servers").value.split("\n").map((l) => l.trim()).filter(Boolean)};
       if (await post("save", body)) location.reload();
     };

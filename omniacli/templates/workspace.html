@@ -34,7 +34,34 @@ A new database has the user <strong>admin</strong> with password <strong>admin</
           <input type="text" class="mono repo-test" placeholder="test branch" aria-label="Test branch" size="12">
           <input type="text" class="mono repo-name" placeholder="name (folder)" aria-label="Name" size="12">
           <button type="button" data-add-repo>Add repository</button>
-        </div></td>
+        </div>
+        {% for role, info in (parameters.get(name) or {}).items() if info %}
+        <details style="margin-top: 6px" class="params" data-role="{{ role }}">
+          <summary>Odoo parameters of {{ role }}</summary>
+          <div class="form-grid" style="margin-top: 6px">
+            {% for p in info.parameters %}
+            <label for="p-{{ name }}-{{ role }}-{{ p.name }}">{{ p.label }}</label>
+            {% if p.type == "bool" %}
+            <input type="checkbox" id="p-{{ name }}-{{ role }}-{{ p.name }}" data-param="{{ p.name }}" {% if p.value %}checked{% endif %}>
+            {% elif p.type == "password" %}
+            <input type="password" id="p-{{ name }}-{{ role }}-{{ p.name }}" data-param="{{ p.name }}" autocomplete="new-password"
+                   placeholder="{{ 'saved: empty keeps it' if p.set else 'none' }}">
+            {% elif p.type in ("int", "mb") %}
+            <input type="number" class="mono" id="p-{{ name }}-{{ role }}-{{ p.name }}" data-param="{{ p.name }}" value="{{ p.value }}"
+                   {% if p.min is not none %}min="{{ p.min }}"{% endif %} {% if p.max is not none %}max="{{ p.max }}"{% endif %}
+                   title="{{ p.min }} to {{ p.max }}">
+            {% else %}
+            <input type="text" class="mono" id="p-{{ name }}-{{ role }}-{{ p.name }}" data-param="{{ p.name }}" value="{{ p.value }}">
+            {% endif %}
+            {% endfor %}
+            <label for="p-{{ name }}-{{ role }}-debug">Debug log</label>
+            <input type="checkbox" id="p-{{ name }}-{{ role }}-debug" class="debug" {% if info.debug %}checked{% endif %}>
+          </div>
+          <p class="muted">With 0 workers Odoo is threaded: it does not apply the CPU time of a request. Saved, the
+          role's odoo.conf is written again and the role restarted.</p>
+          <div class="actions"><button type="button" data-save-params>Save and restart {{ role }}</button></div>
+        </details>
+        {% endfor %}</td>
       <td><button type="button" class="danger" data-remove-instance>Remove</button></td>
     </tr>
     {% else %}
@@ -205,6 +232,17 @@ A new database has the user <strong>admin</strong> with password <strong>admin</
       const production = box.querySelector(".repo-production").value.trim();
       const data = await postWs("repositories/add", {server: row.dataset.server, url, name, production_branch: production,
                                                      test_branch: box.querySelector(".repo-test").value.trim() || production});
+      if (data) location.href = "{{ prefix }}/jobs/" + data.job;
+    };
+  }
+  for (const button of document.querySelectorAll("[data-save-params]")) {
+    button.onclick = async () => {
+      const box = button.closest("details.params"), parameters = {};
+      for (const input of box.querySelectorAll("[data-param]")) {
+        parameters[input.dataset.param] = input.type === "checkbox" ? input.checked : input.value;
+      }
+      const data = await postWs("parameters/save", {server: button.closest("tr").dataset.server, role: box.dataset.role,
+                                                    parameters, debug: box.querySelector(".debug").checked});
       if (data) location.href = "{{ prefix }}/jobs/" + data.job;
     };
   }
