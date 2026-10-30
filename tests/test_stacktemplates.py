@@ -157,6 +157,8 @@ def test_create_and_remove(root, monkeypatch):
     assert oct((project / ".env").stat().st_mode & 0o777) == "0o600"
     assert (project / "compose.yaml").read_text() == (REPO_TEMPLATES / "odooplm-20" / "compose.yaml").read_text()
     assert "dbfilter = ^main$" in (project / "config" / "odoo.conf").read_text()
+    # root's, readable by everyone: the image's user is no user of this machine
+    assert oct((project / "config" / "odoo.conf").stat().st_mode & 0o777) == "0o644"
     assert (project / "data" / "filestore").is_dir() and (project / "data" / "pgdata").is_dir()
     assert (storage / "acme" / "main" / "addons").is_dir()
     # the two roles have their own password

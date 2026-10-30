@@ -304,9 +304,6 @@ def create(name: str, storage: str, instance: str, template_name: str, values_js
     except stacktemplates.TemplateError as exc:
         raise HelperError(str(exc)) from None
     _, caller_uid, _ = caller()
-    owners = [_owner(d["owner"]) for d in template.data if d["owner"]]
-    # the Odoo configuration: root's, readable by the group of the image's user
-    conf_gid = owners[0][1] if owners else 0
     ports = pick_ports(2 * len(ROLES))
     database = instance.replace("-", "_")
     made = {"workspace": name, "instance": instance, "template": template.name, "version": template.version,
@@ -328,7 +325,7 @@ def create(name: str, storage: str, instance: str, template_name: str, values_js
             (project / "config").mkdir(mode=0o755)
             _write(project / "config" / "odoo.conf",
                    stacktemplates.conf_text(template, database, stacktemplates.new_password(), []),
-                   mode=0o640, gid=conf_gid)
+                   mode=0o644)
             for item in template.data:
                 path = project / item["path"]
                 path.mkdir(mode=0o755, parents=True)
