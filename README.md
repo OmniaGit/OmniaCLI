@@ -729,6 +729,28 @@ proxy, a VPN, or an SSH tunnel (`http://` is accepted for a tunnel or a VPN,
 but then the token travels in clear). Both instances need a version with
 links (the Test link button says so).
 
+### Git credentials
+
+On a machine whose working copies already have their git user (an ssh key,
+saved credentials of someone), OmniaCLI can use its own instead: **Settings ›
+Git credentials** (`/credentials`, the machine's admins) gives each server, and
+each workspace (also on the workspace's page, by its admins), a list of
+`host + user + token` (github.com, bitbucket.org, a GitLab). A server's
+credential wins over its workspace's for the same host; a host without one is
+reached as before, as the machine's git user.
+
+Every git command OmniaCLI runs on a repository of that server (pull, fetch,
+merge, push, submodules, the branches of the form, the checks) then gets
+`-c credential.helper=` (the machine's helpers off), `-c
+credential.helper=store --file=<the server's file>`, and for each host
+`-c url.https://<host>/.insteadOf=git@<host>:` and `ssh://git@<host>/`: a
+working copy with an ssh remote is reached over https with the token, its
+`.git/config` untouched, and no token is written in a repository (so a
+container that mounts it never reads it). The credentials are kept in
+`credentials.yaml` next to the servers file and the files git reads in
+`credentials/`, readable by OmniaCLI's user only; a token is never shown
+again (changing a credential with the token left empty keeps it).
+
 ### Workspaces
 
 A **workspace** is a customer's closed part of the machine: its servers and

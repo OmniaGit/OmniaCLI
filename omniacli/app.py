@@ -31,7 +31,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.background import BackgroundTask
 from starlette.requests import HTTPConnection
 
-from . import (checks, consumer, disks, linkcopy, ops, packages, plugins, pluginstore, puller, publisher,
+from . import (checks, consumer, disks, gitcredentials, linkcopy, ops, packages, plugins, pluginstore, puller, publisher,
                schedules, selflog, shell, stacktemplates, templatestore, tunnel, workspacehelper, workspaceops)
 from .accesslog import AccessLog
 from .diskhistory import DiskHistory, DiskRecorder
@@ -186,6 +186,7 @@ WORKSPACE_ROUTES = frozenset({
     "/api/workspaces/{workspace}/members/delete", "/api/workspaces/{workspace}/instances/create",
     "/api/workspaces/{workspace}/instances/delete", "/api/workspaces/{workspace}/web/save",
     "/api/workspaces/{workspace}/web/publish", "/api/workspaces/{workspace}/web/certificate",
+    "/api/workspaces/{workspace}/credentials/save", "/api/workspaces/{workspace}/credentials/delete",
 })
 
 
@@ -261,6 +262,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
 
     authenticator = Authenticator(settings.users, settings.tokens, link_hashes())
     jobs = JobManager(settings.jobs_dir)
+    gitcredentials.bind(settings)
     updater = AutoUpdater(settings, jobs)
     sampler = Sampler(settings)
     # the disks once a day, next to the jobs like the sessions
@@ -1479,6 +1481,10 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             parsed = parse_servers({name: server_data}, settings.logs_dir)[name]
         except (ConfigError, TypeError, ValueError, AttributeError) as exc:
             return refuse(str(exc))
+        options = gitcredentials.options_for(settings, name)
+        for inst in (parsed.production, parsed.test):
+            for repo in (inst.repositories if inst is not None else []):
+                repo.git_options = options
         report = await checks.check_server(parsed, settings.backup_dir)
         return {"ok": checks.passed(report), "checks": [c.to_dict() for c in report]}
 
@@ -1491,7 +1497,9 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             return refuse("Type the repository's full path first")
         if remote.startswith("-"):
             return refuse(f"Invalid remote {remote}")
-        data = await ops.remote_branches(Path(path), remote, checks.GIT_TIMEOUT)
+        server = str(payload.get("server") or "")
+        options = gitcredentials.options_for(settings, server) if SERVER_NAME.fullmatch(server) else ()
+        data = await ops.remote_branches(Path(path), remote, checks.GIT_TIMEOUT, options)
         if "error" in data:
             return refuse(data["error"])
         return data
@@ -1500,6 +1508,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         """Write the servers file and make it current (OSError when it cannot)."""
         save_servers(settings.servers_file, servers)
         settings.servers = servers
+        gitcredentials.bind(settings)
         await updater.reload()
 
     async def store(servers):
@@ -1643,6 +1652,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         except OSError as exc:
             return refuse(f"Cannot write {settings.workspaces_file}: {exc}", 500)
         settings.workspaces = found
+        gitcredentials.bind(settings)
         return None
 
     async def rename_in_workspaces(old: str | None, new: str | None):
@@ -1694,6 +1704,91 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
 
     def workspace_rows() -> list[dict]:
         return [{**ws.to_dict(), "name": ws.name} for ws in sorted(settings.workspaces.values(), key=lambda w: w.name)]
+
+    # --- git credentials (gitcredentials.py) ---------------------------------
+
+    credentials_lock = asyncio.Lock()
+
+    def workspace_credentials(name: str) -> list[dict]:
+        try:
+            return credential_rows(gitcredentials.load(settings.credentials_file), f"workspace:{name}")
+        except gitcredentials.CredentialError:
+            return []
+
+    def credential_rows(found, scope: str) -> list[dict]:
+        return [c.public() for c in sorted(found.get(scope, {}).values(), key=lambda c: c.host)]
+
+    async def change_credentials(scope: str, payload: dict, delete: bool):
+        """Add or change (a token left empty keeps the one saved) or delete
+        one host's credential of a scope; then every repository gets them."""
+        host = str(payload.get("host") or "").strip().lower()
+        async with credentials_lock:
+            try:
+                found = await asyncio.to_thread(gitcredentials.load, settings.credentials_file)
+                entries = dict(found.get(scope, {}))
+                if delete:
+                    if entries.pop(host, None) is None:
+                        return refuse(f"No credential for {host}", status.HTTP_404_NOT_FOUND)
+                else:
+                    token = str(payload.get("token") or "")
+                    if not token and host in entries:
+                        token = entries[host].token
+                    cred = gitcredentials.check(host, str(payload.get("username") or "").strip(), token)
+                    entries[cred.host] = cred
+                found[scope] = entries
+                await asyncio.to_thread(gitcredentials.save, settings.credentials_file, found)
+            except gitcredentials.CredentialError as exc:
+                return refuse(str(exc))
+            except OSError as exc:
+                return refuse(f"Cannot write {settings.credentials_file}: {exc}", 500)
+            await asyncio.to_thread(gitcredentials.bind, settings)
+        return {"ok": True, "credentials": credential_rows(found, scope)}
+
+    @app.get("/credentials", dependencies=[Depends(admin)])
+    async def credentials_page(request: Request):
+        """The git credentials of every server and workspace (users of the machine only)."""
+        try:
+            found = await asyncio.to_thread(gitcredentials.load, settings.credentials_file)
+            error = None
+        except gitcredentials.CredentialError as exc:
+            found, error = {}, str(exc)
+        scopes = ([{"kind": "server", "name": n, "workspace": settings.workspace_of(n),
+                    "credentials": credential_rows(found, f"server:{n}")} for n in sorted(settings.servers)]
+                  + [{"kind": "workspace", "name": n, "workspace": None,
+                      "credentials": credential_rows(found, f"workspace:{n}")} for n in sorted(settings.workspaces)])
+        return _TEMPLATES.TemplateResponse(
+            request, "credentials.html",
+            {"scopes": scopes, "error": error, "credentials_file": settings.credentials_file})
+
+    @app.post("/api/credentials/save", dependencies=[Depends(admin)])
+    async def credentials_save(payload: dict = Body(...)):
+        try:
+            scope = gitcredentials.scope_of(str(payload.get("kind") or ""), str(payload.get("name") or ""))
+        except gitcredentials.CredentialError as exc:
+            return refuse(str(exc))
+        name = scope.split(":", 1)[1]
+        if name not in (settings.servers if scope.startswith("server:") else settings.workspaces):
+            return refuse(f"No {scope.split(':', 1)[0]} {name}", status.HTTP_404_NOT_FOUND)
+        return await change_credentials(scope, payload, delete=False)
+
+    @app.post("/api/credentials/delete", dependencies=[Depends(admin)])
+    async def credentials_delete(payload: dict = Body(...)):
+        try:
+            scope = gitcredentials.scope_of(str(payload.get("kind") or ""), str(payload.get("name") or ""))
+        except gitcredentials.CredentialError as exc:
+            return refuse(str(exc))
+        return await change_credentials(scope, payload, delete=True)
+
+    @app.post("/api/workspaces/{workspace}/credentials/save", dependencies=[Depends(admin)])
+    async def workspace_credentials_save(workspace: str, payload: dict = Body(...)):
+        """The workspace's git credentials, set by its admins."""
+        ws = a_workspace(workspace)
+        return await change_credentials(gitcredentials.scope_of("workspace", ws.name), payload, delete=False)
+
+    @app.post("/api/workspaces/{workspace}/credentials/delete", dependencies=[Depends(admin)])
+    async def workspace_credentials_delete(workspace: str, payload: dict = Body(...)):
+        ws = a_workspace(workspace)
+        return await change_credentials(gitcredentials.scope_of("workspace", ws.name), payload, delete=True)
 
     @app.get("/workspaces", dependencies=[Depends(admin)])
     async def workspaces_page(request: Request):
@@ -1820,6 +1915,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
              "can_create": bool(ws.storage and ws.limits.get("disk_gb")),
              "instances": [i for i in ws.instances() if workspaceops.server_name(ws, i) in settings.servers],
              "sites": site_names(ws), "certificates": CERTIFICATES,
+             "credentials": await asyncio.to_thread(workspace_credentials, ws.name),
              "instances_left": None if not ws.limits.get("instances")
              else int(ws.limits["instances"]) - len([n for n in ws.servers if n in settings.servers])},
         )

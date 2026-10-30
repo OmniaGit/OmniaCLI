@@ -127,7 +127,9 @@ async function readBranches(tr, button) {
   button.disabled = true;
   const resp = await fetch("{{ prefix }}/api/servers/branches", {
     method: "POST", headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({path: value("path"), remote: value("remote")}),
+    // the server's git credentials, when it has some (Git credentials page)
+    body: JSON.stringify({path: value("path"), remote: value("remote"),
+                          server: MODEL.original || document.getElementById("name").value.trim()}),
   }).catch(() => null);
   button.disabled = false;
   const data = resp ? await resp.json().catch(() => ({})) : {};

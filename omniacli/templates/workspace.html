@@ -1,5 +1,6 @@
 {# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C · SPDX-License-Identifier: AGPL-3.0-or-later -#}
 {% extends "base.html" %}
+{% from "_credentials.html" import credentials_table, credentials_script %}
 {% block title %}{{ ws.name }} · OmniaCLI{% endblock %}
 {% block crumbs %}{% from "_crumbs.html" import crumbs with context %}
 {{ crumbs([("Dashboard", "/"), ("Workspace " ~ ws.name, None)]) }}
@@ -105,6 +106,14 @@ A new database has the user <strong>admin</strong> with password <strong>admin</
   <div class="actions"><button type="button" id="upload-cert">Upload and publish</button></div>
   {% endif %}
   {% endif %}
+</div>
+<h2>Git credentials</h2>
+<div class="panel" style="margin-bottom: 16px">
+  <p class="muted">The user and token OmniaCLI uses for a host (github.com, bitbucket.org…) to reach the customer's
+  repositories of every instance of the workspace. The token is never shown again; it never reaches the
+  repositories nor the containers.</p>
+  {{ credentials_table(credentials, prefix ~ "/api/workspaces/" ~ (ws.name | urlencode) ~ "/credentials/", {},
+                       "workspace " ~ ws.name) }}
 </div>
 <h2>Users</h2>
 <div class="panel">
@@ -266,4 +275,5 @@ A new database has the user <strong>admin</strong> with password <strong>admin</
   };
 })();
 </script>
+{{ credentials_script() }}
 {% endblock %}

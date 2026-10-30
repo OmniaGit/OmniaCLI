@@ -51,6 +51,13 @@ class Repository:
     path: Path
     branch: str
     remote: str = "origin"
+    # the -c options of the server's git credentials (gitcredentials.bind),
+    # given to every git command on it; not saved
+    git_options: tuple = field(default=(), compare=False, repr=False)
+
+    def git(self, *args: str) -> list[str]:
+        """A git command on this repository, with its server's credentials."""
+        return ["git", *self.git_options, *args]
 
 
 @dataclass
@@ -342,6 +349,8 @@ class Settings:
     # the customers' workspaces (workspaces.yaml, Workspaces page), and the
     # folders they may live in (main configuration, workspaces.storage)
     workspaces_file: Path | None = None
+    # the git credentials of servers and workspaces (gitcredentials.py)
+    credentials_file: Path | None = None
     workspaces: dict[str, Workspace] = field(default_factory=dict)
     storage_roots: tuple[str, ...] = ()
     token_roles: dict[str, str] = field(default_factory=dict)
@@ -1526,6 +1535,7 @@ def parse_settings(data: dict, base_dir: Path = Path(".")) -> Settings:
         plugin_source=parse_plugin_source(data.get("plugins")),
         workspaces_file=workspaces_file,
         workspaces=load_workspaces(workspaces_file, storage_roots),
+        credentials_file=servers_file.parent / "credentials.yaml",
         storage_roots=storage_roots,
         fixed=fixed,
     )

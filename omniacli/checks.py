@@ -86,7 +86,7 @@ async def _instance_checks(instance: Instance) -> list[Check]:
         elif changes:
             problems.append(f"{len(changes.splitlines())} uncommitted change(s)")
         code, out = await ops.capture(
-            ["git", "ls-remote", "--exit-code", "--heads", repo.remote, repo.branch],
+            repo.git("ls-remote", "--exit-code", "--heads", repo.remote, repo.branch),
             cwd=repo.path, timeout=GIT_TIMEOUT,
         )
         if code:

@@ -180,13 +180,13 @@ async def capture(
 
 
 async def git(repo: Repository, *args: str) -> str:
-    code, out = await capture(["git", *args], cwd=repo.path)
+    code, out = await capture(repo.git(*args), cwd=repo.path)
     if code:
         raise JobFailed(f"[{repo.name}] git {' '.join(args)} failed: {out}")
     return out
 
 
-async def remote_branches(path: Path, remote: str, timeout: float = 30) -> dict:
+async def remote_branches(path: Path, remote: str, timeout: float = 30, git_options: tuple = ()) -> dict:
     """The branches a working copy's remote has (the ones a pull can follow)
     and the branch checked out; when the remote cannot be reached, the
     remote-tracking branches of the last fetch, with a note."""
@@ -195,7 +195,7 @@ async def remote_branches(path: Path, remote: str, timeout: float = 30) -> dict:
     code, current = await capture(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=path)
     if code:
         return {"error": current.splitlines()[0] if current else "not a git repository"}
-    code, out = await capture(["git", "ls-remote", "--heads", remote], cwd=path, timeout=timeout)
+    code, out = await capture(["git", *git_options, "ls-remote", "--heads", remote], cwd=path, timeout=timeout)
     if code == 0:
         branches = [line.split("refs/heads/", 1)[1] for line in out.splitlines() if "refs/heads/" in line]
         return {"branches": sorted(branches), "current": current, "note": None}
@@ -250,7 +250,7 @@ async def update_submodules(job: Job, repo: Repository, check: bool = True) -> N
     if not (repo.path / ".gitmodules").is_file():
         return
     try:
-        await run(job, ["git", "submodule", "update", "--init", "--recursive"],
+        await run(job, repo.git("submodule", "update", "--init", "--recursive"),
                   cwd=repo.path, check=check)
     except JobFailed as exc:
         raise JobFailed(f"[{repo.name}] {exc}: its submodules are not on the commits "
@@ -266,7 +266,7 @@ async def pull(job: Job, instance: Instance) -> bool:
         job.log(f"--- [{repo.name}] pull {repo.remote}/{repo.branch}")
         await ensure_ready(job, repo, keep_changes=instance.keeps_local_changes)
         before = await git(repo, "rev-parse", "HEAD")
-        await run(job, ["git", "pull", "--ff-only", repo.remote, repo.branch], cwd=repo.path)
+        await run(job, repo.git("pull", "--ff-only", repo.remote, repo.branch), cwd=repo.path)
         await update_submodules(job, repo)
         after = await git(repo, "rev-parse", "HEAD")
         if before != after:
@@ -284,7 +284,7 @@ async def pending_updates(instance: Instance) -> dict[str, int]:
     and {"package <name>": 1} when a new package is published."""
     pending = {}
     for repo in instance.repositories:
-        code, out = await capture(["git", "fetch", repo.remote, repo.branch], cwd=repo.path)
+        code, out = await capture(repo.git("fetch", repo.remote, repo.branch), cwd=repo.path)
         if code:
             raise JobFailed(f"[{repo.name}] git fetch failed: {out}")
         code, out = await capture(["git", "rev-list", "--count", "HEAD..FETCH_HEAD"], cwd=repo.path)
@@ -634,8 +634,8 @@ async def merge_to_production(job: Job, server: Server, backup_dir: Path) -> Non
             tested = await git(test_repo, "rev-parse", "HEAD")
             before = await git(repo, "rev-parse", "HEAD")
             merged.append((repo, before))
-            await run(job, ["git", "pull", "--ff-only", repo.remote, repo.branch], cwd=repo.path)
-            await run(job, ["git", "fetch", repo.remote], cwd=repo.path)
+            await run(job, repo.git("pull", "--ff-only", repo.remote, repo.branch), cwd=repo.path)
+            await run(job, repo.git("fetch", repo.remote), cwd=repo.path)
             code, _ = await capture(["git", "cat-file", "-e", f"{tested}^{{commit}}"], cwd=repo.path)
             if code:
                 raise JobFailed(
@@ -673,7 +673,7 @@ async def merge_to_production(job: Job, server: Server, backup_dir: Path) -> Non
     for repo, _ in merged:
         job.log(f"--- [{repo.name}] push {repo.branch}")
         try:
-            await run(job, ["git", "push", repo.remote, f"HEAD:{repo.branch}"], cwd=repo.path)
+            await run(job, repo.git("push", repo.remote, f"HEAD:{repo.branch}"), cwd=repo.path)
         except JobFailed as exc:
             raise JobFailed(
                 f"{exc}; already pushed: {', '.join(pushed) or 'none'}. "
