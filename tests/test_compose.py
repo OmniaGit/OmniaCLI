@@ -383,3 +383,94 @@ def test_the_database_connection_is_the_entrypoints(tmp_path):
     assert out({"HOST": "pg", "PGHOST": "other"})[0] == "other"
     (tmp_path / "secret").write_text("from-file")
     assert out({"PASSWORD": "p", "PASSWORD_FILE": str(tmp_path / "secret")})[3] == "from-file"
+
+
+def _filestores(tmp_path):
+    """production's data folder with a filestore of DB_prod, test's empty."""
+    prod_data, test_data = tmp_path / "prod-data", tmp_path / "test-data"
+    files = prod_data / "filestore" / "DB_prod" / "ab"
+    files.mkdir(parents=True)
+    (files / "ab12").write_text("attachment")
+    (prod_data / "filestore" / "DB_prod" / "checklist").mkdir()
+    test_data.mkdir()
+    return prod_data, test_data
+
+
+def test_link_filestore(tmp_path, monkeypatch, capsys):
+    """Hard links to production's files, made by the filestore's owner (here
+    the test's user: the switch of user is as_owner's)."""
+    prod_data, test_data = _filestores(tmp_path)
+    source, project = tmp_path / "prod", tmp_path / "test"
+    folders = {source: prod_data, project: test_data}
+    monkeypatch.setattr(composehelper, "service", lambda project, name: name)
+    monkeypatch.setattr(composehelper, "problems", lambda project, uid, groups: [])
+    monkeypatch.setattr(composehelper, "data_folder", lambda project, name: folders[project])
+    owners = []
+
+    def as_owner(cmd, uid, gid):
+        # the script's text on the command line, not its path
+        assert cmd[1:3] == ["-I", "-c"] and "def link(" in cmd[3]
+        owners.append((cmd[4], uid, gid))
+        import subprocess
+        return subprocess.run(cmd, capture_output=True, text=True)
+    monkeypatch.setattr(composehelper, "as_owner", as_owner)
+    args = ["odoo", "DB_test", str(source), "DB_prod"]
+    # Odoo wrote a file of its own while loading: it stays
+    (test_data / "filestore" / "DB_test" / "cd").mkdir(parents=True)
+    (test_data / "filestore" / "DB_test" / "cd" / "cd34").write_text("test's")
+    assert composehelper.link_filestore(project, args, *STRANGER) == 0
+    linked = test_data / "filestore" / "DB_test" / "ab" / "ab12"
+    assert linked.stat().st_ino == (prod_data / "filestore" / "DB_prod" / "ab" / "ab12").stat().st_ino
+    assert (test_data / "filestore" / "DB_test" / "cd" / "cd34").read_text() == "test's"
+    assert not (test_data / "filestore" / "DB_test" / "checklist").exists()
+    me = (os.getuid(), os.getgid())
+    assert owners == [("check", *me), ("merge", *me)] and "1 files linked" in capsys.readouterr().out
+    # a symbolic link in place of test's filestore: refused by the script
+    (test_data / "filestore" / "DB_other").symlink_to(tmp_path)
+    assert composehelper.link_filestore(project, ["odoo", "DB_other", str(source), "DB_prod"], *STRANGER) != 0
+    assert "is not a folder" in capsys.readouterr().err
+    for bad, message in ((["odoo", "DB_test", str(project), "DB_prod"], "the project itself"),
+                         (["odoo", "a b", str(source), "DB_prod"], "not a database name"),
+                         (["odoo", "DB_test"], "usage")):
+        with pytest.raises(composehelper.HelperError, match=message):
+            composehelper.link_filestore(project, bad, *STRANGER)
+    # a source the user could change is refused
+    monkeypatch.setattr(composehelper, "problems", lambda project, uid, groups: ["writable"] if project == source else [])
+    with pytest.raises(composehelper.HelperError, match="not safe"):
+        composehelper.link_filestore(project, args, *STRANGER)
+
+
+def test_link_filestore_never_as_root(tmp_path, monkeypatch):
+    prod_data, test_data = _filestores(tmp_path)
+    folders = {tmp_path / "prod": prod_data, tmp_path / "test": test_data}
+    monkeypatch.setattr(composehelper, "service", lambda project, name: name)
+    monkeypatch.setattr(composehelper, "problems", lambda project, uid, groups: [])
+    monkeypatch.setattr(composehelper, "data_folder", lambda project, name: folders[project])
+    real_lstat = composehelper.Path.lstat
+
+    def lstat(path):
+        st = real_lstat(path)
+        if path == prod_data / "filestore":
+            return os.stat_result((st.st_mode, st.st_ino, st.st_dev, st.st_nlink, 0, 0, *st[6:]))
+        return st
+    monkeypatch.setattr(composehelper.Path, "lstat", lstat)
+    with pytest.raises(composehelper.HelperError, match="not of the same user"):
+        composehelper.link_filestore(tmp_path / "test", ["odoo", "DB_test", str(tmp_path / "prod"), "DB_prod"],
+                                     *STRANGER)
+
+
+def test_data_folder(tmp_path, monkeypatch):
+    import subprocess
+    config = {"services": {"odoo": {"volumes": [
+        {"type": "bind", "source": "/srv/x/config", "target": "/etc/odoo"},
+        {"type": "bind", "source": "/srv/x/data/filestore", "target": "/var/lib/odoo"}]}}}
+    monkeypatch.setattr(composehelper, "compose", lambda project, *args: ["docker", "compose", *args])
+    monkeypatch.setattr(composehelper.subprocess, "run",
+                        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, json.dumps(config), ""))
+    assert composehelper.data_folder(tmp_path, "odoo") == composehelper.Path("/srv/x/data/filestore")
+    config["services"]["odoo"]["volumes"][1] = {"type": "volume", "source": "odoo-data", "target": "/var/lib/odoo"}
+    with pytest.raises(composehelper.HelperError, match="is a volume, not a folder"):
+        composehelper.data_folder(tmp_path, "odoo")
+    config["services"]["odoo"]["volumes"].pop()
+    with pytest.raises(composehelper.HelperError, match="nothing is mounted"):
+        composehelper.data_folder(tmp_path, "odoo")

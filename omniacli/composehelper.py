@@ -54,6 +54,15 @@ command of the caller's, and runs docker with an environment of its own:
                                          --stop-after-init, without demo data,
                                          in a container of its own: a new
                                          database (a workspace's instance)
+    link-filestore <odoo service> <db> <source project> <source db>
+                                         the filestore of db made of hard
+                                         links to the source's files (copy
+                                         of production to test): the source
+                                         is checked as the project is, both
+                                         data folders bind mounted on
+                                         /var/lib/odoo and of the same user,
+                                         who links (link_filestore.py merge),
+                                         never root: the containers write there
 
 A database name is [A-Za-z0-9_.-], a module [a-z0-9_]; a service must be one
 of the project's. They reach the container's shell as its arguments, never
@@ -63,6 +72,7 @@ entrypoint makes, from HOST, PORT, USER and PASSWORD (or PASSWORD_FILE).
 
 from __future__ import annotations
 
+import json
 import os
 import pwd
 import re
@@ -91,7 +101,7 @@ ACTIONS = {
     "pull": [["pull"], ["up", "-d"]],
 }
 # the actions that take arguments (commands())
-WITH_ARGUMENTS = ("logs", "version", "port", "dump", "load", "update", "psql", "init")
+WITH_ARGUMENTS = ("logs", "version", "port", "dump", "load", "update", "psql", "init", "link-filestore")
 DATABASE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,62}")
 MODULE = re.compile(r"[a-z0-9][a-z0-9_]{0,99}")
 LANGUAGE = re.compile(r"[a-z]{2,3}_[A-Z]{2}")
@@ -140,6 +150,10 @@ _ENV_LINE = re.compile(r"\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=")
 LOGS = ["logs", "--no-color", "--no-log-prefix", "--timestamps"]
 MAX_TAIL = 10000
 SINCE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?Z")
+# link-filestore: Odoo's data folder in its container (the images' data_dir),
+# and the script that links, run as the owner of the filestore (never root)
+ODOO_DATA = "/var/lib/odoo"
+LINK_SCRIPT = Path(__file__).parent / "odoo" / "link_filestore.py"
 
 
 class HelperError(Exception):
@@ -340,6 +354,63 @@ def commands(project: Path, action: str, args: list[str]) -> list[list[str]]:
     raise HelperError(f"unknown action {action!r}: {', '.join([*ACTIONS, *WITH_ARGUMENTS])}")
 
 
+def data_folder(project: Path, service_name: str) -> Path:
+    """The folder of this machine bind mounted on Odoo's data folder."""
+    done = subprocess.run(compose(project, "config", "--format", "json"), env=ENV, cwd=project,
+                          capture_output=True, text=True)
+    if done.returncode:
+        raise HelperError(f"docker compose cannot read {project}: {done.stderr.strip()}")
+    for mount in json.loads(done.stdout)["services"][service_name].get("volumes") or []:
+        if mount.get("target") == ODOO_DATA:
+            if mount.get("type") != "bind":
+                raise HelperError(f"{project}: {ODOO_DATA} of {service_name} is a {mount.get('type')}, "
+                                  "not a folder of this machine: its filestore is not linked")
+            return Path(mount["source"])
+    raise HelperError(f"{project}: nothing is mounted on {ODOO_DATA} of {service_name}")
+
+
+def as_owner(cmd: list[str], uid: int, gid: int) -> subprocess.CompletedProcess:
+    return subprocess.run(cmd, env=ENV, cwd="/", user=uid, group=gid, extra_groups=[],
+                          capture_output=True, text=True)
+
+
+def link_filestore(project: Path, args: list[str], uid: int, groups: list[int]) -> int:
+    """link-filestore <odoo service> <database> <source project> <source
+    database>: the filestore of database becomes hard links to the files of
+    the source's (the copy of production to test). Linked by the owner of
+    the source's filestore, not by root: the containers write there."""
+    if len(args) != 4:
+        raise HelperError("usage: link-filestore <service> <database> <source project> <source database>")
+    service_name, database, source, source_db = args[0], _database(args[1]), Path(args[2]), _database(args[3])
+    if source == project:
+        raise HelperError("the source is the project itself")
+    found = problems(source, uid, groups)
+    if found:
+        raise HelperError(f"{source} is not safe from the user:\n  " + "\n  ".join(found))
+    service(project, service_name)
+    service(source, service_name)
+    source_data, data = data_folder(source, service_name), data_folder(project, service_name)
+    try:
+        store = (source_data / "filestore").lstat()
+        target = data.lstat()
+    except OSError as exc:
+        raise HelperError(f"{exc.filename}: {exc.strerror}") from None
+    if not stat.S_ISDIR(store.st_mode) or not stat.S_ISDIR(target.st_mode):
+        raise HelperError(f"{source_data / 'filestore'} and {data} must be folders")
+    if store.st_uid == 0 or (target.st_uid, target.st_gid) != (store.st_uid, store.st_gid):
+        raise HelperError(f"{source_data / 'filestore'} and {data} are not of the same user (not root)")
+    src, dst = str(source_data / "filestore" / source_db), str(data / "filestore" / database)
+    # the script's text, read here: the owner need not reach OmniaCLI's folder
+    code = LINK_SCRIPT.read_text(encoding="utf-8")
+    for mode in ("check", "merge"):
+        done = as_owner([sys.executable, "-I", "-c", code, mode, src, dst], store.st_uid, store.st_gid)
+        print(done.stdout.strip() or "", end="\n" if done.stdout.strip() else "")
+        if done.returncode:
+            print(done.stderr.strip(), file=sys.stderr)
+            return done.returncode
+    return 0
+
+
 def run(argv: list[str]) -> int:
     """compose-helper <project> <action> [arguments]: the exit code of the action."""
     if len(argv) < 2:
@@ -351,6 +422,8 @@ def run(argv: list[str]) -> int:
     found = problems(project, uid, groups)
     if found:
         raise HelperError(f"{project} is not safe from user {name}:\n  " + "\n  ".join(found))
+    if action == "link-filestore":
+        return link_filestore(project, args, uid, groups)
     for cmd in commands(project, action, args):
         code = subprocess.run(compose(project, *cmd), env=ENV, cwd=project).returncode
         if code:

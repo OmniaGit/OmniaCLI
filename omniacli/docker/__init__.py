@@ -16,8 +16,15 @@ refuses a project the caller could change:
 - the log is docker compose logs of the Odoo service; the database shell
   psql in the database service.
 
-Not in it yet: Copy production to test, setting every password to admin,
-a filestore shared with production, discover, the CPU and memory charts.
+Copy production to test: a new backup of production (kept with its
+backups), loaded into test's database neutralized (odoo db load: a new
+database.uuid), the changed modules updated, test started; test's filestore
+shared with production through hard links (the default: the backup without
+filestore, then the helper's link-filestore; Odoo 19 and later), copied, or
+none.
+
+Not in it yet: setting every password to admin, discover, the CPU and
+memory charts.
 
 It imports from OmniaCLI only omniacli.plugin_api, as a plugin of its own
 package does.
@@ -47,6 +54,7 @@ from ..plugin_api import (
     Instance,
     Job,
     JobFailed,
+    Server,
     ServicePlugin,
     capture,
     restart,
@@ -70,6 +78,10 @@ _VERSION = re.compile(r"Odoo Server (?:saas~)?(\d+)")
 HELPER_TIMEOUT = 120
 # a dump or a load of a big database
 DATA_TIMEOUT = 6 * 3600
+# Copy production to test: what test's filestore becomes
+COPY_FILESTORE = (("share", "shared with production (hard links, no extra disk space)"),
+                  ("copy", "a copy of production's"),
+                  ("none", "none (test without attachments)"))
 
 MCP_HELP = """Servers of type docker: Odoo 18 or later in a Docker Compose project, driven
 through OmniaCLI's root helper. update_test updates the changed modules
@@ -355,8 +367,29 @@ class DockerPlugin(ServicePlugin):
             Field("update_modules", "Update changed modules", "checkbox", default=True),
         ]
 
+    _host = None
+
+    def router(self, host):
+        # no routes: the host gives the folder of production's backups
+        self._host = host
+        return None
+
     def actions(self) -> list[Action]:
         return [
+            Action("copy-production", "Copy production to test", self._copy_production, scope="server",
+                   icon="backup",
+                   params=(Field("filestore", "Filestore of test", "select", default="share",
+                                 choices=COPY_FILESTORE,
+                                 help="Shared: production and test on the same filesystem, Odoo "
+                                      f"{NO_FILESTORE_MAJOR} and later"),),
+                   prepare=_copy_params,
+                   available=lambda srv: srv.production is not None and srv.test is not None,
+                   tooltip="A new backup of production loaded into the test database, neutralized, "
+                           "then the changed modules updated and test started",
+                   confirm=lambda srv: f"Replace the database and the filestore of {srv.name} test with "
+                                       "a copy of production's?",
+                   title=lambda srv, params: f"Copy production to test {srv.name} "
+                                             f"(filestore: {params['filestore']})"),
             Action("update", "Update modules", self._update, group="git", icon="github",
                    params=(Field("modules", "Modules, comma separated",
                                  placeholder="empty: the changed ones (click-odoo-update)"),
@@ -380,9 +413,55 @@ class DockerPlugin(ServicePlugin):
         if params["restart"]:
             await restart(job, instance)
 
+    async def _copy_production(self, job: Job, server: Server, params: dict) -> None:
+        """Back up production, stop test, load the backup into its database
+        neutralized, share or not production's filestore, update the
+        changed modules, start test."""
+        prod, test = server.production, server.test
+        mode = params["filestore"]
+        if self._host is None:
+            raise JobFailed("the plugin was given no host: no folder for production's backup")
+        major = await instance_major(prod)
+        if major is None:
+            raise JobFailed(f"the Odoo version of {prod.key} is not known: is it running?")
+        test_major = await instance_major(test)
+        if test_major is not None and test_major != major:
+            raise JobFailed(f"production runs Odoo {major}, test Odoo {test_major}: "
+                            "a database is not loaded into another version")
+        if mode != "copy" and major < NO_FILESTORE_MAJOR:
+            raise JobFailed(f"Odoo {major} cannot back up a database without its filestore "
+                            f"(from Odoo {NO_FILESTORE_MAJOR}): copy the filestore")
+        folder = self._host.backup_folder(prod)
+        folder.mkdir(parents=True, exist_ok=True)
+        backup_zip = await self.backup(job, prod, folder, {"no_filestore": mode != "copy"})
+        await stop(job, test)
+        opts = test.options
+        job.log(f"--- load {backup_zip.name} into database {opts.database} of test (neutralized)")
+        try:
+            await _helper(job, test, "load", opts.odoo_service, opts.database, "--neutralize", stdin=backup_zip)
+            if mode == "share":
+                job.log(f"--- the filestore of test: hard links to production's ({prod.options.database})")
+                await _helper(job, test, "link-filestore", opts.odoo_service, opts.database,
+                              prod.restart.service, prod.options.database)
+            await self._update_changed(job, test, force=True)
+        except JobFailed:
+            job.log(f"{test.key} is left stopped: its database may be missing or half loaded")
+            raise
+        await start(job, test)
+
     async def _pull_image(self, job: Job, instance: Instance, params: dict) -> None:
         job.log(f"--- pull the images of {instance.restart.service}")
         await _helper(job, instance, "pull")
+
+
+def _copy_params(server: Server, params: dict) -> dict:
+    mode = str(params.get("filestore") or "share")
+    if mode not in dict(COPY_FILESTORE):
+        raise ActionRefused(f"The filestore of test is one of {', '.join(dict(COPY_FILESTORE))}")
+    for inst in (server.production, server.test):
+        if inst is None or inst.restart.type != "compose":
+            raise ActionRefused(f"{server.name}: production and test must both be compose projects")
+    return {"filestore": mode}
 
 
 def _update_params(instance: Instance, params: dict) -> dict:

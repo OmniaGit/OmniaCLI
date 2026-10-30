@@ -1270,6 +1270,7 @@ servers:
 | Pull image | `docker compose pull`, then `up -d`: a newer image (a new DockerOdooPLM build) |
 | Backup | `odoo db dump`, `<db>_<time>.zip` (`_nofilestore` without filestore: from Odoo 19, Odoo 18 refuses it) |
 | Restore | refused for a backup of another Odoo version; stop, `odoo db load --force` (neutralized by default) in a container of its own, update of the changed modules, start |
+| Copy production to test | a new backup of production (kept with its backups), stop test, `odoo db load --force --neutralize` into the test database (a new `database.uuid`), update of the changed modules, start test. The dialog asks test's filestore: **shared with production** (the default: the backup without filestore, then the compose helper's `link-filestore` makes test's filestore of hard links to production's files; Odoo 19 and later), **a copy** of production's, or **none**. Refused when production and test run different Odoo versions; a step that fails leaves test stopped |
 | Log | `docker compose logs` of the Odoo service |
 | psql | `psql` in the database service |
 
@@ -1277,8 +1278,17 @@ The repositories are the addons folders the project mounts into the
 container (`./addons-extra` of DockerOdooPLM): OmniaCLI pulls them on the
 machine, and the container sees the new code.
 
-Not in it yet: Copy production to test, setting every password to admin, a
-filestore shared with production, discover, the CPU and memory charts.
+`link-filestore` (compose helper): the source project is checked as the
+project is (safe from the caller), Odoo's data folder (`/var/lib/odoo`) of
+both must be a folder of this machine (a bind mount, not a named volume),
+both of the same user, not root; that user makes the links
+(`link_filestore.py check` then `merge`, its text given to Python, so the
+user need not reach OmniaCLI's folder), never root: the containers, which
+run the customer's code, write in the filestores. Production and test on
+one filesystem (a workspace's instance always is: its disk).
+
+Not in it yet: setting every password to admin, discover, the CPU and
+memory charts.
 
 OmniaCLI's tools (click-odoo-contrib and what it needs, pure Python, pinned
 in `packaging/debian/requirements/tools.txt`) are installed by the package's

@@ -4,8 +4,8 @@ Design, decided with Matteo on 2026-10-29, one choice at a time. Every
 statement marked *verified* was checked as written; *not verified* ones must
 be tried before code rests on them. What is implemented is described in the
 README (Workspaces): phases 1 (workspaces and their users), 2 (the virtual
-disk, the instances from templates), 3 (nginx and the certificates) and 4
-(the firewall) are done; copying production to test, the editable Odoo
+disk, the instances from templates), 3 (nginx and the certificates), 4
+(the firewall) and 5 (copying production to test) are done; the editable Odoo
 parameters and the publication of the templates are not yet.
 
 ## Goal
@@ -240,10 +240,17 @@ gets its filestore:
   the root helper makes the links;
 - **a physical copy** of production's files.
 
-*Not verified:* copying the database alone on Odoo 18, whose `odoo db dump`
-refuses `--no-filestore`. To try on 18, 19 and 20: `pg_dump` in production's
-database container into `psql` in test's, through the helper, then `odoo
-neutralize` (`odoo/cli/neutralize.py` exists in Odoo 18).
+Done (phase 5, the docker plugin's *Copy production to test*): `odoo db
+dump` of production (without filestore for shared or none), `odoo db load
+--force --neutralize` into test (Odoo 20 gives the copy a new uuid itself),
+then for shared the compose helper's `link-filestore`, which links as the
+filestore's owner (uid 100), never as root. *Verified* on 2026-10-30 (Odoo
+20.0-20261015, the job run as a user through sudo -n): shared (same inode,
+test reads the attachment, test's new files are its own, production
+untouched), copied (another inode), none; neutralized, own uuid. Odoo 18
+cannot dump without the filestore: there only the copy is offered (the
+`pg_dump | psql` way is *not* implemented). Odoo 20 has no `datas` on
+`ir.attachment` any more: `raw`.
 
 ## Network
 
