@@ -133,8 +133,8 @@ readable by group `odoo` only, one systemd service per instance. As root:
    sudoers file can stop every `sudo` of the machine).
 
 4. **The repositories**: git runs as `omniacli`, which must own them and
-   reach their remotes without a prompt (a deploy key, or the git
-   credentials of the interface).
+   reach their remotes without a prompt (a deploy key, see
+   [Configuration cases](../README.md#configuration-cases)).
 
 You do not need to guess which lines are missing: the checks of step 6 print
 them. Paths and service names above are examples. Details:
@@ -173,7 +173,6 @@ installed in the venv of each Odoo, and run once with
 | Other OmniaCLI machines operated from this one | **Links**, see [Linked instances](../README.md#linked-instances) |
 | Pulls, database copies and scripts at fixed times | **Schedules**, see [Scheduled actions](../README.md#scheduled-actions) |
 | Headings of the Dashboard | **Edit groups** |
-| Git user and token per host | see [Git credentials](../README.md#git-credentials) |
 
 ## Before you open it to more people
 
@@ -205,6 +204,5 @@ installed in the venv of each Odoo, and run once with
 - [Rules the actions follow](../README.md#rules-the-actions-follow): what a
   deploy, a merge and a copy do, and in which order.
 - [Configure](../README.md#configure): the configuration files.
-- [Odoo in Docker Compose](../README.md#odoo-in-docker-compose-type-docker)
-  and [Workspaces](workspaces.md).
+- [Odoo in Docker Compose](../README.md#odoo-in-docker-compose-type-docker).
 - [Plugins](../README.md#plugins): other types of server.
