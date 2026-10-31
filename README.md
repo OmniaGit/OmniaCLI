@@ -43,6 +43,8 @@ OmniaCLI listens on `127.0.0.1:8090`: put an HTTPS reverse proxy in front of
 it (see [Login and security](#login-and-security)), open it, log in as
 `admin`, and add your servers on the **Servers** page.
 
+Step by step, from the package to the first job: [Quickstart](docs/quickstart.md).
+
 ## Screenshots
 
 The screenshots show demo data.
