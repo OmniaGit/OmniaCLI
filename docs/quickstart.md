@@ -3,7 +3,8 @@
 Get OmniaCLI running on a Debian or Ubuntu machine, log in, and put your
 first Odoo instance under its control. It takes about 15 minutes on a machine
 where Odoo already runs. Every step links to the section of the
-[README](../README.md) that explains it in full.
+[README](../README.md) that explains it in full. The screenshots show demo
+data.
 
 ## What you need
 
@@ -89,6 +90,8 @@ certificate on a LAN:
 Then open `https://<your server>:8443/` (the port of that example) and log
 in as `admin` with the password of step 2.
 
+![The login page](images/login.jpg)
+
 `admin` is set in the main configuration file, so its password is changed
 there, not on the **Users** page:
 
@@ -149,8 +152,12 @@ them. Paths and service names above are examples. Details:
    sudoers line or the command to add. Fix, run it again, until the server
    is active.
 
+![The Servers page: two active servers and a draft waiting for Test & activate](images/servers.png)
+
 The server now appears on the **Dashboard** with the state of its Odoo and the
 Start / Stop / Restart buttons.
+
+![The Dashboard](images/dashboard.png)
 
 ## Step 7: Run your first job
 
@@ -158,6 +165,12 @@ On the server's page, press **Git pull + restart** on the test instance:
 OmniaCLI pulls the repositories, updates the changed modules
 (`click-odoo-update`) and restarts it. The job runs live on the **Jobs**
 page, and the Odoo log is shown on the server's page.
+
+![The page of a server: production and test side by side, with their actions, load and live log](images/server.png)
+
+Every job has its own page, with its state and its output:
+
+![A finished job](images/job.png)
 
 Before the first update of a database, read
 [Install by hand](../README.md#install-by-hand): `click-odoo-update` must be
