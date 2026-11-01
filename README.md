@@ -1067,8 +1067,10 @@ The user that runs OmniaCLI needs:
 
   The second line is for the psql page only (the **psql** check, a warning).
 
-  A backup made as that user is written in `/var/tmp` first, then moved
-  into the backup folder. Not with restart type `process`: OmniaCLI stops
+  A backup made or restored as that user passes through a folder in
+  `/var/tmp` that only that user can enter (so `/var/tmp` needs the room for
+  one more copy of it), and a backup ends up in the backup folder owned by
+  OmniaCLI's user, mode 640. Not with restart type `process`: OmniaCLI stops
   its own Odoo with a signal, which it may not send to another user's
   process.
 - the right to restart the services without a password. With `sudo: true`

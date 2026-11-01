@@ -110,8 +110,12 @@ async def run(
     check: bool = True,
     timeout: float | None = None,
     env: dict | None = None,
+    stdin=None,
+    stdout=None,
 ) -> int:
-    """Run a command, streaming its output into the job log."""
+    """Run a command, streaming its output into the job log. stdin: an open
+    file it reads; stdout: an open file for its output, and then only its
+    errors reach the log."""
     shown, cwd = cwd, _cwd(cmd, cwd)
     job.log(f"$ {shlex.join(str(c) for c in cmd)}" + (f"   (in {shown})" if shown else ""))
     try:
@@ -119,18 +123,19 @@ async def run(
             *[str(c) for c in cmd],
             cwd=cwd,
             env=env or _ENV,
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
+            stdin=asyncio.subprocess.DEVNULL if stdin is None else stdin,
+            stdout=asyncio.subprocess.PIPE if stdout is None else stdout,
+            stderr=asyncio.subprocess.STDOUT if stdout is None else asyncio.subprocess.PIPE,
             start_new_session=True,
             limit=_LINE_LIMIT,
         )
     except OSError as exc:
         raise JobFailed(f"cannot run {cmd[0]}: {exc}") from exc
-    assert proc.stdout is not None
+    output = proc.stdout if stdout is None else proc.stderr
+    assert output is not None
 
     async def stream() -> int:
-        async for raw in proc.stdout:
+        async for raw in output:
             job.log(raw.decode(errors="replace").rstrip("\n"))
         return await proc.wait()
 

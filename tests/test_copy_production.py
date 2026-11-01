@@ -118,15 +118,27 @@ async def test_who_and_where(client, env):
 
 
 async def test_run_as_restore_is_staged(env, fake_sudo, monkeypatch):
+    import sys
+
     from omniacli.jobs import Job
 
+    (env["tmp"] / "venv" / "bin" / "python").symlink_to(sys.executable)
+    # the program sees a copy, byte for byte, nobody else can reach
+    seen = env["tmp"] / "seen"
+    restoredb = env["tmp"] / "venv" / "bin" / "click-odoo-restoredb"
+    restoredb.write_text(f'''#!/bin/sh
+for last; do :; done
+stat -c %a "$(dirname "$last")" "$last" > {seen}
+cat "$last" >> {seen}
+''')
     staging = env["tmp"] / "staging"
     staging.mkdir()
     monkeypatch.setattr(odoo_ops, "BACKUP_STAGING", staging)
     test = dataclasses.replace(env["settings"].instance("srv", "test"), run_as="odoo")
     backup = env["tmp"] / "prod.zip"
-    backup.write_text("dump")
+    backup.write_bytes(b"du\x00\xffmp")
     await odoo_ops.restore(Job(id="t", title="t", instances=[], source="test"), test, backup, True)
+    assert seen.read_bytes() == b"700\n600\ndu\x00\xffmp"
     sudo = fake_sudo.read_text()
     assert "sudo -n -u odoo " in sudo and f"{staging}/omniacli-restore-" in sudo and "prod.zip" in sudo
     assert list(staging.iterdir()) == []  # the staging folder is removed

@@ -5,20 +5,23 @@
 from __future__ import annotations
 
 import configparser
+import contextlib
 import datetime
 import json
+import os
 import re
 import shutil
 import tempfile
 import zipfile
 from pathlib import Path
 
-from ..plugin_api import Instance, Job, JobFailed, as_user, base_env, run
+from ..plugin_api import Instance, Job, JobFailed, as_user, base_env, capture, run
 
 # pip may build packages from source (psycopg2, lxml...)
 PIP_TIMEOUT = 1800
-# a backup made as an instance's run_as user is written here first: that
-# user cannot write in the backup folder (on disk: /tmp may be in memory)
+# a backup made or restored as an instance's run_as user passes through a
+# folder here that only that user can enter: it cannot reach the backup folder
+# (on disk: /tmp may be in memory)
 BACKUP_STAGING = Path("/var/tmp")
 # what OmniaCLI runs in an instance's venv: click-odoo-update, click-odoo-backupdb
 CLI_PACKAGE = "click-odoo-contrib"
@@ -245,6 +248,39 @@ async def install_cli(job: Job, venv_bin: Path, run_as: str | None = None) -> No
 # the name of a backup made without the filestore ends so
 NO_FILESTORE = "_nofilestore"
 
+# What the venv's python runs as run_as to carry a backup in and out of its
+# private folder: the file holds a whole database, so no other user of the
+# machine may read it, not even knowing its path (which ps shows).
+_MAKE_FOLDER = "import sys, tempfile; print(tempfile.mkdtemp(prefix=sys.argv[2], dir=sys.argv[1]))"
+_REMOVE_FOLDER = "import shutil, sys; shutil.rmtree(sys.argv[1], ignore_errors=True)"
+_FILE_FROM_STDIN = """import os, shutil, sys
+with os.fdopen(os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as out:
+    shutil.copyfileobj(sys.stdin.buffer, out, 1 << 20)
+"""
+_FILE_TO_STDOUT = """import shutil, sys
+with open(sys.argv[1], "rb") as source:
+    shutil.copyfileobj(source, sys.stdout.buffer, 1 << 20)
+"""
+
+
+def _python_as(instance: Instance, code: str, *args) -> list:
+    """The venv's python running code as run_as, isolated from its environment."""
+    return as_user(instance.run_as, [instance.options.venv_bin / "python", "-I", "-c", code, *args])
+
+
+@contextlib.asynccontextmanager
+async def _private_folder(instance: Instance, prefix: str):
+    """A folder in BACKUP_STAGING made by run_as (mode 700), removed at the end."""
+    code, out = await capture(_python_as(instance, _MAKE_FOLDER, BACKUP_STAGING, prefix))
+    lines = out.splitlines()
+    if code or not lines:
+        raise JobFailed(f"cannot make a private folder in {BACKUP_STAGING} as {instance.run_as}: {out}")
+    folder = Path(lines[-1])
+    try:
+        yield folder
+    finally:
+        await capture(_python_as(instance, _REMOVE_FOLDER, folder))
+
 
 async def backup(job: Job, instance: Instance, dest_dir: Path, filestore: bool = True) -> Path:
     """click-odoo-backupdb of the database, and of its filestore unless
@@ -261,15 +297,17 @@ async def backup(job: Job, instance: Instance, dest_dir: Path, filestore: bool =
     if instance.run_as is None:
         await run(job, [*cmd, opts.database, dest], env=env)
         return dest
-    # run_as may create the file here (write and search) but not list the folder
-    staging = Path(tempfile.mkdtemp(prefix="omniacli-backup-", dir=BACKUP_STAGING))
-    try:
-        staging.chmod(0o733)
-        staged = staging / dest.name
+    async with _private_folder(instance, "omniacli-backup-") as folder:
+        staged = folder / dest.name
         await run(job, as_user(instance.run_as, [*cmd, opts.database, staged], env), env=env)
-        shutil.move(staged, dest)
-    finally:
-        shutil.rmtree(staging, ignore_errors=True)
+        # through <file>.part: a cut copy leaves nothing
+        part = dest.with_name(dest.name + ".part")
+        try:
+            with os.fdopen(os.open(part, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o640), "wb") as out:
+                await run(job, _python_as(instance, _FILE_TO_STDOUT, staged), stdout=out)
+            part.replace(dest)
+        finally:
+            part.unlink(missing_ok=True)
     return dest
 
 
@@ -303,17 +341,12 @@ async def restore(job: Job, instance: Instance, backup_zip: Path, neutralize: bo
     if instance.run_as is None:
         await run(job, [*cmd, opts.database, backup_zip], env=env)
         return
-    # run_as cannot read the backup folder: a copy it may read, in a folder
-    # only OmniaCLI writes to
-    staging = Path(tempfile.mkdtemp(prefix="omniacli-restore-", dir=BACKUP_STAGING))
-    try:
-        staging.chmod(0o755)
-        staged = staging / backup_zip.name
-        shutil.copyfile(backup_zip, staged)
-        staged.chmod(0o644)
+    # run_as cannot read the backup folder: a copy in its private folder
+    async with _private_folder(instance, "omniacli-restore-") as folder:
+        staged = folder / backup_zip.name
+        with open(backup_zip, "rb") as source:
+            await run(job, _python_as(instance, _FILE_FROM_STDIN, staged), stdin=source)
         await run(job, as_user(instance.run_as, [*cmd, opts.database, staged], env), env=env)
-    finally:
-        shutil.rmtree(staging, ignore_errors=True)
 
 
 

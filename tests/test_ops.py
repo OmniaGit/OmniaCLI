@@ -238,12 +238,26 @@ async def test_run_as_update(env, fake_sudo):
 
 
 async def test_run_as_backup_is_staged(env, fake_sudo, monkeypatch):
+    import stat
+    import sys
+
+    (env["tmp"] / "venv" / "bin" / "python").symlink_to(sys.executable)
+    # the program writes in a folder nobody else can enter
+    seen = env["tmp"] / "seen"
+    (env["tmp"] / "venv" / "bin" / "click-odoo-backupdb").write_text(f'''#!/bin/sh
+for last; do :; done
+stat -c %a "$(dirname "$last")" > {seen}
+echo dump > "$last"
+''')
     staging = env["tmp"] / "staging"
     staging.mkdir()
     monkeypatch.setattr(odoo_ops, "BACKUP_STAGING", staging)
     prod = run_as(env["settings"].instance("srv", "production"))
     dest = await ops.backup(job(), prod, env["settings"].backup_dir)
     assert dest.parent == env["settings"].backup_dir / "srv" / "production" and dest.read_text() == "dump\n"
+    assert seen.read_text() == "700\n"
+    assert stat.S_IMODE(dest.stat().st_mode) == 0o640
+    assert not dest.with_name(dest.name + ".part").exists()
     sudo = fake_sudo.read_text()
     assert "sudo -n -u odoo " in sudo and f"{staging}/omniacli-backup-" in sudo
     assert list(staging.iterdir()) == []  # the staging folder is removed
