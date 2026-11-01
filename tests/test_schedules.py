@@ -26,10 +26,10 @@ def a_schedule(**extra):
 
 def test_parse_and_back():
     s = schedules.parse_schedule("nightly", a_schedule(
-        pull=True, user="matteo",
+        pull=True, user="devuser",
         copy={"link": "cliente", "server": "srv", "keep_backups": 2, "restore_options": {"neutralize": True}},
         script={"name": "fix.py", "args": "--db 'a b'"}))
-    assert s.acting_user == "matteo" and s.copy.source.role == "production" and s.copy.keep_backups == 2
+    assert s.acting_user == "devuser" and s.copy.source.role == "production" and s.copy.keep_backups == 2
     assert s.steps == ["git pull", "copy from cliente › srv/production", "script fix.py"]
     assert schedules.parse_schedule("nightly", schedules.schedule_to_dict(s)) == s
     assert schedules.parse_schedule("n", a_schedule(pull=True)).acting_user == "omniacli"
