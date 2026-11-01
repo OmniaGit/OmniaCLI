@@ -198,7 +198,7 @@ def main(argv: list[str] | None = None) -> int:
     hashpw.set_defaults(func=_hash_password)
 
     token = sub.add_parser("new-token", help="create a bearer token for an MCP client (auth.tokens)")
-    token.add_argument("name", help="who uses it, e.g. matteo-laptop")
+    token.add_argument("name", help="who uses it, e.g. dev-laptop")
     token.add_argument("--role", choices=ROLES, default="developer",
                        help="user: reads only; developer: also update_test and backup_test; "
                             "admin: also adds draft servers")

@@ -109,7 +109,7 @@
     <tr><td colspan="3" class="muted">No MCP tokens.</td></tr>
     {% endfor %}
     <tr>
-      <td><input type="text" id="new-token" placeholder="who uses it, e.g. matteo-laptop" aria-label="New MCP token name"></td>
+      <td><input type="text" id="new-token" placeholder="who uses it, e.g. dev-laptop" aria-label="New MCP token name"></td>
       <td><select id="new-token-role" aria-label="Role of the new MCP token">{% for r in roles %}<option {% if r == "developer" %}selected{% endif %}>{{ r }}</option>{% endfor %}</select></td>
       <td><button type="button" id="add-token">Create MCP token</button></td>
     </tr>
