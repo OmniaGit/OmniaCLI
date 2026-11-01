@@ -224,4 +224,4 @@ def test_describe_websocket_refusals():
     assert "refused the token" in refused(401)
     assert refused(502) == "WebSocket refused (502)"
     # the close reason of a link's shell keeps the whole message
-    assert len(f"link nisbau: {refused(404)}".encode()) <= 120
+    assert len(f"link customer-x: {refused(404)}".encode()) <= 120

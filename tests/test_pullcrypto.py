@@ -107,7 +107,7 @@ def test_malformed_encrypted_envelopes_are_refused():
 # --- commands ---------------------------------------------------------------
 
 def test_a_command_round_trips_through_a_sealed_message():
-    cmd = Command("backup", "dev: mboscolo", {"no_filestore": True})
+    cmd = Command("backup", "dev: devuser", {"no_filestore": True})
     sealer = Sealer(KEY, "api-prod")
     back = Command.from_dict(sealer.open(COMMAND, sealer.seal(COMMAND, cmd.to_dict())))
     assert back == cmd and len(cmd.id) == 32

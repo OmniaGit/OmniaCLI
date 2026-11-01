@@ -955,7 +955,7 @@ async def test_admin_sees_everything(client):
 
 async def test_link_serves_prefixed_pages_and_acts(client, env):
     link = {"Authorization": f"Bearer {LINK_TOKEN}", "X-OmniaCLI-Prefix": "/links/cliente",
-            "X-OmniaCLI-User": "matteo"}
+            "X-OmniaCLI-User": "devuser"}
     page = (await client.get("/servers/srv?view=both", headers=link)).text
     assert 'action="/links/cliente/servers/srv/test/pull"' in page
     assert 'href="/links/cliente/jobs?server=srv"' in page and 'data-log="/links/cliente/api/' in page
@@ -964,7 +964,7 @@ async def test_link_serves_prefixed_pages_and_acts(client, env):
     resp = await client.post("/servers/srv/test/pull", headers=link)
     assert resp.status_code == 303 and resp.headers["location"].startswith("/links/cliente/jobs/")
     data = await wait_job(client, resp.headers["location"].rsplit("/", 1)[1])
-    assert data["source"] == "manual: link omnia (matteo)"
+    assert data["source"] == "manual: link omnia (devuser)"
     # no page links outside the prefix (the icons are the same on every
     # instance, and the linked instance bar links back to the linking one)
     unprefixed = re.compile(r'(?:href|action|data-url|data-log)="/(?!links/cliente/|favicon|icon-180|")'
