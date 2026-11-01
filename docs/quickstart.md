@@ -4,7 +4,8 @@ Get OmniaCLI running on a Debian or Ubuntu machine, log in, and put your
 first Odoo instance under its control. It takes about 15 minutes on a machine
 where Odoo already runs. Every step links to the section of the
 [README](../README.md) that explains it in full. The screenshots show demo
-data.
+data. If OmniaCLI is already running for you somewhere, see
+[Use it without installing it](#use-it-without-installing-it).
 
 ## What you need
 
@@ -196,6 +197,46 @@ installed in the venv of each Odoo, and run once with
 - Never write a wildcard in the restart lines of sudoers.
 - Make a backup of each production instance and download it once, so you know
   the restore works before you need it.
+
+## Use it without installing it
+
+When OmniaCLI runs on a machine that somebody else manages for you, your
+provider or your IT department, you install nothing: not the package, not the
+repository. You need only:
+
+- **its address**, an HTTPS URL such as `https://omniacli.example.com/`;
+- **a user**, created for you by one of its admins on the **Users** page, with
+  the role you need:
+
+  | Role | May |
+  |---|---|
+  | `user` | watch servers, load, logs, jobs and backups; restart, start and stop Odoo |
+  | `developer` | also pull, update modules, back up and download backups, the shell, Claude |
+  | `admin` | everything, the configuration pages and the merge of test into production too |
+
+### From the browser
+
+Open the address and log in. Then change the password you were given from
+your own page (your name, top right). If the site uses a self-signed
+certificate, import the certificate your provider gives you among the
+trusted authorities of the browser, or accept the warning.
+
+### From Claude Code or another AI client (MCP)
+
+Ask an admin for a **token** (created on the **Users** page, shown once),
+with the role the client needs, then:
+
+```bash
+claude mcp add --transport http omniacli https://omniacli.example.com/mcp \
+    --header "Authorization: Bearer <token>"
+```
+
+With a self-signed certificate, start Claude Code with
+`NODE_EXTRA_CA_CERTS=<path of the certificate>`. What the client can do is
+in [MCP interface](../README.md#mcp-interface).
+
+The **Help** page (developers and admins) explains, with example data, how to
+connect an MCP client and how to link another OmniaCLI to this one.
 
 ## Troubleshooting
 
