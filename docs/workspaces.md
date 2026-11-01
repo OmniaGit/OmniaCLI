@@ -1,7 +1,6 @@
 # Workspaces: a customer's Odoo environments created from templates
 
-Design, decided with Matteo on 2026-10-29, one choice at a time. Every
-statement marked *verified* was checked as written; *not verified* ones must
+The design of the workspaces. Every statement marked *verified* was checked as written; *not verified* ones must
 be tried before code rests on them. What is implemented is described in the
 README (Workspaces): phases 1 (workspaces and their users), 2 (the virtual
 disk, the instances from templates), 3 (nginx and the certificates), 4
