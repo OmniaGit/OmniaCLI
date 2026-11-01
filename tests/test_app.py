@@ -514,6 +514,78 @@ async def test_access_log(client, env):
     assert "Failed login" not in (await client.get("/access?q=nothing-matches")).text
 
 
+async def test_failures_cannot_push_out_the_access_log(tmp_path, monkeypatch):
+    from omniacli import accesslog
+
+    monkeypatch.setattr(accesslog, "MAX_BYTES", 300)
+    log = accesslog.AccessLog(tmp_path / "access.jsonl")
+    log.record("login", "user", "someone", "10.0.0.1", "login form")
+    for n in range(1000):
+        log.record("failed", "token", "", f"203.0.113.{n % 250}", "GET /api/info")
+    assert log.path.read_text().count("someone") == 1
+    assert sum(e["event"] == "login" for e in log.recent(100000)) == 1
+    # a minute of one address: its first ones, then the count of the others
+    log = accesslog.AccessLog(tmp_path / "one.jsonl")
+    for _ in range(25):
+        log.record("failed", "user", "x", "203.0.113.1", "login form")
+    assert len(log.recent()) == accesslog.BURST_ADDRESS
+    log._bursts["203.0.113.1"].start -= accesslog.BURST_WINDOW
+    assert "15 more failed attempts" in log.recent()[0]["detail"]
+
+
+async def test_access_log_keeps_its_older_files(tmp_path, monkeypatch):
+    from omniacli import accesslog
+
+    monkeypatch.setattr(accesslog, "MAX_BYTES", 100)
+    log = accesslog.AccessLog(tmp_path / "access.jsonl")
+    for n in range(40):
+        log.record("action", "user", f"u{n}", "", "")
+    assert (tmp_path / "access.jsonl.5").exists()
+    assert [e["name"] for e in log.recent(3)] == ["u39", "u38", "u37"]
+    for n in range(100):
+        log.record("action", "user", "again", "", "")
+    assert not (tmp_path / f"access.jsonl.{accesslog.KEEP_FILES + 1}").exists()
+
+
+async def test_actions_are_audited_without_secrets(client, env):
+    log = client.app.state.access_log
+    secret = "a-new-password-of-this-test"
+    resp = await client.post("/api/access/users/save", headers=POST,
+                             json={"new": True, "name": "newcomer", "role": "developer", "password": secret})
+    assert resp.status_code == 200 and resp.json()["ok"]
+    assert secret not in log.path.read_text()
+    entry = next(e for e in log.recent() if e["event"] == "action")
+    assert entry["name"] == "admin"
+    assert entry["detail"] == "POST /api/access/users/save name=newcomer role=developer -> 200"
+    # refused by its role: logged as well
+    assert (await form_login(client, "newcomer", secret)).status_code == 303
+    resp = await client.post("/api/access/users/delete", headers={"Origin": f"http://{HOST}"}, json={"name": "admin"})
+    assert resp.status_code == 403
+    entry = next(e for e in log.recent() if e["event"] == "action")
+    assert entry["name"] == "newcomer" and entry["detail"].endswith("name=admin -> 403")
+    page = await client.get("/access", headers={"Authorization": AUTH})
+    assert ">Action<" in page.text and secret not in page.text
+
+
+async def test_backup_download_is_audited(client, env):
+    log = client.app.state.access_log
+    folder = env["settings"].backup_dir / "srv" / "test"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "db_20260101_000000.zip").write_bytes(b"zip")
+    resp = await client.get("/backups/srv/test/db_20260101_000000.zip", headers={"Authorization": AUTH})
+    assert resp.status_code == 200
+    entry = next(e for e in log.recent() if e["event"] == "download")
+    assert entry["name"] == "admin" and entry["detail"] == "srv/test/db_20260101_000000.zip"
+
+
+async def test_nobody_logged_in_is_no_action(client, env):
+    log = client.app.state.access_log
+    client.cookies.clear()
+    resp = await client.post("/api/access/users/delete", headers={"Origin": f"http://{HOST}"}, json={"name": "admin"})
+    assert resp.status_code == 401
+    assert not [e for e in log.recent() if e["event"] == "action"]
+
+
 async def test_login_form_session_and_logout(client, env):
     from omniacli.sessions import COOKIE
 

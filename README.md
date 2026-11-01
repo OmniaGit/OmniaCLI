@@ -547,12 +547,22 @@ server form, with example data only.
 The **Access log** (Users page, admins) lists the logins with date, time and
 address: a user's login is the login form; a link or an MCP token, which send
 their token with every request, log in with their first request after 30
-minutes without requests from the same address. Logouts, every wrong password
-or token, and the logins refused for too many failures are listed, and so is
-every call to `/mcp`, with its JSON-RPC method and tool, and every shell
-opened and closed. It is kept in
-`access.jsonl` in the logs folder next to `jobs_dir` (`/var/lib/omniacli/logs`
-for the package); past 5 MiB it moves to `access.jsonl.1`.
+minutes without requests from the same address. Logouts are listed, and so
+is every call to `/mcp`, with its JSON-RPC method and tool, every shell opened
+and closed, every **action** of whoever passed the login (what changes
+something: the request, its answer and the name, role, host, server or kind it
+names, never a password or a token; the routes that only poll or check are
+left out) and every **download** of a backup. It is kept in `access.jsonl` in
+the logs folder next to `jobs_dir` (`/var/lib/omniacli/logs` for the package).
+
+Wrong passwords and tokens, and the logins refused for too many failures, need
+no login, so they have a file of their own, `access-failed.jsonl`, and cannot
+push out the rest: of them at most 10 a minute from an address and 300 from all
+addresses are written, the others counted in one entry at the end of the
+minute. Past 5 MiB a file moves to `<file>.1`, and so on up to `<file>.10`.
+
+These files are written by OmniaCLI's user, so whoever has a shell as that user
+can change them: to keep them out of reach, send them to another machine.
 
 The **Log** page (admins) shows OmniaCLI's own log: the requests it serves,
 its calls to the links, its errors, with the follow and errors-only switches

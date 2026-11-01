@@ -249,6 +249,29 @@ def _same_origin(request: Request) -> bool:
     return urlsplit(source).netloc == request.headers.get("host")
 
 
+# what a request does not say in its path: never a password, a token or a key
+_AUDIT_FIELDS = ("name", "role", "host", "server", "kind")
+_AUDIT_MAX_BODY = 64 * 1024
+# polled, or they change nothing: an access log full of them would hide the rest
+_NOT_AUDITED = re.compile(r"/logout|/api/pullers/[^/]+/producer|/api/servers/(check|branches)")
+
+
+async def _audit_target(request: Request) -> str:
+    """ name=... role=... of a small JSON request, for the access log."""
+    if "json" not in request.headers.get("content-type", ""):
+        return ""
+    length = request.headers.get("content-length", "")
+    if not length.isdigit() or int(length) > _AUDIT_MAX_BODY:
+        return ""
+    try:
+        body = json.loads(await request.body())
+    except ValueError:
+        return ""
+    if not isinstance(body, dict):
+        return ""
+    return "".join(f" {key}={body[key]}" for key in _AUDIT_FIELDS if isinstance(body.get(key), (str, int)))
+
+
 def _next_path(value: str) -> str:
     """Where to go after the login: a path of this site only, never another site."""
     value = value or "/"
@@ -500,6 +523,21 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         response.headers.setdefault("Referrer-Policy", "same-origin")
         if request.url.scheme == "https":
             response.headers.setdefault("Strict-Transport-Security", "max-age=31536000")
+        return response
+
+    @app.middleware("http")
+    async def audit_actions(request: Request, call_next):
+        """Every request that changes something, by whoever passed the login,
+        in the access log: a route added later is logged by itself."""
+        if request.method in ("GET", "HEAD") or _NOT_AUDITED.fullmatch(request.url.path):
+            return await call_next(request)
+        target = await _audit_target(request)
+        response = await call_next(request)
+        user = getattr(request.state, "user", None)
+        if user is not None:
+            who = f" for {user.on_behalf}" if user.on_behalf else ""
+            access_log.record("action", user.kind, user.name, request.client.host if request.client else "",
+                              f"{request.method} {request.url.path}{target} -> {response.status_code}{who}"[:300])
         return response
 
     @app.exception_handler(StarletteHTTPException)
@@ -994,7 +1032,8 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         ]
 
     @app.get("/backups/{server}/{role}/{name}", dependencies=[Depends(developer)])
-    async def backup_download(server: str, role: str, name: str, me: Principal = Depends(current_user)):
+    async def backup_download(request: Request, server: str, role: str, name: str,
+                              me: Principal = Depends(current_user)):
         # an admin also backs up draft servers (MCP), and downloads their backups
         instance = get_instance(server, role, drafts=me.can("admin"))
         folder = backup_folder(instance).resolve()
@@ -1002,6 +1041,8 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         # only a zip directly in this instance's backup folder
         if not _BACKUP_NAME.fullmatch(name) or path.parent != folder or not path.is_file():
             raise HTTPException(status.HTTP_404_NOT_FOUND, "No such backup")
+        access_log.record("download", me.kind, me.name, request.client.host if request.client else "",
+                          f"{instance.key}/{name}" + (f" for {me.on_behalf}" if me.on_behalf else ""))
         return FileResponse(path, media_type="application/zip", filename=name)
 
     def from_link_role(instance: Instance) -> str:
@@ -2475,7 +2516,8 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         found = [e for e in entries if matches(" ".join(str(v) for v in e.values()), q)]
         return _TEMPLATES.TemplateResponse(
             request, "access.html",
-            {"entries": found[:500], "total": len(found), "q": q, "log_file": access_log.path},
+            {"entries": found[:500], "total": len(found), "q": q, "log_file": access_log.path,
+             "failed_file": access_log.failed_path},
         )
 
     @app.post("/api/access/users/save")
@@ -3011,12 +3053,14 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             return puller_answer(exc)
 
     @app.get("/api/pullers/{name}/files/{file}")
-    async def puller_download(name: str, file: str, me: Principal = Depends(current_user)):
+    async def puller_download(request: Request, name: str, file: str, me: Principal = Depends(current_user)):
         link = puller_link(me)
         try:
             path = pullers.download_path(name, link, file)
         except puller.PullerRefused as exc:
             return puller_answer(exc)
+        access_log.record("download", me.kind, me.name, request.client.host if request.client else "",
+                          f"puller {name}/{file}" + (f" for {me.on_behalf}" if me.on_behalf else ""))
         return FileResponse(path, media_type="application/octet-stream", filename=file)
 
     @app.delete("/api/pullers/{name}/files/{file}")
