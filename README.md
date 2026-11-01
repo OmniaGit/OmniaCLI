@@ -396,7 +396,7 @@ user `omniacli` cannot read them (`cannot read .../odoo.conf: Permission
 denied`). Run the whole service as that user instead:
 
 ```bash
-echo OMNIACLI_USER=mboscolo | sudo tee -a /etc/default/omniacli
+echo OMNIACLI_USER=devuser | sudo tee -a /etc/default/omniacli
 sudo dpkg-reconfigure omniacli
 ```
 
@@ -404,7 +404,7 @@ Everything OmniaCLI does itself then runs as that user, in group `omniacli`:
 git (with that user's git configuration and credentials), reading the
 configs and logs, its files in `/var/lib/omniacli` (given to that user, and
 kept so by upgrades). The sudoers lines name that user
-(`mboscolo ALL=(root) NOPASSWD: ...`). Not root. Remove the line and run
+(`devuser ALL=(root) NOPASSWD: ...`). Not root. Remove the line and run
 `dpkg-reconfigure` again to go back to `omniacli`. On a server keep
 `omniacli`, with `run_as` for the programs of an Odoo venv.
 
