@@ -414,10 +414,13 @@ def _parse_time(value, where: str) -> datetime.time:
 
 def _parse_auto_update(data: dict | None, where: str) -> AutoUpdate:
     data = data or {}
-    auto = AutoUpdate(
-        enabled=bool(data.get("enabled", False)),
-        interval_minutes=int(data.get("interval_minutes", 10)),
-    )
+    # the web form sends an empty field as "": the same as no value, the default
+    interval = data.get("interval_minutes")
+    try:
+        interval = 10 if interval in (None, "") else int(interval)
+    except (TypeError, ValueError):
+        raise ConfigError(f"{where}: interval_minutes {interval!r} is not a number") from None
+    auto = AutoUpdate(enabled=bool(data.get("enabled", False)), interval_minutes=interval)
     if auto.interval_minutes < 1:
         raise ConfigError(f"{where}: interval_minutes must be >= 1")
     auto.window_start, auto.window_end = _parse_window(data.get("window"), where)

@@ -61,6 +61,22 @@ def test_parse_ok():
     assert test.restart.command() == ["sudo", "-n", "systemctl", "--no-ask-password", "restart", "odoo"]
 
 
+def test_auto_update_interval():
+    data = _settings(["odoo"], ["odoo"])
+    # the web form sends an empty field as ""
+    for empty in ("", None):
+        data["s"]["test"]["auto_update"]["interval_minutes"] = empty
+        assert parse_servers(data)["s"].test.auto_update.interval_minutes == 10
+    data["s"]["test"]["auto_update"]["interval_minutes"] = 30
+    assert parse_servers(data)["s"].test.auto_update.interval_minutes == 30
+    data["s"]["test"]["auto_update"]["interval_minutes"] = "abc"
+    with pytest.raises(ConfigError, match="interval_minutes 'abc' is not a number"):
+        parse_servers(data)
+    data["s"]["test"]["auto_update"]["interval_minutes"] = 0
+    with pytest.raises(ConfigError, match="interval_minutes must be >= 1"):
+        parse_servers(data)
+
+
 def test_http_port():
     data = _settings(["odoo"], ["odoo"])
     data["s"]["test"]["http_port"] = 8123
