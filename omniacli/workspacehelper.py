@@ -212,6 +212,11 @@ def mounted(image: Path, mount: Path) -> bool:
     return bool(loop) and source == loop
 
 
+# nosuid, nodev: what a container's root leaves on the disk (a setuid program, a
+# device node) has no effect for the users of this machine (docs/workspaces.md)
+MOUNT_OPTIONS = "loop,nosuid,nodev"
+
+
 def unit_name(mount: Path) -> str:
     return _run("systemd-escape", "--path", "--suffix=mount", str(mount)).strip()
 
@@ -219,7 +224,7 @@ def unit_name(mount: Path) -> str:
 def unit_text(image: Path, mount: Path, name: str) -> str:
     return ("# written by omniacli workspace-helper: the virtual disk of workspace " + name + "\n"
             "[Unit]\nDescription=OmniaCLI workspace " + name + "\nBefore=docker.service\n"
-            f"[Mount]\nWhat={image}\nWhere={mount}\nType=ext4\nOptions=loop\n"
+            f"[Mount]\nWhat={image}\nWhere={mount}\nType=ext4\nOptions={MOUNT_OPTIONS}\n"
             "[Install]\nWantedBy=multi-user.target\n")
 
 
@@ -267,6 +272,14 @@ def limits(name: str, cpus: str, memory_gb: str) -> dict:
     return {"workspace": name, "slice": unit, "cpus": cores, "memory_gb": memory}
 
 
+def _harden_mount(mount: Path) -> None:
+    """A disk mounted before MOUNT_OPTIONS: at once, without stopping its
+    containers (the unit, rewritten, holds them for the next mounts)."""
+    options = _run("findmnt", "--noheadings", "--output", "OPTIONS", "--mountpoint", str(mount)).strip().split(",")
+    if "nosuid" not in options or "nodev" not in options:
+        _run("mount", "-o", "remount,nosuid,nodev", str(mount))
+
+
 def disk(name: str, storage: str, size_gb: str) -> dict:
     image, mount = workspace(name, storage)
     if not (size_gb.isdigit() and 1 <= int(size_gb) <= MAX_DISK_GB):
@@ -305,6 +318,7 @@ def disk(name: str, storage: str, size_gb: str) -> dict:
     _run("systemctl", "enable", "--now", unit)
     if not mounted(image, mount):
         raise HelperError(f"{unit} did not mount {image} on {mount}")
+    _harden_mount(mount)
     if grow:
         loop = loop_of(image)
         _run("losetup", "--set-capacity", loop)

@@ -98,7 +98,7 @@ run code as OmniaCLI's user.
   What=/srv/omniacli/.disks/acme.img
   Where=/srv/omniacli/acme
   Type=ext4
-  Options=loop
+  Options=loop,nosuid,nodev
   [Install]
   WantedBy=multi-user.target docker.service
   ```
@@ -114,6 +114,17 @@ run code as OmniaCLI's user.
   itself, and an instance stopped by its users stays stopped.
 - Outside the workspace limit: docker images (shared) and container logs
   (limited by the template, below).
+- The disk is mounted `nosuid,nodev`, and every service runs without new
+  privileges and with capabilities dropped: root in a container could
+  otherwise leave a setuid program or a device node that work for the users
+  of this machine. A disk mounted before these options is remounted by the
+  helper's `disk`, its containers untouched. *Verified* on 2026-11-04 (root,
+  two real workspaces, `odooplm-20` 2026.1.5): before, a setuid `id` left by
+  the database container's root gave `euid=0` to a user of this machine and a
+  block node read the disk; after, neither, and root there cannot make a
+  node; `psql`'s `\!` runs as `postgres`; create, restart, stop, start, pull,
+  backup, copy of production to test and delete work. Instances made from an
+  earlier template keep their `compose.yaml`.
 - *Not verified* (needs root): a loop mount unit at boot with systemd 247,
   the ordering with docker, `chattr +i` on the mount point, online growth,
   PostgreSQL and Odoo on the mounted disk, a full disk.
@@ -199,9 +210,13 @@ odoo.conf.in      # the Odoo configuration, with placeholders OmniaCLI fills
   database, `list_db = False`.
 - A compose file is refused, when a template is published and again by the
   helper, if it publishes a port not bound to `127.0.0.1`, uses
-  `privileged`, `cap_add`, `network_mode: host` or `pid: host`, mounts
-  anything outside the instance's folder or the docker socket, or mounts
-  addons or configuration without `:ro`.
+  `privileged`, `network_mode: host` or `pid: host`, mounts anything outside
+  the instance's folder or the docker socket, or mounts addons or
+  configuration without `:ro`. Every service must have
+  `security_opt: [no-new-privileges:true]`, `cap_drop: [ALL]` and a
+  `pids_limit` up to 4096; `cap_add` may give back only `CHOWN`, `SETUID`,
+  `SETGID`, `DAC_OVERRIDE` and `FOWNER`, for an entrypoint that starts as root
+  (`postgres:17`).
 - Container logs are limited (`logging: {driver: json-file, options:
   {max-size: "50m", max-file: "5"}}`, *not verified*).
 - The DockerOdooPLM image runs Odoo as 100:101 and reads

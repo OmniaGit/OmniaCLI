@@ -14,6 +14,11 @@ services:
   odoo:
     image: ${IMAGE}
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 1024
     cgroup_parent: ${SLICE}
     depends_on:
       db:
@@ -41,6 +46,18 @@ services:
   db:
     image: postgres:17
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # the image's entrypoint, as root: gives its folders to postgres and drops to it
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
+      - FOWNER
+    pids_limit: 512
     cgroup_parent: ${SLICE}
     environment:
       POSTGRES_DB: postgres

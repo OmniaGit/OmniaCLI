@@ -350,8 +350,9 @@ def test_the_odoo_actions(tmp_path, monkeypatch):
     assert update[:5] == ["run", "--rm", "--no-deps", "-T", "-v"]
     assert update[5] == f"{tmp_path / 'tools'}:{composehelper.TOOLS_MOUNT}:ro" and update[-1] == "DB_test"
     assert one("update", "odoo", "DB_test", "--modules", "web,plm_box")[-2:] == ["DB_test", "web,plm_box"]
-    # psql on the caller's terminal: no -T
-    assert one("psql", "db", "DB_test")[:3] == ["exec", "db", "sh"]
+    # psql on the caller's terminal (no -T), never as root
+    monkeypatch.setattr(composehelper, "psql_options", lambda project, name: ("--user", "postgres"))
+    assert one("psql", "db", "DB_test")[:5] == ["exec", "--user", "postgres", "db", "sh"]
     for action, args, message in (
             ("dump", ["odoo", "DB; rm -rf /"], "not a database name"),
             ("dump", ["odoo", "-DB"], "not a database name"),
@@ -366,6 +367,35 @@ def test_the_odoo_actions(tmp_path, monkeypatch):
             ("pull", ["--quiet"], "takes no arguments")):
         with pytest.raises(composehelper.HelperError, match=message):
             composehelper.commands(tmp_path, action, args)
+
+
+@pytest.mark.parametrize("answer, code, options", [
+    ("0\n999\n", 0, ("--user", "postgres")),  # postgres:17, root by default
+    ("999\n999\n", 0, ("--user", "postgres")),
+    ("1001\n", 0, ()),  # no user postgres, not root: the image's own
+])
+def test_psql_never_as_root(tmp_path, monkeypatch, answer, code, options):
+    class Done:
+        returncode, stdout, stderr = code, answer, ""
+
+    monkeypatch.setattr(composehelper, "compose", lambda project, *args: ["docker", *args])
+    monkeypatch.setattr(composehelper.subprocess, "run", lambda cmd, **kw: Done())
+    assert composehelper.psql_options(tmp_path, "db") == options
+
+
+@pytest.mark.parametrize("answer, code, message", [
+    ("0\n", 0, "runs as root"),  # root, and no user postgres
+    ("", 0, "runs as root"),
+    ("", 1, "cannot ask db"),  # the service is not running
+])
+def test_psql_refused(tmp_path, monkeypatch, answer, code, message):
+    class Done:
+        returncode, stdout, stderr = code, answer, "no container"
+
+    monkeypatch.setattr(composehelper, "compose", lambda project, *args: ["docker", *args])
+    monkeypatch.setattr(composehelper.subprocess, "run", lambda cmd, **kw: Done())
+    with pytest.raises(composehelper.HelperError, match=message):
+        composehelper.psql_options(tmp_path, "db")
 
 
 def test_the_database_connection_is_the_entrypoints(tmp_path):

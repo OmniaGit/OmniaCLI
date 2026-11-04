@@ -48,7 +48,9 @@ command of the caller's, and runs docker with an environment of its own:
                                          (TOOLS) mounted read only
     update <odoo service> <db> --modules a,b
                                          odoo -u a,b --stop-after-init
-    psql <database service> <db>         psql, on the caller's terminal
+    psql <database service> <db>         psql, on the caller's terminal, as the
+                                         image's postgres (never root: its \\!
+                                         runs commands)
     init <odoo service> <db> <modules> [<language>]
                                          odoo -d <db> -i <modules>
                                          --stop-after-init, without demo data,
@@ -270,11 +272,27 @@ def _database(name: str) -> str:
     return name
 
 
-def _script(service_name: str, script: str, *args: str) -> list[str]:
+def _script(service_name: str, script: str, *args: str, options: tuple[str, ...] = ("-T",)) -> list[str]:
     """exec in the service's container (-T: no terminal, the output as it
     is), the script's arguments apart from its text."""
-    tty = [] if script == "psql" else ["-T"]
-    return ["exec", *tty, service_name, "sh", "-c", SCRIPTS[script], "sh", *args]
+    return ["exec", *options, service_name, "sh", "-c", SCRIPTS[script], "sh", *args]
+
+
+def psql_options(project: Path, service_name: str) -> tuple[str, ...]:
+    """Who psql runs as: its \\! runs any command as that user, so never root,
+    which on an image without a USER (postgres:17) is what exec gives: the
+    image's postgres, else the container's own user. Root's only: refused."""
+    done = subprocess.run(compose(project, "exec", "-T", service_name, "sh", "-c", "id -u; id -u postgres || true"),
+                          env=ENV, cwd=project, capture_output=True, text=True)
+    if done.returncode:
+        raise HelperError(f"cannot ask {service_name} who it runs as: {done.stderr.strip()}")
+    ids = done.stdout.split()
+    if len(ids) > 1:
+        return ("--user", "postgres")
+    if ids and ids[0] != "0":
+        return ()
+    raise HelperError(f"{service_name} runs as root and has no user postgres: "
+                      "psql is not opened, its \\! would run as root")
 
 
 def commands(project: Path, action: str, args: list[str]) -> list[list[str]]:
@@ -341,7 +359,8 @@ def commands(project: Path, action: str, args: list[str]) -> list[list[str]]:
         # psql <database service> <database>: on a terminal, the web shell's
         if len(args) != 2:
             raise HelperError("usage: psql <service> <database>")
-        return [_script(service(project, args[0]), "psql", _database(args[1]))]
+        name = service(project, args[0])
+        return [_script(name, "psql", _database(args[1]), options=psql_options(project, name))]
     if action == "logs":
         # logs <service> --tail <N> | --since <time>
         if len(args) != 3 or args[1] not in ("--tail", "--since"):

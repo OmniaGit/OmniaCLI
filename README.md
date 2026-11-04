@@ -863,10 +863,13 @@ by the package in `/usr/share/omniacli/templates`, root's): `template.json`
 `compose.yaml` (only `${...}` of its fields and of what OmniaCLI makes) and
 `odoo.conf.in`. Root runs it, so what its `compose.yaml` may hold is a closed
 list (`stacktemplates.check_compose`): the services' keys of a list (no
-`privileged`, `cap_add`, `devices`, `network_mode`, `pid`, `build`,
+`privileged`, `devices`, `network_mode`, `pid`, `build`,
 `env_file`...), no top-level key but `name` and `services`, ports
 `127.0.0.1:${VARIABLE}:<port>` only, every service in the workspace's
-slice (`cgroup_parent: ${SLICE}`), mounts of the instance's own folders
+slice (`cgroup_parent: ${SLICE}`), with `security_opt:
+[no-new-privileges:true]`, `cap_drop: [ALL]` and a `pids_limit` up to 4096
+(`cap_add` only `CHOWN`, `SETUID`, `SETGID`, `DAC_OVERRIDE`, `FOWNER`, for an
+entrypoint that starts as root), mounts of the instance's own folders
 only (`./…` and `../…`, never out of it), the configuration and the
 customer's addons read only, logging `json-file` with `max-size` and
 `max-file`. The first template is `odooplm-20` (the DockerOdooPLM image of
@@ -1179,7 +1182,7 @@ as its arguments, never in a script's text:
 | `load <odoo service> <db> [--neutralize]` | in a container of its own of the service (`run --rm`, which starts the database it depends on: the service may be stopped), the zip read from the input into a file, `odoo db load --force` |
 | `update <odoo service> <db>` | `click-odoo-update`: in a container of its own of the service (`run --rm --no-deps`), OmniaCLI's tools mounted read only |
 | `update <odoo service> <db> --modules a,b` | `odoo -u a,b --stop-after-init --no-http` in the service's container |
-| `psql <database service> <db>` | `psql` on the caller's terminal (the web shell) |
+| `psql <database service> <db>` | `psql` on the caller's terminal (the web shell), as the image's `postgres`, else the container's own user: never root, its `\!` runs commands; a service that only has root is refused |
 
 The zip goes through the helper's input and output: the helper never opens a
 file the caller names. The database connection is the one the official

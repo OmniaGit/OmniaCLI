@@ -56,6 +56,14 @@ def test_the_template_of_the_repository():
     (("name: ${PROJECT}", "name: ${PROJECT}\nvolumes: {}"), "volumes: not allowed"),
     (("        max-file: \"5\"\n  db:", "  db:"), "logging"),
     (("    environment:\n      HOST: db", "    network_mode: host\n    environment:\n      HOST: db"), "network_mode"),
+    (("    security_opt:\n      - no-new-privileges:true\n    cap_drop:\n      - ALL\n    pids_limit: 1024\n",
+      "    cap_drop:\n      - ALL\n    pids_limit: 1024\n"), "security_opt: must be"),
+    (("    cap_drop:\n      - ALL\n    pids_limit: 1024\n", "    pids_limit: 1024\n"), "cap_drop: must be"),
+    (("    cap_drop:\n      - ALL\n    pids_limit: 1024\n", "    cap_drop:\n      - ALL\n"), "pids_limit: a number"),
+    (("    pids_limit: 1024\n", "    pids_limit: -1\n"), "pids_limit: a number"),
+    (("    pids_limit: 1024\n", "    pids_limit: 100000\n"), "pids_limit: a number"),
+    (("      - FOWNER\n", "      - FOWNER\n      - MKNOD\n"), "cap_add: only"),
+    (("      - FOWNER\n", "      - FOWNER\n      - SYS_ADMIN\n"), "cap_add: only"),
 ])
 def test_compose_rules(tmp_path, change, message):
     text = (REPO_TEMPLATES / "odooplm-20" / "compose.yaml").read_text()
@@ -134,6 +142,19 @@ def root(monkeypatch, tmp_path):
     return {"storage": storage, "systemd": systemd, "calls": calls, "state": state}
 
 
+@pytest.mark.parametrize("options, remounted", [("rw,relatime", True), ("rw,nosuid,relatime", True),
+                                                ("rw,nosuid,nodev,relatime", False)])
+def test_a_disk_mounted_before_the_options_is_hardened(monkeypatch, options, remounted):
+    calls = []
+
+    def run(*cmd, check=True):
+        calls.append(cmd)
+        return options + "\n" if cmd[0] == "findmnt" else ""
+    monkeypatch.setattr(workspacehelper, "_run", run)
+    workspacehelper._harden_mount(Path("/srv/acme"))
+    assert (("mount", "-o", "remount,nosuid,nodev", "/srv/acme") in calls) == remounted
+
+
 def test_disk(root):
     made = workspacehelper.disk("acme", str(root["storage"]), "2")
     image = root["storage"] / ".disks" / "acme.img"
@@ -141,7 +162,7 @@ def test_disk(root):
     assert ["mkfs.ext4", "-q", "-F", str(image)] in root["calls"]
     assert ["chattr", "+i", str(root["storage"] / "acme")] in root["calls"]
     unit = (root["systemd"] / "srv-acme.mount").read_text()
-    assert f"What={image}" in unit and "Options=loop" in unit and "Before=docker.service" in unit
+    assert f"What={image}" in unit and "Options=loop,nosuid,nodev\n" in unit and "Before=docker.service" in unit
     assert (root["systemd"] / "docker.service.d" / "omniacli-acme.conf").read_text().endswith("After=srv-acme.mount\n")
     assert ["systemctl", "enable", "--now", "srv-acme.mount"] in root["calls"]
     # larger: grown, mounted; smaller: refused

@@ -51,7 +51,14 @@ TOP_KEYS = {"name", "services", "networks"}
 # firewall knows (workspacehelper.firewall); required, nothing else
 NETWORKS = {"default": {"ipam": {"config": [{"subnet": "${SUBNET}"}]}}}
 SERVICE_KEYS = {"image", "restart", "depends_on", "ports", "environment", "volumes", "healthcheck",
-                "logging", "command", "user", "working_dir", "labels", "stop_grace_period", "cgroup_parent"}
+                "logging", "command", "user", "working_dir", "labels", "stop_grace_period", "cgroup_parent",
+                "security_opt", "cap_drop", "cap_add", "pids_limit"}
+# every service without new privileges and capabilities, with a limit of
+# processes; what an image's entrypoint needs as root may be given back
+SECURITY_OPT = ["no-new-privileges:true"]
+CAP_DROP = ["ALL"]
+CAP_ADD = {"CHOWN", "SETUID", "SETGID", "DAC_OVERRIDE", "FOWNER"}
+PIDS_LIMIT = (1, 4096)
 # every service in the workspace's systemd slice: its CPU and memory limits
 CGROUP_PARENT = "${SLICE}"
 # a port: on this machine only, its number from .env
@@ -278,6 +285,16 @@ def check_compose(template: Template) -> list[str]:
         found += [f"{where}.{key}: not allowed" for key in svc if key not in SERVICE_KEYS]
         if svc.get("cgroup_parent") != CGROUP_PARENT:
             found.append(f"{where}.cgroup_parent: must be {CGROUP_PARENT} (the workspace's CPU and memory)")
+        if svc.get("security_opt") != SECURITY_OPT:
+            found.append(f"{where}.security_opt: must be {SECURITY_OPT}")
+        if svc.get("cap_drop") != CAP_DROP:
+            found.append(f"{where}.cap_drop: must be {CAP_DROP}")
+        added = svc.get("cap_add") or []
+        if not isinstance(added, list) or not set(map(str, added)) <= CAP_ADD:
+            found.append(f"{where}.cap_add: only {', '.join(sorted(CAP_ADD))}")
+        limit = svc.get("pids_limit")
+        if type(limit) is not int or not PIDS_LIMIT[0] <= limit <= PIDS_LIMIT[1]:
+            found.append(f"{where}.pids_limit: a number, {PIDS_LIMIT[0]} to {PIDS_LIMIT[1]}, is required")
         for port in svc.get("ports") or []:
             if not (isinstance(port, str) and PORT.fullmatch(port)):
                 found.append(f"{where}.ports: {port!r} is not 127.0.0.1:${{VARIABLE}}:<port>")
