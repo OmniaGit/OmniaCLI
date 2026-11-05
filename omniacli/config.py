@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import base64
 import datetime
 import ipaddress
 import os
@@ -800,18 +801,97 @@ def save_access(path: Path, access: Access) -> None:
     os.replace(tmp, path)
 
 
+# an SSH host key as a known_hosts line has it, without the host: type and key
+SSH_HOST_KEY = re.compile(r"(ssh-ed25519|ecdsa-sha2-nistp(256|384|521)|ssh-rsa) [A-Za-z0-9+/]+={0,2}")
+SSH_HOST = re.compile(r"[A-Za-z0-9][A-Za-z0-9.-]{0,252}|\[?[0-9A-Fa-f:]+\]?")
+SSH_USER = re.compile(r"[a-z_][a-z0-9_.-]{0,31}")
+
+
+@dataclass
+class SshRoute:
+    """The SSH server a link goes through: OmniaCLI keeps ssh -L open to it
+    (sshlinks.py) and reaches the link's URL from there."""
+
+    host: str
+    user: str
+    host_key: str  # the server's key, "<type> <base64>": no other is accepted
+    port: int = 22
+
+    def to_dict(self) -> dict:
+        return {"host": self.host, "port": self.port, "user": self.user, "host_key": self.host_key}
+
+
 @dataclass
 class LinkTarget:
     name: str
-    url: str  # the other instance's base URL, https://… (http only through a tunnel)
+    # the other instance's base URL, https://…; with ssh, http:// as the SSH
+    # server reaches it (http://127.0.0.1:8090: the tunnel carries it encrypted)
+    url: str
     token: str  # in clear: it is sent with every request
     ca_file: str = ""  # a CA bundle for a certificate of the customer's own CA
+    ssh: SshRoute | None = None
+    # with ssh: the port of this machine its tunnel listens on (sshlinks.py)
+    local_port: int = field(default=0, compare=False, repr=False)
+
+    @property
+    def address(self) -> str:
+        """Where the requests go: the URL, or with ssh the tunnel's port here."""
+        if self.ssh is None:
+            return self.url
+        path = urlsplit(self.url).path.rstrip("/")
+        return f"http://127.0.0.1:{self.local_port or 9}{path}"
+
+    @property
+    def remote(self) -> tuple[str, int]:
+        """With ssh: host and port the SSH server forwards to (permitopen)."""
+        parts = urlsplit(self.url)
+        return parts.hostname or "", parts.port or 80
 
     def to_dict(self) -> dict:
         data = {"url": self.url, "token": self.token}
         if self.ca_file:
             data["ca_file"] = self.ca_file
+        if self.ssh is not None:
+            data["ssh"] = self.ssh.to_dict()
         return data
+
+
+def check_ssh_address(where: str, host, port) -> tuple[str, int]:
+    """An SSH server's host and port (22 when empty): a name or an address,
+    never something ssh would take as an option."""
+    host = str(host or "").strip()
+    if not SSH_HOST.fullmatch(host):
+        raise ConfigError(f"{where}.ssh.host: {host!r} is not a host name or an IP address")
+    port = port or 22
+    if isinstance(port, bool) or not str(port).isdigit() or not 1 <= int(port) <= 65535:
+        raise ConfigError(f"{where}.ssh.port: {port!r} is not a port")
+    return host, int(port)
+
+
+def parse_ssh_route(where: str, data) -> SshRoute | None:
+    """A link's ssh: host, port, user and the host key; empty is no SSH."""
+    if not data:
+        return None
+    if not isinstance(data, dict):
+        raise ConfigError(f"{where}.ssh must be a mapping")
+    host, port = check_ssh_address(where, data.get("host"), data.get("port"))
+    user = str(data.get("user") or "").strip()
+    if not SSH_USER.fullmatch(user):
+        raise ConfigError(f"{where}.ssh.user: {user!r} is not a user name")
+    host_key = " ".join(str(data.get("host_key") or "").split()[:2])
+    if not SSH_HOST_KEY.fullmatch(host_key):
+        raise ConfigError(f"{where}.ssh.host_key: the server's key is missing (Fetch host key)")
+    try:
+        # the key names its own type first
+        raw = base64.b64decode(host_key.split()[1], validate=True)
+        ok = raw[4:4 + int.from_bytes(raw[:4], "big")].decode() == host_key.split()[0]
+        # an ed25519 key is its type and 32 bytes
+        ok = ok and (host_key.split()[0] != "ssh-ed25519" or len(raw) == 51)
+    except (ValueError, UnicodeDecodeError):
+        ok = False
+    if not ok:
+        raise ConfigError(f"{where}.ssh.host_key: not a key of type {host_key.split()[0]}")
+    return SshRoute(host.strip("[]"), user, host_key, port)
 
 
 def parse_link(name: str, data: dict) -> LinkTarget:
@@ -827,7 +907,12 @@ def parse_link(name: str, data: dict) -> LinkTarget:
     ca_file = str(data.get("ca_file") or "").strip()
     if ca_file and not Path(ca_file).is_file():
         raise ConfigError(f"links.{name}: ca_file {ca_file} is not a file")
-    return LinkTarget(name, url, token, ca_file)
+    ssh = parse_ssh_route(f"links.{name}", data.get("ssh"))
+    if ssh is not None and parts.scheme != "http":
+        # the tunnel ends on this machine: a certificate would not match it
+        raise ConfigError(f"links.{name}: through SSH the url is http://, as the SSH server reaches OmniaCLI "
+                          "(http://127.0.0.1:8090); SSH encrypts it")
+    return LinkTarget(name, url, token, ca_file, ssh)
 
 
 def load_links(path: Path) -> dict[str, LinkTarget]:

@@ -34,6 +34,8 @@ export DEBIAN_FRONTEND=noninteractive
 
 step "install"
 apt-get install -y -qq /opt/omniacli-test/omniacli.deb > /tmp/install.log 2>&1 || { tail -30 /tmp/install.log; fail "apt-get install"; }
+# the links through SSH: ssh, ssh-keygen and ssh-keyscan come with the package
+for tool in ssh ssh-keygen ssh-keyscan; do command -v "$tool" >/dev/null || fail "$tool not installed with the package"; done
 grep -E '^omniacli:' /tmp/install.log || true
 dpkg -s omniacli | grep -q '^Status: install ok installed' || fail "package not installed"
 for i in $(seq 30); do curl -s -o /dev/null localhost:8090 && break; sleep 1; done

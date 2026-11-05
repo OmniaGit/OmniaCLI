@@ -4,23 +4,61 @@
 {% block crumbs %}{% from "_crumbs.html" import crumbs with context %}
 {{ crumbs([("Dashboard", "/"), ("Links", None)]) }}
 {% endblock %}
+{% macro ssh_fields(link, prefix) -%}
+{# the SSH server a link goes through: empty host, no SSH #}
+<div class="form-grid ssh-fields">
+  <label for="{{ prefix }}-host">SSH server</label>
+  <div><input type="text" id="{{ prefix }}-host" class="ssh-host mono" value="{{ link.ssh.host if link and link.ssh else '' }}" placeholder="empty: no SSH">
+    <span class="muted">the customer's server, which shows its SSH port</span></div>
+  <label for="{{ prefix }}-port">SSH port</label>
+  <div><input type="number" id="{{ prefix }}-port" class="ssh-port mono" min="1" max="65535" value="{{ link.ssh.port if link and link.ssh else 22 }}"></div>
+  <label for="{{ prefix }}-user">SSH user</label>
+  <div><input type="text" id="{{ prefix }}-user" class="ssh-user mono" value="{{ link.ssh.user if link and link.ssh else 'omniacli-link' }}">
+    <span class="muted">a user of that server for OmniaCLI alone</span></div>
+  <label>Server's key</label>
+  <div><input type="hidden" class="ssh-host-key" value="{{ link.ssh.host_key if link and link.ssh else '' }}">
+    <span class="ssh-fingerprint mono">{{ ssh[link.name].fingerprint if link and link.ssh else 'not fetched' }}</span>
+    <button type="button" data-fetch>Fetch host key</button>
+    <span class="muted">compare it with <span class="mono">ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub</span> run on that server: only this key is accepted</span></div>
+</div>
+{%- endmacro %}
 {% block content %}
 <h1>Links</h1>
 <p class="muted">Other OmniaCLI instances this one operates: their servers are listed on the Dashboard and their pages open here, under <span class="mono">/links/&lt;name&gt;/</span>.
 The other instance creates the token on its <strong>Users</strong> page and decides its role; here each user acts there with at most their own role.
 Saved in <span class="mono">{{ links_file }}</span>, readable by its owner only: it holds the tokens.</p>
+<p class="muted">A customer's server that shows only SSH: give the link an <strong>SSH server</strong>. OmniaCLI keeps an
+<span class="mono">ssh -L</span> open to it with a key of its own, restarts it when it drops, and sends everything of the
+link through it; the URL is then <span class="mono">http://</span> as that server reaches OmniaCLI
+(<span class="mono">http://127.0.0.1:8090</span>), encrypted by SSH.</p>
 <div id="error" class="banner" hidden></div>
+<div class="panel">
+  <h2>This OmniaCLI's SSH key</h2>
+  {% if public_key %}
+  <p class="muted">Its public key, for the customers' servers (the line of each link below limits it to that link's forward):</p>
+  <pre class="console mono">{{ public_key }}</pre>
+  {% else %}
+  <p class="muted">None yet: it is made for the links through SSH.</p>
+  <button type="button" id="make-key">Make the key</button>
+  {% endif %}
+</div>
 <div class="panel">
   <div class="scroll">
   <table>
-    <tr><th>Link</th><th>URL</th><th>Token</th><th>CA file</th><th></th></tr>
+    <tr><th>Link</th><th>URL</th><th>Token</th><th>CA file</th><th>SSH</th><th></th></tr>
     {% for link in links %}
+    {% set s = ssh.get(link.name) %}
     <tr data-link="{{ link.name }}">
       <td><strong><a href="/links/{{ link.name }}/">{{ link.name }}</a></strong></td>
       <td><input type="text" class="url mono" value="{{ link.url }}" aria-label="URL of {{ link.name }}">
-        {% if link.url.startswith("http://") %}<br><span class="error">http: the token travels in clear, use it only through a VPN or an SSH tunnel</span>{% endif %}</td>
+        {% if link.url.startswith("http://") and not link.ssh %}<br><span class="error">http: the token travels in clear, use it only through a VPN or an SSH tunnel</span>{% endif %}</td>
       <td><input type="password" class="token" placeholder="unchanged" autocomplete="off" aria-label="New token of {{ link.name }}"></td>
       <td><input type="text" class="ca mono" value="{{ link.ca_file }}" placeholder="system CAs" aria-label="CA file of {{ link.name }}"></td>
+      <td>{% if s %}<span class="mono">{{ link.ssh.user }}@{{ link.ssh.host }}{% if link.ssh.port != 22 %}:{{ link.ssh.port }}{% endif %}</span><br>
+        {% if s.status %}<span class="status {{ 'success' if s.status.state == 'up' else ('running' if s.status.state == 'starting' else 'failed') }}"
+          title="{{ s.status.detail }}">{{ s.status.state }}</span> <span class="muted">{{ s.status.detail }}</span>{% endif %}
+        {% else %}<span class="muted">no</span>{% endif %}
+        <br><button type="button" data-ssh-toggle>SSH…</button></td>
       <td><div class="actions" style="margin: 0">
         <button type="button" data-test>Test link</button>
         <button type="button" data-save>Save</button>
@@ -28,15 +66,34 @@ Saved in <span class="mono">{{ links_file }}</span>, readable by its owner only:
       </div>
       <span class="result muted"></span></td>
     </tr>
+    <tr data-ssh-for="{{ link.name }}" {% if not s %}hidden{% endif %}>
+      <td></td>
+      <td colspan="5">
+        {{ ssh_fields(link, "ssh-" ~ loop.index) }}
+        {% if s %}
+        <p class="muted">On that server, as root: the user <span class="mono">{{ link.ssh.user }}</span>, and in its
+          <span class="mono">~/.ssh/authorized_keys</span> this line (the forward to <span class="mono">{{ link.remote[0] }}:{{ link.remote[1] }}</span> only: no command, no shell, no files):</p>
+        {% if s.line %}<pre class="console mono">{{ s.line }}</pre>{% else %}<p class="error">Make OmniaCLI's SSH key first (above).</p>{% endif %}
+        <p class="muted">Better also this block at the end of <span class="mono">/etc/ssh/sshd_config</span>, then
+          <span class="mono">sshd -t &amp;&amp; systemctl reload ssh</span>: it also refuses a forward from that server back here (<span class="mono">-R</span>), which the line alone allows.</p>
+        <pre class="console mono">{{ s.block }}</pre>
+        {% endif %}
+      </td>
+    </tr>
     {% else %}
-    <tr><td colspan="5" class="muted">No links yet.</td></tr>
+    <tr><td colspan="6" class="muted">No links yet.</td></tr>
     {% endfor %}
-    <tr>
+    <tr id="new-row">
       <td><input type="text" id="new-name" placeholder="customer" aria-label="New link name"></td>
       <td><input type="text" id="new-url" class="mono" placeholder="https://omniacli.customer.example" aria-label="New link URL"></td>
       <td><input type="password" id="new-token" autocomplete="off" placeholder="token from its Users page" aria-label="New link token"></td>
       <td><input type="text" id="new-ca" class="mono" placeholder="system CAs" aria-label="New link CA file"></td>
+      <td><button type="button" data-ssh-toggle>SSH…</button></td>
       <td><button type="button" id="add">Add link</button></td>
+    </tr>
+    <tr data-ssh-for="" hidden>
+      <td></td>
+      <td colspan="5">{{ ssh_fields(None, "ssh-new") }}</td>
     </tr>
   </table>
   </div>
@@ -52,11 +109,36 @@ Saved in <span class="mono">{{ links_file }}</span>, readable by its owner only:
     if (!resp.ok) { errorBox.textContent = data.error || data.detail || ("Error " + resp.status); errorBox.hidden = false; return null; }
     return data;
   }
+  const sshRow = (name) => document.querySelector(`tr[data-ssh-for="${CSS.escape(name)}"]`);
+  // the SSH of a link as the form has it: null without a host
+  function sshOf(name) {
+    const row = sshRow(name), host = row.querySelector(".ssh-host").value.trim();
+    if (!host) return null;
+    return {host, port: Number(row.querySelector(".ssh-port").value) || 22, user: row.querySelector(".ssh-user").value.trim(),
+            host_key: row.querySelector(".ssh-host-key").value};
+  }
+  for (const row of document.querySelectorAll("tr[data-ssh-for]")) {
+    row.querySelector("[data-fetch]").onclick = async () => {
+      const host = row.querySelector(".ssh-host").value.trim(), print = row.querySelector(".ssh-fingerprint");
+      print.textContent = "asking…";
+      const data = await post("ssh/host-key", {host, port: Number(row.querySelector(".ssh-port").value) || 22});
+      if (!data) { print.textContent = "not fetched"; return; }
+      row.querySelector(".ssh-host-key").value = data.host_key;
+      print.textContent = `${data.host_key.split(" ")[0]} ${data.fingerprint} (save to keep it)`;
+    };
+  }
+  for (const button of document.querySelectorAll("[data-ssh-toggle]")) {
+    button.onclick = () => {
+      const name = button.closest("tr").dataset.link || "";
+      const row = sshRow(name);
+      row.hidden = !row.hidden;
+    };
+  }
   for (const row of document.querySelectorAll("tr[data-link]")) {
     const name = row.dataset.link, result = row.querySelector(".result");
     row.querySelector("[data-save]").onclick = async () => {
       const body = {name, url: row.querySelector(".url").value, token: row.querySelector(".token").value,
-                    ca_file: row.querySelector(".ca").value};
+                    ca_file: row.querySelector(".ca").value, ssh: sshOf(name)};
       if (await post("save", body)) location.reload();
     };
     row.querySelector("[data-delete]").onclick = async () => {
@@ -71,10 +153,12 @@ Saved in <span class="mono">{{ links_file }}</span>, readable by its owner only:
       result.textContent = data.ok ? `OmniaCLI ${data.version}, as ${data.caller}, role ${data.role}` : data.error;
     };
   }
+  const makeKey = document.getElementById("make-key");
+  if (makeKey) makeKey.onclick = async () => { if (await post("ssh/key")) location.reload(); };
   document.getElementById("add").onclick = async () => {
     const value = (id) => document.getElementById(id).value.trim();
     const body = {name: value("new-name"), url: value("new-url"), token: value("new-token"),
-                  ca_file: value("new-ca"), new: true};
+                  ca_file: value("new-ca"), ssh: sshOf(""), new: true};
     if (await post("save", body)) location.reload();
   };
 })();

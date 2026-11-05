@@ -35,7 +35,7 @@ from starlette.background import BackgroundTask
 from starlette.requests import ClientDisconnect, HTTPConnection
 
 from . import (checks, consumer, disks, gitcredentials, linkcopy, ops, packages, plugins, pluginstore, puller, publisher,
-               schedules, selflog, shell, stacktemplates, templatestore, tunnel, workspacehelper, workspaceops)
+               schedules, selflog, sshlinks, shell, stacktemplates, templatestore, tunnel, workspacehelper, workspaceops)
 from .accesslog import AccessLog
 from .diskhistory import DiskHistory, DiskRecorder
 from .auth import ROLES as ACCESS_ROLES
@@ -300,6 +300,8 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
     disk_history = DiskHistory(settings.jobs_dir.parent / "disk_history.json")
     disk_recorder = DiskRecorder(settings, disk_history)
     link_clients = LinkClients(link_transport)
+    # the links through SSH: their ssh -L, and OmniaCLI's key, next to the links file
+    ssh_tunnels = sshlinks.SshTunnels((settings.links_file or settings.servers_file).parent / "ssh")
     # the pullers of relays this one is a consumer of: their state next to the jobs
     consumers = consumer.Consumers(settings, link_clients, settings.jobs_dir.parent / "connections")
     # the scheduled actions; a schedules file that cannot be read is shown on
@@ -485,6 +487,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         sampler.start()
         disk_recorder.start()
         tunnels.start()
+        ssh_tunnels.sync(settings.link_targets)
         pullers.start()
         publications.start()
         consumers.start()
@@ -498,6 +501,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         await publications.stop()
         await pullers.stop()
         await tunnels.stop()
+        await ssh_tunnels.close()
         await disk_recorder.stop()
         await sampler.stop()
         await updater.stop()
@@ -518,6 +522,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
     app.state.disk_history, app.state.disk_recorder = disk_history, disk_recorder
     app.state.access_log = access_log
     app.state.tunnels = tunnels
+    app.state.ssh_tunnels = ssh_tunnels
     app.state.pullers, app.state.publications, app.state.consumers = pullers, publications, consumers
     app.state.sessions, app.state.authenticator = sessions, authenticator
 
@@ -2717,14 +2722,43 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         except OSError as exc:
             return refuse(f"Cannot write {settings.links_file}: {exc}", 500)
         settings.link_targets = links
+        ssh_tunnels.sync(links)
         return None
 
     @app.get("/links", dependencies=[Depends(admin)])
     async def links_page(request: Request):
+        public = sshlinks.public_key(ssh_tunnels.folder)
+        ssh = {}
+        for link in settings.link_targets.values():
+            if link.ssh is not None:
+                ssh[link.name] = {"status": ssh_tunnels.status(link.name), "fingerprint": sshlinks.fingerprint(
+                    link.ssh.host_key), "line": sshlinks.authorized_line(public, link) if public else "",
+                    "block": sshlinks.sshd_block(link)}
         return _TEMPLATES.TemplateResponse(
             request, "links.html",
-            {"links": list(settings.link_targets.values()), "links_file": settings.links_file},
+            {"links": list(settings.link_targets.values()), "links_file": settings.links_file,
+             "public_key": public, "ssh": ssh},
         )
+
+    @app.post("/api/links/ssh/key", dependencies=[Depends(admin)])
+    async def link_ssh_key():
+        """OmniaCLI's SSH key for the links through SSH, made the first time."""
+        try:
+            return {"ok": True, "public_key": await sshlinks.ensure_key(ssh_tunnels.folder)}
+        except (sshlinks.SshError, OSError) as exc:
+            return refuse(str(exc), 500)
+
+    @app.post("/api/links/ssh/host-key", dependencies=[Depends(admin)])
+    async def link_ssh_host_key(payload: dict = Body(...)):
+        """The SSH server's key, to be compared with the customer's before saving."""
+        port = payload.get("port") or 22
+        if isinstance(port, bool) or not str(port).isdigit():
+            return refuse(f"{port!r} is not a port")
+        try:
+            key = await sshlinks.fetch_host_key(str(payload.get("host") or "").strip(), int(port))
+        except sshlinks.SshError as exc:
+            return refuse(str(exc))
+        return {"ok": True, "host_key": key, "fingerprint": sshlinks.fingerprint(key)}
 
     @app.post("/api/links/save", dependencies=[Depends(admin)])
     async def link_target_save(payload: dict = Body(...)):
@@ -2735,7 +2769,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
                 return refuse(f"A link named {name} already exists")
             if not new and name not in settings.link_targets:
                 return refuse(f"No link {name}", status.HTTP_404_NOT_FOUND)
-            data = {k: payload.get(k) for k in ("url", "token", "ca_file")}
+            data = {k: payload.get(k) for k in ("url", "token", "ca_file", "ssh")}
             if not new and not str(data["token"] or "").strip():
                 data["token"] = settings.link_targets[name].token
             try:
@@ -2756,6 +2790,9 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
     async def link_target_test(name: str, me: Principal = Depends(admin)):
         """Ask the other instance who we are there: its version and our role."""
         link = a_link(name)
+        tunnel = ssh_tunnels.status(name) if link.ssh is not None else None
+        if tunnel is not None and tunnel["state"] != "up":
+            return {"ok": False, "error": f"SSH tunnel {tunnel['state']}: {tunnel['detail'] or 'starting'}"}
         try:
             resp = await link_clients.client(link).get(
                 "/api/info", headers=link_headers(link, me.name, me.role), timeout=LIST_TIMEOUT)

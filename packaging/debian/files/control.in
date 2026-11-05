@@ -3,7 +3,7 @@ Version: @VERSION@
 Architecture: all
 Maintainer: OmniaSolutions <matteo.boscolo@omniasolutions.eu>
 Installed-Size: @SIZE@
-Depends: python3 (>= 3.9), python3-venv, ca-certificates, git, adduser, init-system-helpers
+Depends: python3 (>= 3.9), python3-venv, ca-certificates, git, openssh-client, adduser, init-system-helpers
 Recommends: sudo, postgresql-client
 Suggests: nginx, certbot
 Conflicts: omniaci

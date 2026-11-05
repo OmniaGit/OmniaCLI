@@ -767,6 +767,41 @@ proxy, a VPN, or an SSH tunnel (`http://` is accepted for a tunnel or a VPN,
 but then the token travels in clear). Both instances need a version with
 links (the Test link button says so).
 
+### Links through SSH
+
+A customer's server that shows only SSH (and Odoo) still has its OmniaCLI
+reached: give the link an **SSH server** (the **SSH…** button of its row).
+OmniaCLI keeps an `ssh -L` open to it while it runs, restarts it when it
+drops (after 5 s, then up to 60 s), and sends everything of the link through
+it: pages, API, WebSockets, tunnels, copies. The URL is then `http://` as that
+server reaches OmniaCLI, `http://127.0.0.1:8090` for the package's default
+there; SSH encrypts it. The row shows the tunnel's state and why it is down;
+**Test link** says it too.
+
+- **The key**: OmniaCLI has an ed25519 key of its own (**Make the key** on the
+  Links page), in `ssh/` next to the links file, readable by OmniaCLI's user
+  only.
+- **The server's key**: **Fetch host key** reads it; compare its fingerprint
+  with `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` run on that server
+  before saving. ssh accepts only that key, and reads no configuration,
+  agent or `known_hosts` of OmniaCLI's user.
+- **On the customer's server**, as root: a user for OmniaCLI alone
+  (`omniacli-link` by default) and, in its `~/.ssh/authorized_keys`, the line
+  the Links page prints, which allows that one forward and nothing else (no
+  command, shell or file transfer):
+
+  ```
+  restrict,port-forwarding,permitopen="127.0.0.1:8090",command="/bin/false" ssh-ed25519 AAAA… omniacli@host
+  ```
+
+  Better also the `Match User` block the page prints, at the end of
+  `/etc/ssh/sshd_config` (then `sshd -t && systemctl reload ssh`): the line
+  alone still lets the key open a port on that server's loopback that leads
+  back to this machine (`ssh -R`); the block refuses it. Both tried on
+  OpenSSH 9.2. In the line, `permitlisten="none"` is not accepted there: the
+  whole key is refused.
+- ssh ends with OmniaCLI, also when OmniaCLI is killed.
+
 ### Git credentials
 
 On a machine whose working copies already have their git user (an ssh key,
