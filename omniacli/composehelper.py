@@ -126,6 +126,23 @@ ODOO_DB = (
     'export PGHOST="${PGHOST:-$HOST}" PGPORT="${PGPORT:-$PORT}" PGUSER="${PGUSER:-$USER}" '
     'PGPASSWORD="${PGPASSWORD:-$PASSWORD}"; '
 )
+# around a module update, as omniacli/odoo/cron_guard.py does outside
+# containers: on a neutralized database, a cron that was off stays off (the
+# update switches on those whose XML says active=True outside noupdate). The
+# list is "=" and ids, nothing for another database; only integers reach the SQL.
+CRONS_BEFORE = (
+    'on="$(psql -d "$1" -Atc "SELECT CASE WHEN EXISTS (SELECT 1 FROM ir_config_parameter '
+    "WHERE key = 'database.is_neutralized') THEN '=' || coalesce((SELECT string_agg(id::text, ',') "
+    "FROM ir_cron WHERE active), '') END\")\" || { echo \"WARNING: the active crons of $1 are not known: "
+    'if it is neutralized, the update may switch some on" >&2; on=; }; '
+)
+CRONS_AFTER = (
+    'code=$?; case "$on" in =*) ids="${on#=}"; psql -d "$1" -v ON_ERROR_STOP=1 -Atc '
+    '"WITH off AS (UPDATE ir_cron SET active = false WHERE active AND id NOT IN (-1${ids:+,$ids}) RETURNING id) '
+    "SELECT 'Neutralized database: cron switched off again: ' || coalesce(d.module || '.' || d.name, 'id ' || off.id) "
+    "FROM off LEFT JOIN ir_model_data d ON d.model = 'ir.cron' AND d.res_id = off.id\" || code=1;; esac; "
+    'exit $code'
+)
 # the scripts the Odoo actions run in the container, the database as $1
 # (never in the script's text): dump writes the zip to the output, load
 # reads it from the input
@@ -141,9 +158,9 @@ SCRIPTS = {
                       'cat > "$f"; odoo db load --force "$1" "$f"',
     "load-neutralize": ODOO_DB + 'f="$(mktemp /tmp/omniacli-load-XXXXXX.zip)"; trap \'rm -f "$f"\' EXIT; '
                                  'cat > "$f"; odoo db load --force --neutralize "$1" "$f"',
-    "update": ODOO_DB + f'export PYTHONPATH={TOOLS_MOUNT}; '
-                        f'exec python3 {TOOLS_MOUNT}/bin/click-odoo-update -d "$1"',
-    "update-modules": ODOO_DB + 'exec odoo -d "$1" -u "$2" --stop-after-init --no-http',
+    "update": ODOO_DB + CRONS_BEFORE + f'export PYTHONPATH={TOOLS_MOUNT}; '
+                        f'python3 {TOOLS_MOUNT}/bin/click-odoo-update -d "$1"; ' + CRONS_AFTER,
+    "update-modules": ODOO_DB + CRONS_BEFORE + 'odoo -d "$1" -u "$2" --stop-after-init --no-http; ' + CRONS_AFTER,
     "psql": 'exec psql -U "${POSTGRES_USER:-postgres}" "$1"',
 }
 _ENV_LINE = re.compile(r"\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=")

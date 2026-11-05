@@ -50,7 +50,9 @@ async def here(env, tmp_path, monkeypatch):
 
 
 def calls(env):
-    return env["calls"].read_text().splitlines() if env["calls"].exists() else []
+    """The steps, without the calls around each update (cron_guard.py, test_ops.py)."""
+    found = env["calls"].read_text().splitlines() if env["calls"].exists() else []
+    return [line for line in found if "cron_guard.py" not in line]
 
 
 def a_backup(env, name, major):

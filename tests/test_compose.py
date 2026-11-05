@@ -504,3 +504,12 @@ def test_data_folder(tmp_path, monkeypatch):
     config["services"]["odoo"]["volumes"].pop()
     with pytest.raises(composehelper.HelperError, match="nothing is mounted"):
         composehelper.data_folder(tmp_path, "odoo")
+
+
+def test_update_scripts_keep_crons_off_and_the_exit_code():
+    for name in ("update", "update-modules"):
+        script = composehelper.SCRIPTS[name]
+        assert script.index("database.is_neutralized") < script.index("--stop-after-init" if name != "update"
+                                                                      else "click-odoo-update")
+        assert "SET active = false" in script and script.endswith("exit $code")
+        assert " exec " not in script  # the update must not replace the shell: what follows would not run

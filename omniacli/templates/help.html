@@ -353,7 +353,8 @@ the new container's. Limit it in the compose file:</p>
   <tr><td>dump</td><td><span class="mono">odoo db dump</span> (with or without filestore), the zip to the output</td></tr>
   <tr><td>load</td><td>the zip from the input, <span class="mono">odoo db load --force</span>, neutralized or not</td></tr>
   <tr><td>update</td><td><span class="mono">click-odoo-update</span> in a container of its own with OmniaCLI's tools
-    mounted read only, or <span class="mono">odoo -u</span> of the modules named</td></tr>
+    mounted read only, or <span class="mono">odoo -u</span> of the modules named; on a neutralized database the
+    scheduled actions that were off are off again afterwards</td></tr>
   <tr><td>psql</td><td><span class="mono">psql</span> in the database service, for the web shell</td></tr>
 </table>
 <p>The database connection is the one the official Odoo image's entrypoint makes, from the container's

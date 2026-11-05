@@ -29,6 +29,50 @@ CLI_PACKAGE = "click-odoo-contrib"
 LINK_SCRIPT = Path(__file__).with_name("link_filestore.py")
 # what click-odoo runs to set every user's password to admin
 PASSWORDS_SCRIPT = Path(__file__).with_name("reset_passwords.py")
+# what click-odoo runs around a module update: a neutralized database keeps
+# its crons off
+CRON_GUARD_SCRIPT = Path(__file__).with_name("cron_guard.py")
+CRON_GUARD_MARK = "OMNIACLI_ACTIVE_CRONS="
+
+
+async def _cron_guard(instance: Instance, *args: str) -> tuple[int, str]:
+    """click-odoo runs cron_guard.py as the user the instance runs as."""
+    opts = instance.options
+    env = odoo_env(instance)
+    # a copy of the script any user may read, in a folder only OmniaCLI writes to
+    staging = Path(tempfile.mkdtemp(prefix="omniacli-crons-", dir=BACKUP_STAGING))
+    try:
+        staging.chmod(0o755)
+        script = staging / CRON_GUARD_SCRIPT.name
+        shutil.copyfile(CRON_GUARD_SCRIPT, script)
+        script.chmod(0o644)
+        cmd = [opts.venv_bin / "click-odoo", "-c", opts.odoo_config, "-d", opts.database, script, *args]
+        return await capture(as_user(instance.run_as, cmd, env), env=env)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
+@contextlib.asynccontextmanager
+async def crons_stay_off(job: Job, instance: Instance):
+    """What runs inside updates modules: on a neutralized database, the crons
+    that are off stay off after it, even when it fails half way. An update
+    never stops for this: without the list it goes on, with a warning."""
+    code, out = await _cron_guard(instance, "before")
+    if code:
+        job.log(f"WARNING: the active crons of {instance.options.database} are not known ({code}): "
+                f"if it is neutralized, the update may switch some on. {out}")
+    found = [line for line in out.splitlines() if line.startswith(CRON_GUARD_MARK)]
+    try:
+        yield
+    finally:
+        if found:
+            code, out = await _cron_guard(instance, "after", found[-1][len(CRON_GUARD_MARK):])
+            if code:
+                raise JobFailed(f"the update may have switched on crons of the neutralized database "
+                                f"{instance.options.database}, and they could not be switched off ({code}): {out}")
+            for line in out.splitlines():
+                if line.startswith("switched off again: "):
+                    job.log(f"Neutralized database: cron {line}")
 
 
 async def update_modules(job: Job, instance: Instance, force: bool = False) -> None:
@@ -40,17 +84,18 @@ async def update_modules(job: Job, instance: Instance, force: bool = False) -> N
         return
     job.log("--- update changed modules")
     env = odoo_env(instance)
-    await run(
-        job,
-        as_user(instance.run_as, [
-            opts.venv_bin / "click-odoo-update",
-            "-c",
-            opts.odoo_config,
-            "-d",
-            opts.database,
-        ], env),
-        env=env,
-    )
+    async with crons_stay_off(job, instance):
+        await run(
+            job,
+            as_user(instance.run_as, [
+                opts.venv_bin / "click-odoo-update",
+                "-c",
+                opts.odoo_config,
+                "-d",
+                opts.database,
+            ], env),
+            env=env,
+        )
 
 
 ADDON_NAME = re.compile(r"[A-Za-z0-9_]+")
@@ -166,23 +211,24 @@ async def update_chosen_modules(job: Job, instance: Instance, modules: list[str]
     opts = instance.options
     job.log(f"--- update modules {', '.join(modules)}")
     first_line = len(job.lines)
-    await run(
-        job,
-        as_user(instance.run_as, [
-            opts.venv_bin / "python",
-            odoo_bin,
-            "-c",
-            opts.odoo_config,
-            "-d",
-            opts.database,
-            "-u",
-            ",".join(modules),
-            "--stop-after-init",
-            "--workers=0",
-            # log to the job, not to the instance's log file
-            logfile_to_stdout(odoo_major(odoo_bin)),
-        ]),
-    )
+    async with crons_stay_off(job, instance):
+        await run(
+            job,
+            as_user(instance.run_as, [
+                opts.venv_bin / "python",
+                odoo_bin,
+                "-c",
+                opts.odoo_config,
+                "-d",
+                opts.database,
+                "-u",
+                ",".join(modules),
+                "--stop-after-init",
+                "--workers=0",
+                # log to the job, not to the instance's log file
+                logfile_to_stdout(odoo_major(odoo_bin)),
+            ]),
+        )
     # Odoo only warns about a module it does not know and exits 0 (same
     # message in Odoo 10 to 20)
     for line in job.lines[first_line:]:

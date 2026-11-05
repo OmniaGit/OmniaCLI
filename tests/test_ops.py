@@ -555,3 +555,49 @@ async def test_remote_branches(tmp_path):
     assert data["branches"] == ["main", "test"] and "not reachable" in data["note"]
     assert "error" in await ops.remote_branches(tmp_path / "missing", "origin")
     assert "error" in await ops.remote_branches(tmp_path, "origin")
+
+
+async def test_update_keeps_crons_off_on_a_neutralized_database(env):
+    """before lists the active crons, after gets that list; another database
+    (the fake prints no list) has no after."""
+    test = env["settings"].instance("srv", "test")
+    await odoo_ops.update_modules(job(), test)
+    assert " cron_guard.py before" in env["calls"].read_text()
+    assert "cron_guard.py after" not in env["calls"].read_text()
+
+    click_odoo = test.options.venv_bin / "click-odoo"
+    click_odoo.write_text(click_odoo.read_text() + 'case "$*" in\n'
+                          '*" before") echo some log; echo OMNIACLI_ACTIVE_CRONS=1,7;;\n'
+                          '*" after "*) echo "switched off again: website.website_visitor_cron";;\nesac\n')
+    done = job()
+    await odoo_ops.update_modules(done, test)
+    assert " cron_guard.py after 1,7" in env["calls"].read_text()
+    assert any("cron switched off again: website.website_visitor_cron" in line for line in done.lines)
+
+
+async def test_update_that_fails_still_switches_crons_off(env):
+    test = env["settings"].instance("srv", "test")
+    venv = test.options.venv_bin
+    click_odoo = venv / "click-odoo"
+    click_odoo.write_text(click_odoo.read_text() + 'case "$*" in *" before") echo OMNIACLI_ACTIVE_CRONS=1;; esac\n')
+    (venv / "click-odoo-update").write_text("#!/bin/sh\nexit 3\n")
+    with pytest.raises(JobFailed):
+        await odoo_ops.update_modules(job(), test)
+    assert "cron_guard.py after 1" in env["calls"].read_text()
+
+
+async def test_update_goes_on_when_the_crons_are_not_known(env):
+    test = env["settings"].instance("srv", "test")
+    (test.options.venv_bin / "click-odoo").write_text("#!/bin/sh\necho no way >&2\nexit 2\n")
+    done = job()
+    await odoo_ops.update_modules(done, test)
+    assert "update -c" in env["calls"].read_text()
+    assert any("WARNING: the active crons" in line for line in done.lines)
+
+
+async def test_crons_not_switched_off_fail_the_update(env):
+    test = env["settings"].instance("srv", "test")
+    (test.options.venv_bin / "click-odoo").write_text(
+        '#!/bin/sh\ncase "$*" in *" before") echo OMNIACLI_ACTIVE_CRONS=1; exit 0;; esac\necho locked; exit 1\n')
+    with pytest.raises(JobFailed, match="could not be switched off"):
+        await odoo_ops.update_modules(job(), test)

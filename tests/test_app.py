@@ -328,7 +328,7 @@ async def test_update_popup_actions(client, env):
     job = await wait_job(client, resp.json()["job"])
     assert job["status"] == "success", job
     assert any("odoo log line" in line for line in job["lines"])
-    calls = env["calls"].read_text().splitlines()
+    calls = [c for c in env["calls"].read_text().splitlines() if "cron_guard.py" not in c]
     assert calls[0].startswith("odoo-bin -c ") and "-d DB_test -u in_repo,base --stop-after-init --workers=0 --logfile=" in calls[0]
     assert calls[1] == "restart odoo-test"
 
