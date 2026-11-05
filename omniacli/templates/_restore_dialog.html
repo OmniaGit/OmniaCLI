@@ -1,0 +1,127 @@
+{# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C · SPDX-License-Identifier: AGPL-3.0-or-later -#}
+{# Restore: drawn once on the server page, it opens for the buttons
+   data-restore-file (url, upload, backups, database). A zip from this computer
+   goes first into the instance's backups, then a job restores it. -#}
+<dialog id="restore-dialog">
+  <form method="dialog" id="restore-form">
+    <h2 id="restore-title" style="margin-bottom: 4px"></h2>
+    <p class="muted" style="margin-top: 0">The instance's database and filestore are dropped first, then the backup is loaded.</p>
+    <label><input type="radio" name="restore-source" value="" checked> A zip from this computer</label>
+    <input type="file" id="restore-file" accept=".zip" style="display: block; margin: 4px 0 8px 22px">
+    <div id="restore-backups" class="scroll" style="max-height: 35vh; margin: 6px 0"></div>
+    {% for f in restore_fields %}
+    {% if f.kind == "checkbox" %}
+    <label style="display: block; margin-top: 6px"><input type="checkbox" data-restore-option="{{ f.key }}" {{ "checked" if f.default }}> {{ f.label }}</label>
+    {% else %}
+    <label style="display: block; margin-top: 6px">{{ f.label }} <input type="text" data-restore-option="{{ f.key }}" value="{{ f.default or '' }}" placeholder="{{ f.placeholder }}"></label>
+    {% endif %}
+    {% endfor %}
+    <div id="restore-confirm" hidden style="margin-top: 10px">
+      <label>A production database is replaced: type <strong class="mono" id="restore-db"></strong> to go on
+        <input type="text" id="restore-typed" autocomplete="off" class="mono" style="display: block; margin-top: 4px"></label>
+    </div>
+    <progress id="restore-progress" max="100" value="0" hidden style="width: 100%; margin-top: 10px"></progress>
+    <p id="restore-error" class="error"></p>
+    <div class="actions">
+      <button type="submit" class="danger" id="restore-go">Restore</button>
+      <button type="button" id="restore-cancel">Cancel</button>
+    </div>
+  </form>
+</dialog>
+<script>
+(function () {
+  const dialog = document.getElementById("restore-dialog");
+  const list = document.getElementById("restore-backups");
+  const errorBox = document.getElementById("restore-error");
+  const typed = document.getElementById("restore-typed");
+  const fileInput = document.getElementById("restore-file");
+  const progress = document.getElementById("restore-progress");
+  const go = document.getElementById("restore-go");
+  let target = null, key = "", sending = null;
+  const sizeText = (b) => b >= 1073741824 ? (b / 1073741824).toFixed(2) + " GiB"
+    : b >= 1048576 ? (b / 1048576).toFixed(1) + " MiB" : Math.max(1, Math.round(b / 1024)) + " KiB";
+
+  async function load() {
+    list.replaceChildren();
+    const resp = await fetch(target.backups, {headers: {Accept: "application/json"}}).catch(() => null);
+    const files = resp && resp.ok ? await resp.json() : [];
+    for (const f of files) {
+      const label = document.createElement("label");
+      label.style.display = "block";
+      const radio = document.createElement("input");
+      radio.type = "radio"; radio.name = "restore-source"; radio.value = f.file;
+      const info = document.createElement("span");
+      info.className = "muted";
+      info.textContent = `${new Date(f.time * 1000).toLocaleString()}, ${sizeText(f.size)}`;
+      label.append(radio, ` ${f.file} `, info);
+      list.appendChild(label);
+    }
+  }
+  // choosing a file means restoring it
+  fileInput.addEventListener("change", () => {
+    dialog.querySelector('input[name=restore-source][value=""]').checked = true;
+  });
+  // a stream of the file with its percentage (a fetch tells none)
+  function upload(file) {
+    return new Promise((resolve, reject) => {
+      const xhr = sending = new XMLHttpRequest();
+      xhr.open("POST", `${target.upload}?name=${encodeURIComponent(file.name)}`);
+      xhr.setRequestHeader("Content-Type", "application/zip");
+      xhr.upload.onprogress = (ev) => { if (ev.lengthComputable) progress.value = 100 * ev.loaded / ev.total; };
+      xhr.onload = () => {
+        let data = {};
+        try { data = JSON.parse(xhr.responseText); } catch (e) { /* the status tells */ }
+        if (xhr.status < 300) resolve(data.file);
+        else reject(new Error(data.error || data.detail || "Error " + xhr.status));
+      };
+      xhr.onerror = () => reject(new Error("The upload failed: OmniaCLI cannot be reached"));
+      xhr.onabort = () => reject(new Error("The upload was cancelled"));
+      xhr.send(file);
+    });
+  }
+  document.getElementById("restore-cancel").onclick = () => { if (sending) sending.abort(); dialog.close(); };
+  for (const button of document.querySelectorAll("[data-restore-file]")) {
+    button.onclick = () => {
+      target = JSON.parse(button.dataset.restoreFile); key = button.dataset.key;
+      document.getElementById("restore-title").textContent = `Restore into ${key}`;
+      document.getElementById("restore-form").reset();
+      document.getElementById("restore-confirm").hidden = !target.database;
+      document.getElementById("restore-db").textContent = target.database;
+      errorBox.textContent = ""; progress.hidden = true; go.disabled = false;
+      dialog.showModal();
+      load();
+    };
+  }
+  document.getElementById("restore-form").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    errorBox.textContent = "";
+    let backup = dialog.querySelector("input[name=restore-source]:checked").value;
+    const file = backup ? null : fileInput.files[0];
+    if (!backup && !file) { errorBox.textContent = "Choose a zip, or one of the backups."; return; }
+    const body = {};
+    for (const input of dialog.querySelectorAll("[data-restore-option]")) {
+      body[input.dataset.restoreOption] = input.type === "checkbox" ? input.checked : input.value.trim();
+    }
+    if (target.database) {
+      if (typed.value.trim() !== target.database) { errorBox.textContent = `Type ${target.database} to go on.`; return; }
+      body.confirm = typed.value.trim();
+    } else if (!confirm(`Drop the database of ${key} and load ${backup || file.name} into it?`)) return;
+    go.disabled = true;
+    try {
+      if (file) {
+        progress.hidden = false; progress.value = 0;
+        backup = await upload(file);
+      }
+      const resp = await fetch(target.url, {
+        method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({...body, backup}),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(data.error || data.detail || "Error " + resp.status);
+      location.href = "{{ prefix }}/jobs/" + data.job;
+    } catch (e) {
+      errorBox.textContent = e.message; go.disabled = false; progress.hidden = true;
+      await load();
+    } finally { sending = null; }
+  });
+})();
+</script>

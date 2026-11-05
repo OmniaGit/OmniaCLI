@@ -302,6 +302,7 @@ async def pending_updates(instance: Instance) -> dict[str, int]:
 
 
 async def restart(job: Job, instance: Instance) -> None:
+    await instance.plugin.before_start(instance)
     if instance.restart.type == "process":
         await restart_process(job, instance)
         return
@@ -422,6 +423,7 @@ def _config(instance: Instance) -> Path | None:
 async def start(job: Job, instance: Instance) -> None:
     """Start the systemd service or the compose project, or the process
     OmniaCLI starts itself."""
+    await instance.plugin.before_start(instance)
     if instance.restart.type == "process":
         job.log(f"--- start {_label(instance)} started by OmniaCLI ({_config(instance)})")
         if managed_pid(instance) is not None:

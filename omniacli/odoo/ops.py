@@ -326,6 +326,17 @@ def backup_major(backup_zip: Path) -> int | None:
     return int(match.group(1)) if match else None
 
 
+def backup_problem(backup_zip: Path) -> str | None:
+    """Why Odoo cannot restore this file, told before its restore drops the
+    database (Odoo reads only dump.sql and filestore/ of a zip)."""
+    try:
+        with zipfile.ZipFile(backup_zip) as zf:
+            found = "dump.sql" in zf.namelist()
+    except (OSError, zipfile.BadZipFile) as exc:
+        return f"{backup_zip.name} is not a zip that can be read: {exc}"
+    return None if found else f"{backup_zip.name} is not an Odoo backup: it has no dump.sql"
+
+
 async def restore(job: Job, instance: Instance, backup_zip: Path, neutralize: bool) -> None:
     """click-odoo-restoredb of a backup zip into the instance's database: the
     database and its filestore are dropped first (--force), the copy gets a

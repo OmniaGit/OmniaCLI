@@ -112,6 +112,16 @@ def odoo_major(version: str) -> int | None:
     return int(found.group(1)) if found else None
 
 
+def _backup_problem(backup_zip: Path) -> str | None:
+    """Why Odoo cannot load this file, told before the instance is stopped."""
+    try:
+        with zipfile.ZipFile(backup_zip) as zf:
+            found = "dump.sql" in zf.namelist()
+    except (OSError, zipfile.BadZipFile) as exc:
+        return f"{backup_zip.name} is not a zip that can be read: {exc}"
+    return None if found else f"{backup_zip.name} is not an Odoo backup: it has no dump.sql"
+
+
 def backup_major(backup_zip: Path) -> int | None:
     """The major Odoo version of the database in a backup zip, from its
     manifest.json (odoo db dump and Odoo's database manager write one)."""
@@ -291,6 +301,9 @@ class DockerPlugin(ServicePlugin):
                       default=True),
                 Field("load_only", "Only load the database: not stopped, no module update, no restart "
                       "(development)", kind="checkbox", default=False)]
+
+    def backup_problem(self, backup_zip: Path) -> str | None:
+        return _backup_problem(backup_zip)
 
     async def restore(self, job: Job, instance: Instance, backup_zip: Path, options: dict) -> None:
         """Stop the instance, load the backup into its database (dropped

@@ -355,6 +355,17 @@ class OdooPlugin(ServicePlugin):
                             reset_passwords=bool(options.get("reset_passwords", False)),
                             load_only=bool(options.get("load_only", False)))
 
+    def backup_problem(self, backup_zip: Path) -> str | None:
+        return ops.backup_problem(backup_zip)
+
+    async def before_start(self, instance: Instance) -> None:
+        """No database, or an empty one: odoo-bin would make a blank one of a
+        name it does not find, and a service would fail on an empty one."""
+        state, detail = await checks.database_state(instance)
+        if state in checks.NO_DATABASE:
+            raise JobFailed(f"{instance.key} is not started: {instance.options.database}: {detail}. "
+                            "Restore a backup into it first")
+
     async def _restore(self, job: Job, instance: Instance, backup_zip: Path, neutralize: bool,
                        shared: tuple[Path, Path] | None = None, reset_passwords: bool = False,
                        load_only: bool = False) -> None:

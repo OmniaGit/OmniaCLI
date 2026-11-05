@@ -15,7 +15,10 @@ import logging
 import os
 import pwd
 import re
+import shutil
+import tempfile
 import time
+import zipfile
 from dataclasses import asdict
 from pathlib import Path
 from typing import Optional
@@ -29,7 +32,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from fastapi.templating import Jinja2Templates
 from starlette.background import BackgroundTask
-from starlette.requests import HTTPConnection
+from starlette.requests import ClientDisconnect, HTTPConnection
 
 from . import (checks, consumer, disks, gitcredentials, linkcopy, ops, packages, plugins, pluginstore, puller, publisher,
                schedules, selflog, shell, stacktemplates, templatestore, tunnel, workspacehelper, workspaceops)
@@ -803,11 +806,21 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             elif not known:
                 from_link[i.key]["disabled"] = (f"No link {src.link} here: add it on the Links page, "
                                                 "or change 'Database from link' in the server's form (Edit)")
+        # Restore: for an admin who logs in here
+        restore_file = {}
+        for i in shown:
+            if i.plugin.has_restore and me.kind == "user" and not me.scoped and me.can("admin"):
+                restore_file[i.key] = {
+                    "url": f"{base}/{i.role}/restore",
+                    "upload": f"{prefix_of(request)}/api/servers/{srv.name}/{i.role}/backups/upload",
+                    "backups": f"{prefix_of(request)}/api/servers/{srv.name}/{i.role}/backups",
+                    "database": str(i.plugin.describe(i).get("database") or i.key) if i.role == "production" else ""}
         return _TEMPLATES.TemplateResponse(
             request,
             "server.html",
             {
                 "from_link": from_link,
+                "restore_file": restore_file,
                 "restore_fields": [_field_dict(f) for f in plugin.restore_fields()] if plugin else [],
                 "backup_fields": [_field_dict(f) for f in plugin.backup_fields()] if plugin else [],
                 "server": srv,
@@ -1123,6 +1136,79 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
 
         job = jobs.submit(f"Copy from {src.label} to {instance.key} ({what})",
                           [instance.key], f"manual: {user}", action)
+        return {"job": job.id}
+
+    def _restorable(instance: Instance) -> Instance:
+        if not instance.plugin.has_restore:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, f"{instance.key} cannot restore a backup")
+        return instance
+
+    @app.post("/api/servers/{server}/{role}/backups/upload")
+    async def backup_upload(request: Request, server: str, role: str, name: str = "",
+                            user: Principal = Depends(admin)):
+        """A backup zip sent by the browser (the raw body), into the instance's
+        backups, through a .part file: whole or absent. An admin's: what is
+        restored runs in the database's tools (a dump.sql goes through psql)."""
+        instance = _restorable(get_instance(server, role))
+        if user.kind != "user":
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Only a user who logs in here may upload a backup")
+        name = re.sub(r"[^A-Za-z0-9._-]", "_", Path(name).name)
+        if not linkcopy.BACKUP_NAME.fullmatch(name):
+            return refuse("The file must be a .zip")
+        folder = backup_folder(instance)
+        folder.mkdir(parents=True, exist_ok=True)
+        dest = folder / name
+        if dest.exists():
+            return refuse(f"{name} is in the backups of {instance.key} already: choose it from the list",
+                          status.HTTP_409_CONFLICT)
+        length = request.headers.get("content-length", "")
+        free = shutil.disk_usage(folder).free
+        if length.isdigit() and free - int(length) < puller.MIN_FREE:
+            return refuse(f"{name}: {free >> 20} MiB free here, not enough for {int(length) >> 20} MiB",
+                          status.HTTP_507_INSUFFICIENT_STORAGE)
+        handle, part_name = tempfile.mkstemp(dir=folder, prefix=f"{name}.", suffix=".part")
+        part = Path(part_name)
+        try:
+            with os.fdopen(handle, "wb") as out:
+                async for chunk in request.stream():
+                    out.write(chunk)
+            if not zipfile.is_zipfile(part):
+                return refuse(f"{name} is not a zip file")
+            os.replace(part, dest)
+        except ClientDisconnect:
+            return refuse(f"{name}: the upload was interrupted")
+        finally:
+            part.unlink(missing_ok=True)
+        return {"file": name}
+
+    @app.post("/servers/{server}/{role}/restore")
+    async def action_restore(request: Request, server: str, role: str, user: Principal = Depends(admin)):
+        """Restore a zip of the instance's backups (made here or uploaded)
+        into it, with the choices its plugin asks."""
+        instance = _restorable(get_instance(server, role))
+        if user.kind != "user":
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Only a user who logs in here may restore a backup")
+        raw, _ = await posted_params(request)
+        name = str(raw.get("backup") or "").strip()
+        if not linkcopy.BACKUP_NAME.fullmatch(name):
+            return refuse(f"{name!r} is not the name of a backup zip")
+        path = backup_folder(instance) / name
+        if not path.is_file():
+            return refuse(f"No backup {name} of {instance.key}", status.HTTP_404_NOT_FOUND)
+        problem = instance.plugin.backup_problem(path)
+        if problem:
+            return refuse(problem)
+        if instance.role == "production":
+            # the database it replaces, typed
+            expected = str(instance.plugin.describe(instance).get("database") or instance.key)
+            if str(raw.get("confirm") or "").strip() != expected:
+                return refuse(f"Type {expected} to replace the production database")
+        try:
+            options = {f.key: _field_value(f, raw.get(f.key)) for f in instance.plugin.restore_fields()}
+        except ActionRefused as exc:
+            return refuse(str(exc))
+        job = jobs.submit(f"Restore {name} into {instance.key}", [instance.key], f"manual: {user}",
+                          lambda job: instance.plugin.restore(job, instance, path, options))
         return {"job": job.id}
 
     @app.post("/servers/{server}/merge")

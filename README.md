@@ -116,6 +116,7 @@ stopped with *Stop job*.
 | Merge test to production | | ✓ | backup production, merge, push, update modules, restart production |
 | Copy production to test | ✓ → | ✓ | a popup asks which backup of production: a new one (**shared with production** by default, see below; or with the filestore; or without it, test has no attachments) or one already made; then stop test, `click-odoo-restoredb --copy --force --neutralize` into the test database (drops it and its filestore first; `--neutralize` from Odoo 16: no scheduled actions, no outgoing mail), `click-odoo-update`, start test. **Filestore shared with production**: the backup is made without filestore, and after the restore test's filestore (`<data_dir>/filestore/<db>`) is a tree of hard links to production's files, made by the test's venv python as its `run_as` user: no extra disk space, test reads every attachment, and what test writes or deletes does not touch production's files (Odoo never rewrites a filestore file, it only writes new ones and unlinks). Refused, before anything is touched, when an Odoo config sets no `data_dir` or the two filestores are not on the same filesystem, or the test user may not link production's files (`fs.protected_hardlinks`). Refused when production and test run different Odoo versions, and on Odoo 20+ (click-odoo-restoredb refuses it). A systemd test needs its Start/Stop sudoers lines; an init.d one is not stopped, it is restarted at the end |
 | Copy from link | ✓ (admin) | ✓ | for an instance with a **Database from link**: a popup asks which backup of that instance of the linked OmniaCLI: a new one, made there now (with or without the filestore; an OmniaCLI there older than 2026.1.12 makes it with the filestore), or one already there; whether to neutralize; whether to set every user's password to `admin` (on by default: after the restore `click-odoo` runs `odoo/reset_passwords.py`, which writes the pbkdf2_sha512 hash in SQL, so no password policy refuses it; in `password` from Odoo 12, in `password_crypt` on Odoo 10 and 11 with auth_crypt; refused before anything is touched when the Odoo version is unknown); whether to **only load the database** (off by default, for development: the instance is not stopped, its modules are not updated and it is not restarted; Odoo's drop of the database ends its connections); and for a production its database name, typed. The zip is downloaded into this instance's backups as `<link>_<file>` (through `<file>.part`: a cut download leaves nothing), then restored as above: stop, `click-odoo-restoredb --copy --force [--neutralize]`, the passwords, `click-odoo-update`, start. Refused, before anything is touched, when the backup's `manifest.json` names another Odoo version than the instance's |
+| Restore | ✓ (admin) | ✓ (admin) | for a type that can restore, an admin who logs in: a popup asks for a zip from this computer (uploaded into the instance's backups through a `.part` file; refused when it is not a zip, or a file of that name is there, or less than 1 GiB would stay free) or one of the instance's backups, with the choices of Copy from link and, for a production, its database name typed. Refused before anything is touched when the zip has no `dump.sql`. Then as Copy from link: stop, `click-odoo-restoredb --copy --force [--neutralize]`, the passwords, `click-odoo-update`, start. A zip without `manifest.json` (an Odoo.sh one) is not compared with the instance's Odoo version: the job warns. Not on native Odoo 20 and later (click-odoo-restoredb refuses it). An admin's because a `dump.sql` goes through `psql`, whose `\!` runs commands as the instance's user |
 | Log | ✓ | ✓ | `tail -F` of the Odoo log in the browser, with an "errors only" filter; of a compose instance, `docker compose logs` of its service (see below) |
 
 The two pip buttons are also next to the **Venv bin** field of the server
@@ -175,7 +176,9 @@ prepared before Test & activate. The job's log opens in a new tab.
   OmniaCLI user and makes it live only when no check fails: Odoo config,
   addons path, log file, click-odoo scripts and an `import click_odoo, odoo`
   with the instance's python, the database (connected with the Odoo config's
-  credentials), odoo-bin, every repository (branch, no local change, remote
+  credentials: a database that does not exist yet, or an empty one, is only
+  a warning, it is **Start** and **Restart** that refuse it until a backup is
+  restored), odoo-bin, every repository (branch, no local change, remote
   reachable), the service and `sudo -n -l` for its restart command, separate
   folders and databases for production and test, the backup folder. Saving
   a live server runs the same checks: if they fail nothing is saved and it
@@ -1710,7 +1713,11 @@ A plugin may also give:
   is the backup made without any choice;
 - **`restore()`** and **`restore_fields()`**: load a backup zip into an
   instance, with the choices asked first (Odoo: neutralize). The core's
-  *Copy from link* is offered only for a type that has it.
+  *Copy from link* and *Restore* are offered only for a type that has it.
+- **`backup_problem()`**: why a file chosen by a person cannot be restored
+  (Odoo: no `dump.sql`), asked before anything is touched.
+- **`before_start()`**: called before every start and restart; raise
+  `JobFailed` when the instance has nothing to run on (Odoo: no database yet).
 - **`script_runner()`** and **`script_env()`**: how a scheduled action runs a
   Python script on an instance (the python, the system user, the
   environment) and the `OMNIACLI_*` variables it adds (Odoo: the venv's

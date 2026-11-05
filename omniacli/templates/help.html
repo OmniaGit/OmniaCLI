@@ -200,7 +200,9 @@ it has, at least one.</p>
   <li><strong>Save, test &amp; activate</strong> (or <strong>Test &amp; activate</strong> on the Servers page) runs the
     checks: config and paths readable, click-odoo scripts in the venv and Odoo importable, the database reachable,
     every repository on its branch without local changes, the service found, sudo allowed, production and test on
-    separate databases and working copies, the backup folder writable. If they all pass, the server goes live; the dialog lists each check.</li>
+    separate databases and working copies, the backup folder writable. If they all pass, the server goes live; the dialog lists each check.
+    A database that does not exist yet, or an empty one, is only a warning: <strong>Start</strong> and <strong>Restart</strong> refuse it until a
+    backup is restored with <strong>Restore</strong> (admin): a zip from this computer, or one of the instance's backups; a production needs its database name typed.</li>
   <li>On a live server, <strong>Test &amp; save</strong> saves the change only if every check passes, otherwise the
     server stays as it was; <strong>Save as draft</strong> takes it offline.</li>
   <li>A server with a running job cannot be edited or deleted. Every save keeps the previous servers file as

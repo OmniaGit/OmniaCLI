@@ -344,6 +344,15 @@ class ServicePlugin(ABC):
         """What is asked before a restore (checkbox or text), given as options."""
         return []
 
+    def backup_problem(self, backup_zip: Path) -> str | None:
+        """Why this file, chosen by a person, cannot be restored into an
+        instance of this type: asked before anything is touched. None: it fits."""
+        return None
+
+    async def before_start(self, instance: Instance) -> None:
+        """Called before every start and restart of the instance: raise
+        JobFailed when it has nothing to run on (Odoo: no database yet)."""
+
     def process_command(self, instance: Instance) -> tuple[list[str], Path]:
         """(command, working directory) of the process OmniaCLI starts itself
         (restart type process). Its output goes to the instance's log."""
@@ -465,7 +474,7 @@ class ServicePlugin(ABC):
 
 
 # the methods a plugin must write as async def
-ASYNC_METHODS = ("checks", "after_pull", "backup", "restore", "dev_setup", "discover")
+ASYNC_METHODS = ("checks", "after_pull", "backup", "restore", "before_start", "dev_setup", "discover")
 _ID = re.compile(r"[a-z][a-z0-9_-]{0,31}")
 
 

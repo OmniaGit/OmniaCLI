@@ -98,7 +98,7 @@
       {% for b in buttons[inst.key].git %}{{ action_button(b, off) }}{% endfor %}
       </div>
       {% endif %}
-      {% if (can_act and inst.plugin.has_backup) or buttons[inst.key].backup or from_link[inst.key] %}
+      {% if (can_act and inst.plugin.has_backup) or buttons[inst.key].backup or from_link[inst.key] or restore_file[inst.key] %}
       <div class="action-group">
       {% if can_act and inst.plugin.has_backup %}
       {# the choices of the backup (Odoo: without filestore) in its dialog #}
@@ -111,6 +111,10 @@
       {% elif from_link[inst.key] %}
       <button type="button" {{ off }} data-from-link='{{ from_link[inst.key] | tojson }}' data-key="{{ inst.key }}"
               title="Back up {{ from_link[inst.key].label }}, download it and restore it into {{ inst.key }}">{{ icon("download") }}Copy from link</button>
+      {% endif %}
+      {% if restore_file[inst.key] %}
+      <button type="button" {{ off }} data-restore-file='{{ restore_file[inst.key] | tojson }}' data-key="{{ inst.key }}"
+              title="Restore a backup into {{ inst.key }}: a zip from this computer, or one of its backups">{{ icon("backup") }}Restore</button>
       {% endif %}
       {% for b in buttons[inst.key].backup %}{{ action_button(b, off) }}{% endfor %}
       </div>
@@ -226,6 +230,7 @@
 {% for dialog in dialogs %}{% include dialog %}{% endfor %}
 {% if from_link %}{% include "_from_link_dialog.html" %}{% endif %}
 {% if can_act %}{% include "_backup_dialog.html" %}{% endif %}
+{% if restore_file %}{% include "_restore_dialog.html" %}{% endif %}
 {% include "_charts.html" %}
 {{ console_script() }}
 <script>
