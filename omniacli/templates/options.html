@@ -7,6 +7,10 @@
 {% block content %}
 <h1>Options</h1>
 <p class="muted">The options of this OmniaCLI, for every user. Saved in <span class="mono">{{ options_file }}</span>.</p>
+<p>This machine is a <strong class="mono" id="machine">{{ machine }}</strong>:
+{% if machine == "server" %}nobody opens a shell of OmniaCLI's own user here: no Shell, no Claude, and psql only where it runs as another user.
+{% else %}nothing is restricted: Shell, Claude and psql are open to developers and admins.{% endif %}
+Root sets it with <span class="mono">machine:</span> in the main configuration.</p>
 <div id="error" class="banner" hidden></div>
 <form id="form" autocomplete="off">
   <fieldset>

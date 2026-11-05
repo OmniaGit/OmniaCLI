@@ -395,6 +395,12 @@ class ServicePlugin(ABC):
         None: the instance has no database shell."""
         return None
 
+    def db_shell_as_service(self, instance: Instance) -> bool:
+        """Whether that client runs as OmniaCLI's own user: its \\! is then a
+        shell of that user, so a server does not open it. A plugin says False
+        only when it runs as somebody else."""
+        return True
+
     def script_runner(self, instance: Instance) -> tuple[Path, str | None, dict]:
         """How a scheduled action runs a Python script on the instance: the
         python, the system user (None: OmniaCLI's own, no sudo) and the

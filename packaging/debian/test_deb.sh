@@ -390,6 +390,10 @@ login admin "$PW"
 curl "${API[@]}" localhost:8090/api/access/users/save \
   -d '{"name": "marta", "role": "user", "password": "marta-pass-1", "new": true}' | grep -q '"ok":true' \
   || fail "users.yaml not written as dev after the upgrade"
+# OMNIACLI_USER reaches the running service: a development machine, the shell page opens
+curl -s -b /tmp/cookies-admin localhost:8090/options | grep -q 'id="machine">development<' || fail "OMNIACLI_USER=dev is not a development machine"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/cookies-admin localhost:8090/servers/demo/production/shell)" = 200 ] \
+    || fail "no shell page on a development machine"
 echo "as dev: config read, pulled and restarted, upgrade kept it"
 sed -i '/^OMNIACLI_USER=/d' /etc/default/omniacli
 dpkg-reconfigure omniacli > /tmp/reconf.log 2>&1 || { tail -20 /tmp/reconf.log; fail "dpkg-reconfigure back to omniacli"; }
@@ -397,6 +401,11 @@ wait_up || fail "service not up as omniacli again"
 [ "$(service_user)" = omniacli ] || fail "service runs as $(service_user), not omniacli again"
 [ "$(owners)" = omniacli:omniacli ] || fail "data owned by $(owners), not omniacli again"
 [ ! -e "$DROPIN" ] || fail "drop-in left without OMNIACLI_USER"
+# without it, a server: the shell page refused, also to an admin
+login admin "$PW"
+curl -s -b /tmp/cookies-admin localhost:8090/options | grep -q 'id="machine">server<' || fail "without OMNIACLI_USER not a server"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/cookies-admin localhost:8090/servers/demo/production/shell)" = 403 ] \
+    || fail "the shell page opens on a server"
 chown -R omniacli:omniacli /srv/odoo /srv/remote.git
 login admin "$PW"
 

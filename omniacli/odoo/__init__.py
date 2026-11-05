@@ -223,6 +223,9 @@ class OdooPlugin(ServicePlugin):
         # variables (sudoers needs SETENV, the Run as check prints the line)
         return f"sudo -n -u {instance.run_as} --preserve-env={','.join(env)} {ops.psql_path()}", env
 
+    def db_shell_as_service(self, instance: Instance) -> bool:
+        return instance.run_as is None
+
     def script_runner(self, instance: Instance) -> tuple[Path, str | None, dict]:
         # the venv's python, which imports odoo as click-odoo does
         return instance.options.venv_bin / "python", instance.run_as, ops.odoo_env(instance)

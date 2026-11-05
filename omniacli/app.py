@@ -46,6 +46,7 @@ from .config import (
     PULLER_KEEP_HOURS,
     ROLES,
     SERVER_NAME,
+    MACHINE_DEVELOPMENT,
     SHELL_FONT_SIZE,
     SHELL_FONT_SIZES,
     TUNNEL_IDLE_HOURS,
@@ -107,6 +108,8 @@ def _page_context(request: Request) -> dict:
         "console_font": settings.options.shell_font_size if settings else SHELL_FONT_SIZE,
         "console_font_sizes": SHELL_FONT_SIZES,
         "can_act": bool(user and user.can("developer")),
+        # a shell of OmniaCLI's own user: not on a server
+        "own_user_shells": bool(settings and settings.machine == MACHINE_DEVELOPMENT),
         # restart, start and stop: every role; an MCP token only reads
         "can_restart": bool(user and user.kind != "token"),
         "is_admin": bool(user and user.can("admin")),
@@ -475,6 +478,8 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
         own_log = selflog.attach(own_log_file)
+        _logger.warning("this machine is a %s: shells of OmniaCLI's own user %s", settings.machine,
+                        "open" if settings.machine == MACHINE_DEVELOPMENT else "closed")
         updater.start()
         scheduler.start()
         sampler.start()
@@ -2840,9 +2845,21 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         "psql": (shell_folder, psql_run),
     }
 
+    def shell_refused(instance: Instance, kind: str) -> str | None:
+        """Why this machine does not open that shell: on a server nobody gets
+        a shell of OmniaCLI's own user, whatever the role, also through a link."""
+        if settings.machine == MACHINE_DEVELOPMENT:
+            return None
+        if kind == "psql" and not instance.plugin.db_shell_as_service(instance):
+            return None
+        return f"This machine is a server: no {kind} as OmniaCLI's own user"
+
     def shell_instance(server: str, role: str, kind: str) -> Instance:
         active_server(server)
         instance = get_instance(server, role)
+        refused = shell_refused(instance, kind)
+        if refused:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, refused)
         run = shell_kinds[kind][1](instance)
         if isinstance(run, str):
             raise HTTPException(status.HTTP_404_NOT_FOUND, run)
@@ -2868,6 +2885,10 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             return
         if instance is None:
             await websocket.close(1008, f"No instance {server}/{role}")
+            return
+        refused = shell_refused(instance, kind)
+        if refused:
+            await websocket.close(1008, refused)
             return
         folder, run = shell_kinds[kind]
         run = run(instance)
@@ -3406,7 +3427,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
     @app.get("/options", dependencies=[Depends(admin)])
     async def options_page(request: Request):
         return _TEMPLATES.TemplateResponse(request, "options.html", {
-            "options": settings.options, "options_file": settings.options_file,
+            "options": settings.options, "options_file": settings.options_file, "machine": settings.machine,
             "font_sizes": SHELL_FONT_SIZES, "idle_hours": TUNNEL_IDLE_HOURS})
 
     @app.post("/api/options/save", dependencies=[Depends(admin)])

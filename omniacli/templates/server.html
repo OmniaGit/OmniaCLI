@@ -121,16 +121,22 @@
       {% endif %}
       {% if can_act and not scoped %}
       {# a login shell on the server, in a new tab (not for a user of
-         workspaces: a shell of this machine) #}
+         workspaces: a shell of this machine); on a server nothing that runs
+         as OmniaCLI's own user #}
+      {% set show_psql = inst.plugin.db_shell(inst) and (own_user_shells or not inst.plugin.db_shell_as_service(inst)) %}
+      {% if own_user_shells or show_psql %}
       <div class="action-group">
+      {% if own_user_shells %}
       <a class="button" href="{{ base }}/shell" target="_blank" rel="noopener" title="A shell of the user running OmniaCLI, in {{ inst.repositories[0].path if inst.repositories else 'its home' }}">{{ icon("terminal") }}Shell</a>
       {% if inst.claude_dir %}
       <a class="button" href="{{ base }}/claude" target="_blank" rel="noopener" title="A shell of the user running OmniaCLI in {{ inst.claude_dir }}, running claude">{{ icon("terminal") }}Claude</a>
       {% endif %}
-      {% if inst.plugin.db_shell(inst) %}
+      {% endif %}
+      {% if show_psql %}
       <a class="button" href="{{ base }}/psql" target="_blank" rel="noopener" title="psql on {{ inst.plugin.describe(inst).database or 'the database' }}, as the instance connects to it">{{ icon("terminal") }}psql</a>
       {% endif %}
       </div>
+      {% endif %}
       {% endif %}
       {# the plugin's own groups #}
       {% for group, found in buttons[inst.key].items() if group not in core_groups and found %}

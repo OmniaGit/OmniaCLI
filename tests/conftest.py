@@ -189,6 +189,8 @@ def env(tmp_path, fake_venv, restart_calls):
             "backup_dir": str(tmp_path / "backups"),
             "jobs_dir": str(tmp_path / "jobs"),
             "servers_file": "servers.yaml",
+            # the shells open: test_machine.py closes them
+            "machine": "development",
         },
         base_dir=servers_file.parent,
     )

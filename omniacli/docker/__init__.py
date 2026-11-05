@@ -367,6 +367,10 @@ class DockerPlugin(ServicePlugin):
         opts = instance.options
         return shlex.join(instance.restart.command("psql", opts.db_service, opts.database)), {}
 
+    def db_shell_as_service(self, instance: Instance) -> bool:
+        # through the helper, as postgres in the database's container
+        return False
+
     def fields(self) -> list[Field]:
         return [
             Field("database", "Database", required=True),

@@ -41,6 +41,13 @@ SERVER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 USER_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]*\$?")
 
 
+# the kinds of machine: on a development machine nothing is restricted, on a
+# server nobody gets a shell of OmniaCLI's own user (parse_machine)
+MACHINE_SERVER = "server"
+MACHINE_DEVELOPMENT = "development"
+MACHINE_KINDS = (MACHINE_SERVER, MACHINE_DEVELOPMENT)
+
+
 class ConfigError(Exception):
     pass
 
@@ -353,6 +360,7 @@ class Settings:
     credentials_file: Path | None = None
     workspaces: dict[str, Workspace] = field(default_factory=dict)
     storage_roots: tuple[str, ...] = ()
+    machine: str = MACHINE_SERVER
     token_roles: dict[str, str] = field(default_factory=dict)
     fixed: Access = field(default_factory=Access)
     web: Access = field(default_factory=Access)
@@ -1111,6 +1119,19 @@ def save_workspaces(path: Path, workspaces: dict[str, Workspace]) -> None:
     os.replace(tmp, path)
 
 
+def parse_machine(value, service_user: str | None = None) -> str:
+    """The kind of this machine: machine of the main configuration (root
+    writes it, the service only reads it); without it development for a
+    service run as another user (OMNIACLI_USER of /etc/default/omniacli, which
+    root writes too), otherwise server, the restricted one."""
+    if value is not None:
+        if value not in MACHINE_KINDS:
+            raise ConfigError(f"machine: {value!r} is not one of {', '.join(MACHINE_KINDS)}")
+        return value
+    # empty or omniacli: the package's own user, as postinst takes them
+    return MACHINE_DEVELOPMENT if service_user and service_user != "omniacli" else MACHINE_SERVER
+
+
 def parse_storage_roots(data) -> tuple[str, ...]:
     """workspaces.storage of the main configuration: the folders a workspace
     may live in (absolute, real paths: no symbolic links)."""
@@ -1554,6 +1575,7 @@ def parse_settings(data: dict, base_dir: Path = Path(".")) -> Settings:
         workspaces=load_workspaces(workspaces_file, storage_roots),
         credentials_file=servers_file.parent / "credentials.yaml",
         storage_roots=storage_roots,
+        machine=parse_machine(data.get("machine"), os.environ.get("OMNIACLI_USER")),
         fixed=fixed,
     )
     settings.set_web_access(load_access(users_file))

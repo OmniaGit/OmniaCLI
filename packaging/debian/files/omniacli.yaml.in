@@ -7,6 +7,12 @@ auth:
     # interface (Users page), in /var/lib/omniacli/users.yaml
     admin: "@ADMIN_HASH@"
 
+# server: nobody opens a shell of OmniaCLI's own user here (no Shell, no Claude,
+# psql only where it runs as another user). development: nothing is restricted.
+# Without this line: development with OMNIACLI_USER in /etc/default/omniacli,
+# otherwise server.
+# machine: server
+
 backup_dir: /var/lib/omniacli/backups
 jobs_dir: /var/lib/omniacli/jobs
 servers_file: /var/lib/omniacli/servers.yaml

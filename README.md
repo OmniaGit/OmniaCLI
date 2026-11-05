@@ -183,7 +183,19 @@ prepared before Test & activate. The job's log opens in a new tab.
   folders and databases for production and test, the backup folder. Saving
   a live server runs the same checks: if they fail nothing is saved and it
   stays live. `omniacli check-config` runs them from the command line.
-- **Shell** (developers and admins, a button on each instance): a page with
+- **Kind of machine**: `machine: server` or `machine: development` in the
+  main configuration, which root writes and the service only reads. Without
+  that line a service with `OMNIACLI_USER` is a development machine, any other
+  a server; upgrades do not add the line, so an installation upgraded from an
+  earlier version without `OMNIACLI_USER` becomes a server and loses Shell and
+  Claude until root adds `machine: development`. On a server nobody, admins
+  included, opens a shell of OmniaCLI's own user: no **Shell**, no **Claude**,
+  and **psql** only where it runs as another user (`run_as`, Docker). The page
+  and the WebSocket refuse them too, also through a link: the machine the
+  shell would run on decides. The kind is on the Options page and in
+  OmniaCLI's log at every start. On a development machine nothing changes.
+- **Shell** (developers and admins, a button on each instance, development
+  machines only): a page with
   a terminal (xterm.js) running a login shell of the user OmniaCLI runs as
   (`omniacli`, or the one of `OMNIACLI_USER`; bash when its own shell is
   `nologin`), in the instance's first repository. It runs on a
@@ -229,12 +241,14 @@ prepared before Test & activate. The job's log opens in a new tab.
   makes Odoo set `web.base.url` to the tunnel's address, unless the
   instance has the system parameter `web.base.url.freeze`. Both instances
   need a version with tunnels.
-- **Claude** (same roles, a button on an instance with a **Claude folder**
-  in the server form): the same shell, opened in that folder, that runs
+- **Claude** (same roles, development machines only, a button on an instance
+  with a **Claude folder** in the server form): the same shell, opened in that folder, that runs
   `claude` first (found by the login shell's `PATH`; Claude Code's installer
   puts it in `~/.local/bin`) and stays open when it ends. Claude Code must be
   installed and logged in for the user OmniaCLI runs as.
-- **psql** (same roles, Odoo instances): the same page running `psql` on
+- **psql** (same roles, Odoo instances; on a server only with `run_as`, and
+  on Docker instances, where it runs as `postgres` in the database's
+  container): the same page running `psql` on
   the instance's database, connected as Odoo connects (`db_host`,
   `db_port`, `db_user`, `db_password` of its Odoo config, given in the
   `PG*` environment, not on the command line); it ends when psql ends.
@@ -409,7 +423,9 @@ configs and logs, its files in `/var/lib/omniacli` (given to that user, and
 kept so by upgrades). The sudoers lines name that user
 (`devuser ALL=(root) NOPASSWD: ...`). Not root. Remove the line and run
 `dpkg-reconfigure` again to go back to `omniacli`. On a server keep
-`omniacli`, with `run_as` for the programs of an Odoo venv.
+`omniacli`, with `run_as` for the programs of an Odoo venv: `OMNIACLI_USER`
+makes the machine a development one, with no restriction on the shells, unless
+the main configuration says `machine: server`.
 
 ### Build and test the package
 
