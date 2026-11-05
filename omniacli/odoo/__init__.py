@@ -226,6 +226,15 @@ class OdooPlugin(ServicePlugin):
     def db_shell_as_service(self, instance: Instance) -> bool:
         return instance.run_as is None
 
+    def own_user_code(self, instance: Instance) -> str | None:
+        if instance.restart.type == "process":
+            return ("Odoo itself runs as OmniaCLI's user, so a module's code reaches OmniaCLI's files, "
+                    "whatever the shells: use a service with Run as")
+        if instance.run_as is None:
+            return ("without Run as the module updates run as OmniaCLI's user, so a module's code reaches "
+                    "OmniaCLI's files, whatever the shells: set Run as")
+        return None
+
     def script_runner(self, instance: Instance) -> tuple[Path, str | None, dict]:
         # the venv's python, which imports odoo as click-odoo does
         return instance.options.venv_bin / "python", instance.run_as, ops.odoo_env(instance)

@@ -220,7 +220,7 @@ async def test_config_clone_rename_delete(client, env):
     # active through the checks (here made to pass)
     import omniacli.checks as checks
 
-    async def all_ok(server, backup_dir):
+    async def all_ok(server, backup_dir, machine="server"):
         return [checks.Check("server", "fake", True, "ok")]
     original_check, checks.check_server = checks.check_server, all_ok
     try:

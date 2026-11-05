@@ -3,6 +3,7 @@
 """The kind of machine: on a server nobody opens a shell of OmniaCLI's own
 user, whatever the role, through the page, the WebSocket or a link."""
 
+import getpass
 import logging
 
 import pytest
@@ -10,7 +11,8 @@ import yaml
 from starlette.testclient import TestClient
 
 from omniacli.app import create_app
-from omniacli.config import ConfigError, parse_machine, parse_settings
+from omniacli.checks import WARNING, check_server, writable_by
+from omniacli.config import ConfigError, Restart, parse_machine, parse_settings
 
 from .conftest import LINK_TOKEN, USER_HASH
 from .test_shell import browser, closed, customer_server  # noqa: F401 (customer_server: a fixture)
@@ -148,3 +150,66 @@ def test_the_kind_is_shown_and_logged(env, kind, caplog):
             page = c.get("/options", headers=browser(app, "admin")).text
     assert f'id="machine">{kind}<' in page
     assert f"this machine is a {kind}" in caplog.text
+
+
+def test_writable_by(tmp_path):
+    me = getpass.getuser()
+    folder = tmp_path / "repo"
+    folder.mkdir()
+    folder.chmod(0o755)
+    assert writable_by(folder, me)
+    folder.chmod(0o555)
+    assert not writable_by(folder, me)
+    folder.chmod(0o755)
+    assert not writable_by(tmp_path / "nope", me)
+    assert not writable_by(folder, "no-such-user-here")
+    assert writable_by(folder, "root")
+
+
+async def _names(settings, machine):
+    report = await check_server(settings.servers["srv"], settings.backup_dir, machine)
+    return {(c.target, c.name): c for c in report}
+
+
+async def test_a_server_warns_of_what_still_reaches_its_user(env, tmp_path):
+    settings = env["settings"]
+    test = settings.servers["srv"].instances["test"]
+    test.claude_dir = tmp_path
+    found = await _names(settings, "server")
+    assert "set Run as" in found["test", "Isolation"].detail
+    assert "no effect" in found["test", "Claude folder"].detail
+    assert all(not c.ok and c.level == WARNING for k, c in found.items() if k[1] in ("Isolation", "Claude folder"))
+    # nothing of this on a development machine
+    found = await _names(settings, "development")
+    assert not [k for k in found if k[1].startswith("Isolation") or k[1] == "Claude folder"]
+
+
+async def test_a_repository_the_run_as_user_may_write(env):
+    settings = env["settings"]
+    test = settings.servers["srv"].instances["test"]
+    test.run_as = getpass.getuser()
+    repo = test.repositories[0]
+    found = await _names(settings, "server")
+    warning = found["test", f"Isolation of {repo.name}"]
+    assert not warning.ok and warning.level == WARNING
+    assert f"chown -R {getpass.getuser()}:{test.run_as} {repo.path}" in warning.detail
+    assert "/hooks" in warning.detail and "/config" in warning.detail
+    assert ("test", "Isolation") not in found  # Run as is set
+    # closed as the warning says: nothing left to say
+    for path in [repo.path, repo.path / ".git", repo.path / ".git" / "hooks", repo.path / ".git" / "config"]:
+        path.chmod(path.stat().st_mode & ~0o222)
+    try:
+        found = await _names(settings, "server")
+        assert ("test", f"Isolation of {repo.name}") not in found
+    finally:
+        for path in [repo.path, repo.path / ".git", repo.path / ".git" / "hooks", repo.path / ".git" / "config"]:
+            path.chmod(path.stat().st_mode | 0o200)
+
+
+def test_a_process_instance_says_so(env):
+    test = env["settings"].servers["srv"].instances["test"]
+    test.restart = Restart("process", "")
+    assert "Odoo itself runs as" in test.plugin.own_user_code(test)
+    test.restart = Restart("systemd", "odoo")
+    test.run_as = "odoo"
+    assert test.plugin.own_user_code(test) is None

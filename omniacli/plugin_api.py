@@ -401,6 +401,12 @@ class ServicePlugin(ABC):
         only when it runs as somebody else."""
         return True
 
+    def own_user_code(self, instance: Instance) -> str | None:
+        """On a server, what of the instance's code runs as OmniaCLI's own
+        user and how to avoid it (a warning of the checks). None: nothing
+        known."""
+        return None
+
     def script_runner(self, instance: Instance) -> tuple[Path, str | None, dict]:
         """How a scheduled action runs a Python script on the instance: the
         python, the system user (None: OmniaCLI's own, no sudo) and the

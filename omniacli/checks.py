@@ -11,13 +11,15 @@ from __future__ import annotations
 
 import asyncio
 import os
+import pwd
 import shutil
+import stat
 import tempfile
 from pathlib import Path
 
 from . import ops, packages
 from . import composehelper
-from .config import Instance, Server
+from .config import MACHINE_SERVER, Instance, Server
 from .jobs import JobFailed
 from .plugin_api import ERROR, WARNING, Check, system_user
 
@@ -26,12 +28,54 @@ GIT_TIMEOUT = 30
 __all__ = ["ERROR", "WARNING", "Check", "passed", "check_server"]
 
 
+def writable_by(path: Path, user: str) -> bool:
+    """Whether user may write path, by its owner, group and mode (ACLs are not
+    read)."""
+    try:
+        entry = pwd.getpwnam(user)
+        info = os.stat(path)
+        if entry.pw_uid == 0:
+            return True
+        if info.st_uid == entry.pw_uid:
+            return bool(info.st_mode & stat.S_IWUSR)
+        if info.st_gid in os.getgrouplist(user, entry.pw_gid):
+            return bool(info.st_mode & stat.S_IWGRP)
+        return bool(info.st_mode & stat.S_IWOTH)
+    except (KeyError, OSError):
+        return False
+
+
+async def _isolation_checks(instance: Instance, add) -> None:
+    """On a server: what still reaches OmniaCLI's own user though its shells
+    are closed. Warnings: the instance works all the same."""
+    code = instance.plugin.own_user_code(instance)
+    if code:
+        add("Isolation", False, code, WARNING)
+    if instance.claude_dir is not None:
+        add("Claude folder", False, "no effect: a server opens no Claude as OmniaCLI's user", WARNING)
+    if instance.run_as is None:
+        return
+    for repo in instance.repositories:
+        status, git_dir = await ops.capture(["git", "rev-parse", "--absolute-git-dir"], cwd=repo.path)
+        if status:
+            continue  # the Repository check says why
+        git_dir = Path(git_dir.strip())
+        open_paths = [p for p in (repo.path, git_dir, git_dir / "hooks", git_dir / "config")
+                      if writable_by(p, instance.run_as)]
+        if open_paths:
+            me = system_user()
+            add(f"Isolation of {repo.name}", False,
+                f"{instance.run_as} may write {', '.join(map(str, open_paths))}: a hook or a git option it puts "
+                f"there runs as {me} at the next pull. As root: chown -R {me}:{instance.run_as} {repo.path}; "
+                f"chmod -R go-w {repo.path}", WARNING)
+
+
 def passed(checks: list[Check]) -> bool:
     """True when no check of level error failed (warnings do not block)."""
     return all(c.ok or c.level == WARNING for c in checks)
 
 
-async def _instance_checks(instance: Instance) -> list[Check]:
+async def _instance_checks(instance: Instance, machine: str = MACHINE_SERVER) -> list[Check]:
     """The plugin's checks of the instance, then the core's: the log, the
     repositories, the service and the right to restart it."""
     target = instance.role
@@ -43,6 +87,9 @@ async def _instance_checks(instance: Instance) -> list[Check]:
 
     def add(name, ok, detail, level=ERROR):
         checks.append(Check(target, name, ok, detail, level))
+
+    if machine == MACHINE_SERVER:
+        await _isolation_checks(instance, add)
 
     label = instance.plugin.label
     config = instance.plugin.process_config(instance)
@@ -223,7 +270,7 @@ async def _package_checks(instance: Instance, add) -> None:
         + packages.sudoers_line(package, system_user()))
 
 
-async def check_server(server: Server, backup_dir: Path) -> list[Check]:
+async def check_server(server: Server, backup_dir: Path, machine: str = MACHINE_SERVER) -> list[Check]:
     if server.missing_plugin:
         return [Check("server", "Plugin", False, server.error or f"no plugin {server.type}")]
     if server.error:
@@ -244,7 +291,7 @@ async def check_server(server: Server, backup_dir: Path) -> list[Check]:
         checks.append(Check("server", "Backup folder", True, f"{backup_dir} writable"))
     except OSError as exc:
         checks.append(Check("server", "Backup folder", False, f"{backup_dir}: {exc}"))
-    results = await asyncio.gather(*(_instance_checks(i) for i in server.instances.values()))
+    results = await asyncio.gather(*(_instance_checks(i, machine) for i in server.instances.values()))
     for result in results:
         checks.extend(result)
     return checks

@@ -1575,7 +1575,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             was_active = original is not None and settings.servers[original].active
             report = None
             if payload.get("activate"):
-                report = await checks.check_server(parsed, settings.backup_dir)
+                report = await checks.check_server(parsed, settings.backup_dir, settings.machine)
                 if checks.passed(report):
                     parsed.status = "active"
                 elif was_active:
@@ -1619,7 +1619,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         for inst in (parsed.production, parsed.test):
             for repo in (inst.repositories if inst is not None else []):
                 repo.git_options = options
-        report = await checks.check_server(parsed, settings.backup_dir)
+        report = await checks.check_server(parsed, settings.backup_dir, settings.machine)
         return {"ok": checks.passed(report), "checks": [c.to_dict() for c in report]}
 
     @app.post("/api/servers/branches", dependencies=[Depends(admin)])
@@ -1732,7 +1732,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             srv = settings.servers.get(name)
             if srv is None:
                 return refuse(f"No server {name}", status.HTTP_404_NOT_FOUND)
-            report = await checks.check_server(srv, settings.backup_dir)
+            report = await checks.check_server(srv, settings.backup_dir, settings.machine)
             ok = checks.passed(report)
             if ok and not srv.active:
                 srv.status = "active"

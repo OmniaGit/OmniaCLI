@@ -66,7 +66,7 @@ def _check_config(args) -> int:
     settings = load_settings(args.config)
     failed = False
     for server in settings.servers.values():
-        report = asyncio.run(checks.check_server(server, settings.backup_dir))
+        report = asyncio.run(checks.check_server(server, settings.backup_dir, settings.machine))
         ok = checks.passed(report)
         print(f"{server.name} ({server.status}): {'OK' if ok else 'PROBLEMS'}")
         for check in report:

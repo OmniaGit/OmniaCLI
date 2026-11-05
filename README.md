@@ -194,6 +194,13 @@ prepared before Test & activate. The job's log opens in a new tab.
   and the WebSocket refuse them too, also through a link: the machine the
   shell would run on decides. The kind is on the Options page and in
   OmniaCLI's log at every start. On a development machine nothing changes.
+  Closing the shells does not close what runs as that user by itself, so on a
+  server the checks warn (**Isolation**): Odoo with restart type `process` or
+  a module update without `run_as` run a module's code as that user, and a
+  repository the `run_as` user may write lets it plant a hook or a git option
+  that git runs as that user at the next pull. The warning prints the `chown`
+  and `chmod`. It reads owner, group and mode of the repository, its git folder,
+  `hooks` and `config`: not ACLs, not submodules.
 - **Shell** (developers and admins, a button on each instance, development
   machines only): a page with
   a terminal (xterm.js) running a login shell of the user OmniaCLI runs as
