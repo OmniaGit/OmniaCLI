@@ -26,6 +26,7 @@ from croniter import croniter
 from . import linkcopy, ops
 from .config import ROLES, SERVER_NAME, ConfigError, LinkSource, parse_link_source
 from .jobs import FINISHED, Job, JobFailed, JobManager
+from .plugin_api import restore_fetched
 from .links import link_headers
 
 _logger = logging.getLogger(__name__)
@@ -431,7 +432,7 @@ class Scheduler:
         dest = await linkcopy.fetch_backup(job, self.link_clients.client(link), link, headers, step.source,
                                            "", folder, progress, step.backup_options)
         progress["step"] = "restore"
-        await instance.plugin.restore(job, instance, dest, step.restore_options)
+        await restore_fetched(job, instance, dest, step.restore_options)
 
     async def _copy_puller(self, job: Job, step: CopyStep, instance, user: str) -> None:
         """The copy from a puller connection: a backup there, through the relay."""
@@ -447,4 +448,4 @@ class Scheduler:
                                              "done": 0, "total": 0}
         dest = await self.consumers.fetch_backup(job, connection.name, folder, progress, step.backup_options, user)
         progress["step"] = "restore"
-        await instance.plugin.restore(job, instance, dest, step.restore_options)
+        await restore_fetched(job, instance, dest, step.restore_options)

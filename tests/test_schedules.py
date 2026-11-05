@@ -176,3 +176,16 @@ async def test_the_loop_fires_at_matching_minutes(here):
         await __import__("asyncio").sleep(0.02)
     await scheduler.stop()
     assert list(scheduler.history.data) == ["every"] and scheduler.history.data["every"][0]["trigger"] == "cron"
+
+
+async def test_a_scheduled_copy_refuses_what_is_no_backup(here, env):
+    (env["settings"].instance("srv", "test").options.venv_bin / "backup-content").write_bytes(b"not a zip")
+    resp = await save(here, "nightly", a_schedule(
+        pull=False, script=None, enabled=False,
+        copy={"link": "cliente", "server": "srv", "role": "production", "keep_backups": 2,
+              "restore_options": {"neutralize": True}}))
+    assert resp.status_code == 200, resp.text
+    resp = await here.post("/api/schedules/nightly/run", headers=as_user("admin", post=True))
+    job = await wait(here, resp.json()["job"])
+    assert job["status"] == "failed" and "nothing restored, srv/test not touched" in job["error"]
+    assert not [c for c in calls(env) if c.startswith(("stop", "restore", "start"))]

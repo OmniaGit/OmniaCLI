@@ -86,7 +86,7 @@ from .config import (
     server_to_dict,
 )
 from .jobs import JobFailed, JobManager, filter_jobs
-from .plugin_api import ENTRY_POINT_GROUP, PLUGIN_API, ActionRefused, Host
+from .plugin_api import ENTRY_POINT_GROUP, PLUGIN_API, ActionRefused, Host, restore_fetched
 from .pullcrypto import new_key
 from .links import LIST_TIMEOUT, LinkClients, describe_error, link_headers, proxy_websocket
 from .logtail import read_since
@@ -1113,7 +1113,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
                 dest = await consumers.fetch_backup(job, connection.name, backup_folder(instance), progress,
                                                     backup_options, user.name)
                 progress["step"] = "restore"
-                await instance.plugin.restore(job, instance, dest, options)
+                await restore_fetched(job, instance, dest, options)
 
             job = jobs.submit(f"Copy from {src.label} to {instance.key} ({what})",
                               [instance.key], f"manual: {user}", from_puller)
@@ -1132,7 +1132,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             dest = await linkcopy.fetch_backup(job, link_clients.client(link), link, headers, src,
                                                backup, backup_folder(instance), progress, backup_options)
             progress["step"] = "restore"
-            await instance.plugin.restore(job, instance, dest, options)
+            await restore_fetched(job, instance, dest, options)
 
         job = jobs.submit(f"Copy from {src.label} to {instance.key} ({what})",
                           [instance.key], f"manual: {user}", action)

@@ -15,7 +15,7 @@ from omniacli import linkcopy
 from omniacli.app import create_app
 from omniacli.config import ConfigError, parse_servers, parse_settings, server_to_dict
 
-from .conftest import LINK_TOKEN, BasicAsSession, USER_HASH
+from .conftest import LINK_TOKEN, BasicAsSession, USER_HASH, fake_backups_are
 from .test_copy_production import odoo_version
 from .test_links import HOST, as_user
 
@@ -27,6 +27,7 @@ async def here(env, tmp_path, monkeypatch):
     """This instance: the server srv of env again, its test copied from
     cliente › srv/production."""
     monkeypatch.setattr(linkcopy, "POLL_EVERY", 0.02)
+    env["backup_content"] = fake_backups_are(env["settings"].instance("srv", "test").options.venv_bin)
     conf = tmp_path / "here"
     conf.mkdir()
     servers = yaml.safe_load(env["settings"].servers_file.read_text())
@@ -89,7 +90,7 @@ async def test_a_new_backup_there_restored_here(here, env):
     assert done[0].startswith("backup -c ") and " DB_production " in done[0]
     local = here.settings.backup_dir / "srv" / "test"
     [zip_path] = list(local.iterdir())
-    assert zip_path.name.startswith("cliente_DB_production_") and zip_path.read_text() == "dump\n"
+    assert zip_path.name.startswith("cliente_DB_production_") and zip_path.read_bytes() == env["backup_content"]
     assert done[1] == "stop odoo-test"
     assert done[2] == f"restore -c {env['tmp']}/odoo.conf --copy --force --neutralize DB_test {zip_path}"
     assert done[3].startswith("update -c ") and done[3].endswith("-d DB_test")
@@ -97,12 +98,22 @@ async def test_a_new_backup_there_restored_here(here, env):
     # the steps the job page draws, with the bytes of the transfer
     progress = job["result"]["progress"]
     assert [s["id"] for s in progress["steps"]] == ["backup", "download", "restore"]
-    assert progress["step"] == "restore" and progress["done"] == progress["total"] == 5
+    assert progress["step"] == "restore" and progress["done"] == progress["total"] == len(env["backup_content"])
     assert any("cliente: " in line and "--- backup" in line for line in job["lines"])
     # there, the backup was the link's, on behalf of dev
     there = (await here.get("/links/cliente/api/jobs", headers=as_user("admin"))).json()["jobs"]
     assert any(j["title"].startswith("Backup srv/production") and "omnia" in j["source"] and "dev" in j["source"]
                for j in there)
+
+
+@pytest.mark.parametrize("content", [b"<html>a proxy's error page</html>", b""])
+async def test_what_is_no_backup_is_refused_with_the_instance_intact(here, env, content):
+    """A restore drops the database first: nothing of it may start."""
+    (env["settings"].instance("srv", "test").options.venv_bin / "backup-content").write_bytes(content)
+    resp = await here.post(URL, headers=as_user("dev", post=True), json={"neutralize": True})
+    job = await wait(here, resp.json()["job"])
+    assert job["status"] == "failed" and "nothing restored, srv/test not touched" in job["error"]
+    assert not [c for c in calls(env) if c.startswith(("stop", "restore", "update", "start"))]
 
 
 async def test_passwords_set_to_admin(here, env):

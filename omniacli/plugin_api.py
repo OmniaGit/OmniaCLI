@@ -345,8 +345,9 @@ class ServicePlugin(ABC):
         return []
 
     def backup_problem(self, backup_zip: Path) -> str | None:
-        """Why this file, chosen by a person, cannot be restored into an
-        instance of this type: asked before anything is touched. None: it fits."""
+        """Why this file, chosen by a person or come from another machine,
+        cannot be restored into an instance of this type: asked before
+        anything is touched, a restore drops the database first. None: it fits."""
         return None
 
     async def before_start(self, instance: Instance) -> None:
@@ -474,6 +475,16 @@ class ServicePlugin(ABC):
 
 
 # the methods a plugin must write as async def
+async def restore_fetched(job: Job, instance: Instance, backup_zip: Path, options: dict) -> None:
+    """The restore of a backup downloaded from another machine: what came may
+    not be a backup, and is refused with the instance and its database intact.
+    The backups made here are not checked again."""
+    problem = instance.plugin.backup_problem(backup_zip)
+    if problem:
+        raise JobFailed(f"{problem}: nothing restored, {instance.key} not touched")
+    await instance.plugin.restore(job, instance, backup_zip, options)
+
+
 ASYNC_METHODS = ("checks", "after_pull", "backup", "restore", "before_start", "dev_setup", "discover")
 _ID = re.compile(r"[a-z][a-z0-9_-]{0,31}")
 

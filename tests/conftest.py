@@ -1,7 +1,9 @@
 # Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C
 # SPDX-License-Identifier: AGPL-3.0-or-later
+import io
 import os
 import subprocess
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -91,6 +93,21 @@ def fake_venv(tmp_path) -> Path:
     for script in bin_dir.iterdir():
         script.chmod(0o755)
     return bin_dir
+
+
+def fake_backups_are(venv_bin: Path, content: bytes | None = None) -> bytes:
+    """The fake click-odoo-backupdb writes content: by default a zip Odoo could
+    read, as a restore of a backup from another machine asks. What it writes."""
+    if content is None:
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as zf:
+            zf.writestr("dump.sql", "-- dump")
+        content = buffer.getvalue()
+    made = venv_bin / "backup-content"
+    made.write_bytes(content)
+    script = venv_bin / "click-odoo-backupdb"
+    script.write_text(script.read_text().replace('echo dump > "$last"', f'cp {made} "$last"'))
+    return content
 
 
 @pytest.fixture
