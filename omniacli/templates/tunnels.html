@@ -15,13 +15,24 @@ Anyone who reaches the port reaches the instance's own login: the tunnel adds no
 The browser keeps a site's cookies by address, not by port: two tunnels open at once share Odoo's login.</p>
 <div id="error" class="banner" hidden></div>
 <div class="panel">
-  <form id="open" class="actions" style="margin: 0">
-    <select id="server" aria-label="Server of a link" required>
-      {% for srv in servers %}<option value="{{ srv.link }}" data-server="{{ srv.name }}" data-roles="{{ srv.roles | join(' ') }}">{{ srv.label }}</option>{% endfor %}
-    </select>
-    <select id="role" aria-label="Instance"></select>
-    <button type="submit" {% if not servers %}disabled{% endif %}>Open tunnel</button>
-    {% if not servers %}<span class="muted">No server of a link answers{% for e in errors %} · {{ e.link }}: {{ e.error }}{% endfor %}.</span>{% endif %}
+  <form id="open" class="form-grid">
+    <label for="server">Linked server</label>
+    <div>
+      <select id="server" required>
+        {% for srv in servers %}<option value="{{ srv.link }}" data-server="{{ srv.name }}" data-roles="{{ srv.roles | join(' ') }}">{{ srv.label }}</option>{% endfor %}
+      </select>
+      <span class="muted">The link to the other OmniaCLI, then the server there that holds the instance.</span>
+    </div>
+    <label for="role">Instance</label>
+    <div>
+      <select id="role"></select>
+      <span class="muted">Which instance of that server the tunnel reaches.</span>
+    </div>
+    <span></span>
+    <div>
+      <button type="submit" {% if not servers %}disabled{% endif %}>Open tunnel</button>
+      {% if not servers %}<span class="muted">No server of a link answers{% for e in errors %} · {{ e.link }}: {{ e.error }}{% endfor %}.</span>{% endif %}
+    </div>
   </form>
 </div>
 <div class="panel">
