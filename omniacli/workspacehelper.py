@@ -85,6 +85,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import os
+import pwd
 import re
 import shutil
 import socket
@@ -107,6 +108,13 @@ from .pluginstore import SYSTEM_CONFIG
 TEMPLATES = Path(os.environ.get("OMNIACLI_TEMPLATES", "/usr/share/omniacli/templates"))
 SYSTEMD = Path("/etc/systemd/system")
 ROLES = ("production", "test")
+# Odoo's role in a new database cluster: no superuser, its password from the
+# environment of the database's service, never in this file
+DB_ROLE_SCRIPT = """# written by omniacli workspace-helper
+psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname postgres -v password="$ODOO_DB_PASSWORD" <<'SQL'
+CREATE ROLE odoo LOGIN CREATEDB PASSWORD :'password';
+SQL
+"""
 # what an instance was made from, root's: conf writes its odoo.conf again from it
 INSTANCE_FILE = "instance.json"
 # what a role was given (repositories, parameters, debug): conf's own record
@@ -272,6 +280,16 @@ def limits(name: str, cpus: str, memory_gb: str) -> dict:
     return {"workspace": name, "slice": unit, "cpus": cores, "memory_gb": memory}
 
 
+def _close_mount(mount: Path) -> None:
+    """The disk's top: nobody but root and the group of the user OmniaCLI runs
+    as gets in, so no user of this machine reads a configuration or a
+    filestore. Run by hand as root there is no such user: left as it is."""
+    _, uid, _ = caller()
+    if uid != 0:
+        os.chown(mount, 0, pwd.getpwuid(uid).pw_gid)
+        os.chmod(mount, 0o750)
+
+
 def _harden_mount(mount: Path) -> None:
     """A disk mounted before MOUNT_OPTIONS: at once, without stopping its
     containers (the unit, rewritten, holds them for the next mounts)."""
@@ -323,8 +341,7 @@ def disk(name: str, storage: str, size_gb: str) -> dict:
         loop = loop_of(image)
         _run("losetup", "--set-capacity", loop)
         _run("resize2fs", loop)
-    os.chown(mount, 0, 0)
-    os.chmod(mount, 0o755)
+    _close_mount(mount)
     return {"workspace": name, "image": str(image), "mount": str(mount), "unit": unit, "size_gb": int(size_gb)}
 
 
@@ -585,9 +602,13 @@ def create(name: str, storage: str, instance: str, template_name: str, values_js
             http_port, ws_port = ports[2 * index], ports[2 * index + 1]
             env = {**values, "PROJECT": f"{name}-{instance}-{role}", "HTTP_PORT": str(http_port),
                    "WEBSOCKET_PORT": str(ws_port), "DB_PASSWORD": stacktemplates.new_password(),
+                   "DB_SUPER_PASSWORD": stacktemplates.new_password(),
                    "SUBNET": subnets[index], "SLICE": slice_name(name)}
             _write(project / "compose.yaml", template.compose)
             _write(project / ".env", stacktemplates.env_text(env), mode=0o600)
+            # what postgres:17 runs at its first start, for a template that mounts it
+            (project / "dbinit").mkdir(mode=0o755)
+            _write(project / "dbinit" / "odoo-role.sh", DB_ROLE_SCRIPT)
             (project / "config").mkdir(mode=0o755)
             _write(project / "config" / "odoo.conf",
                    stacktemplates.conf_text(template, database, stacktemplates.new_password(), []),

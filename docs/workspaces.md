@@ -216,13 +216,24 @@ odoo.conf.in      # the Odoo configuration, with placeholders OmniaCLI fills
   `security_opt: [no-new-privileges:true]`, `cap_drop: [ALL]` and a
   `pids_limit` up to 4096; `cap_add` may give back only `CHOWN`, `SETUID`,
   `SETGID`, `DAC_OVERRIDE` and `FOWNER`, for an entrypoint that starts as root
-  (`postgres:17`).
+  (`postgres:17`). Every service must have `read_only: true`, and a `tmpfs`
+  only with its size, so nothing is written outside the workspace's disk but
+  into small memory: Odoo's `/tmp`, where dumps and loads are staged, is
+  `data/tmp` on the disk, so a backup needs the free space of its zip there.
+- The database's superuser is `postgres`, with a password of its own
+  (`DB_SUPER_PASSWORD`, in the database's service only); Odoo connects as
+  `odoo`, `LOGIN CREATEDB`, so a module cannot run a command in the database's
+  container (`COPY ... PROGRAM`). An instance made before keeps its superuser:
+  PostgreSQL refuses to take it from a cluster's first user.
 - Container logs are limited (`logging: {driver: json-file, options:
   {max-size: "50m", max-file: "5"}}`, *not verified*).
 - The DockerOdooPLM image runs Odoo as 100:101 and reads
   `/etc/odoo/odoo.conf` as the official image does (*verified* in the root
   test of phase 2). The configuration is root's, `0644`; the `.env`, with
-  the database password, `0600`.
+  the database passwords, `0600`. The top of the disk is `0750`, root's and
+  the group of the user OmniaCLI runs as, so no other user of the machine
+  reads a configuration or a filestore; a disk made before gets it when an
+  instance is next created on it.
 
 ### Editable Odoo parameters
 

@@ -64,6 +64,11 @@ def test_the_template_of_the_repository():
     (("    pids_limit: 1024\n", "    pids_limit: 100000\n"), "pids_limit: a number"),
     (("      - FOWNER\n", "      - FOWNER\n      - MKNOD\n"), "cap_add: only"),
     (("      - FOWNER\n", "      - FOWNER\n      - SYS_ADMIN\n"), "cap_add: only"),
+    (("    image: ${IMAGE}\n    restart: unless-stopped\n    read_only: true\n",
+      "    image: ${IMAGE}\n    restart: unless-stopped\n"), "read_only: must be true"),
+    (("/tmp:size=64m", "/tmp"), "tmpfs: only"),
+    (("USER: odoo\n      PASSWORD: ${DB_PASSWORD}", "USER: odoo\n      PASSWORD: ${DB_SUPER_PASSWORD}"),
+     "superuser password is not for Odoo"),
 ])
 def test_compose_rules(tmp_path, change, message):
     text = (REPO_TEMPLATES / "odooplm-20" / "compose.yaml").read_text()
@@ -201,6 +206,12 @@ def test_create_and_remove(root, monkeypatch):
     # root's, readable by everyone: the image's user is no user of this machine
     assert oct((project / "config" / "odoo.conf").stat().st_mode & 0o777) == "0o644"
     assert (project / "data" / "filestore").is_dir() and (project / "data" / "pgdata").is_dir()
+    assert (project / "data" / "tmp").is_dir() and (project / "data" / "extra-addons").is_dir()
+    # Odoo's role: its password only in the environment, the superuser's apart from it
+    assert "CREATE ROLE odoo LOGIN CREATEDB PASSWORD :'password'" in (project / "dbinit" / "odoo-role.sh").read_text()
+    assert env.count("DB_SUPER_PASSWORD=") == 1
+    passwords = dict(line.split("=", 1) for line in env.splitlines())
+    assert passwords["DB_SUPER_PASSWORD"] != passwords["DB_PASSWORD"]
     # the customer's repositories: a folder per role; what the instance was made from
     assert (project / "addons").is_dir() and (storage / "acme" / "main" / "test" / "addons").is_dir()
     assert json.loads((storage / "acme" / "main" / "instance.json").read_text()) == {
@@ -396,3 +407,16 @@ def test_conf_sets_the_parameters(root):
             _conf(storage, "test", parameters=parameters)
     _conf(storage, "test", parameters={"workers": 12}, bounds={"workers": [0, 16]})
     assert "workers = 12\n" in (project / "config" / "odoo.conf").read_text()
+
+
+@pytest.mark.parametrize("uid, mode", [(1234, 0o750), (0, 0o755)])
+def test_the_disk_is_closed_to_other_users(root, monkeypatch, uid, mode):
+    """Only for the user OmniaCLI runs as: run by hand as root, nobody would get in."""
+    monkeypatch.setattr(workspacehelper, "caller", lambda: ("omniacli", uid, [uid]))
+    monkeypatch.setattr(workspacehelper.pwd, "getpwuid", lambda _: type("E", (), {"pw_gid": 4321}))
+    owners = []
+    monkeypatch.setattr(workspacehelper.os, "chown", lambda path, *ids: owners.append((str(path), ids)))
+    workspacehelper.disk("acme", str(root["storage"]), "2")
+    mount = root["storage"] / "acme"
+    assert mount.stat().st_mode & 0o777 == mode
+    assert ((str(mount), (0, 4321)) in owners) == (uid != 0)

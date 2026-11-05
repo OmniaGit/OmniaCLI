@@ -4,6 +4,7 @@
 driven through the root helper compose-helper."""
 import json
 import os
+from pathlib import Path
 import stat
 
 import pytest
@@ -437,7 +438,7 @@ def test_link_filestore(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(composehelper, "data_folder", lambda project, name: folders[project])
     owners = []
 
-    def as_owner(cmd, uid, gid):
+    def as_owner(cmd, uid, gid, extra_groups=()):
         # the script's text on the command line, not its path
         assert cmd[1:3] == ["-I", "-c"] and "def link(" in cmd[3]
         owners.append((cmd[4], uid, gid))
@@ -513,3 +514,14 @@ def test_update_scripts_keep_crons_off_and_the_exit_code():
                                                                       else "click-odoo-update")
         assert "SET active = false" in script and script.endswith("exit $code")
         assert " exec " not in script  # the update must not replace the shell: what follows would not run
+
+
+def test_closed_groups_open_only_the_closed_folders(monkeypatch):
+    modes = {"/": (0o755, 0), "/srv": (0o755, 0), "/srv/acme": (0o750, 142), "/srv/acme/main": (0o755, 0),
+             "/private": (0o700, 0)}
+    monkeypatch.setattr(composehelper.os, "lstat",
+                        lambda path: type("S", (), {"st_mode": modes[str(path)][0], "st_gid": modes[str(path)][1]}))
+    assert composehelper.closed_groups(Path("/srv/acme/main/production")) == (142,)
+    assert composehelper.closed_groups(Path("/srv/x")) == ()
+    # root's group never: it would open more than the way
+    assert composehelper.closed_groups(Path("/private/x")) == ()

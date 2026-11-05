@@ -872,11 +872,15 @@ list (`stacktemplates.check_compose`): the services' keys of a list (no
 slice (`cgroup_parent: ${SLICE}`), with `security_opt:
 [no-new-privileges:true]`, `cap_drop: [ALL]` and a `pids_limit` up to 4096
 (`cap_add` only `CHOWN`, `SETUID`, `SETGID`, `DAC_OVERRIDE`, `FOWNER`, for an
-entrypoint that starts as root), mounts of the instance's own folders
+entrypoint that starts as root), `read_only: true` (a `tmpfs` only with its
+size: Odoo's `/tmp` is on the workspace's disk, so a backup needs the free space
+of its zip there), mounts of the instance's own folders
 only (`./…` and `../…`, never out of it), the configuration and the
 customer's addons read only, logging `json-file` with `max-size` and
 `max-file`. The first template is `odooplm-20` (the DockerOdooPLM image of
-Odoo 20, PostgreSQL 17).
+Odoo 20, PostgreSQL 17). Its database's superuser is `postgres`, with a
+password Odoo does not know, and Odoo connects as `odoo`, without superuser;
+the top of the workspace's disk is `0750`, for root and OmniaCLI's group.
 
 The root helper, `omniacli workspace-helper disk|limits|create|remove|web|owncert|firewall|template-install|conf`
 (`workspacehelper.py`), takes names only (workspace, instance, template), a

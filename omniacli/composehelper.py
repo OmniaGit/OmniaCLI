@@ -405,9 +405,17 @@ def data_folder(project: Path, service_name: str) -> Path:
     raise HelperError(f"{project}: nothing is mounted on {ODOO_DATA} of {service_name}")
 
 
-def as_owner(cmd: list[str], uid: int, gid: int) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, env=ENV, cwd="/", user=uid, group=gid, extra_groups=[],
+def as_owner(cmd: list[str], uid: int, gid: int, extra_groups: tuple[int, ...] = ()) -> subprocess.CompletedProcess:
+    return subprocess.run(cmd, env=ENV, cwd="/", user=uid, group=gid, extra_groups=list(extra_groups),
                           capture_output=True, text=True)
+
+
+def closed_groups(path: Path) -> tuple[int, ...]:
+    """The groups that open the way to path where the others may not pass (a
+    workspace's disk): the image's user is no member, and only OmniaCLI's own
+    script runs with them."""
+    found = {st.st_gid for st in map(os.lstat, path.parents) if st.st_gid and not st.st_mode & stat.S_IXOTH}
+    return tuple(sorted(found))
 
 
 def link_filestore(project: Path, args: list[str], uid: int, groups: list[int]) -> int:
@@ -439,7 +447,8 @@ def link_filestore(project: Path, args: list[str], uid: int, groups: list[int]) 
     # the script's text, read here: the owner need not reach OmniaCLI's folder
     code = LINK_SCRIPT.read_text(encoding="utf-8")
     for mode in ("check", "merge"):
-        done = as_owner([sys.executable, "-I", "-c", code, mode, src, dst], store.st_uid, store.st_gid)
+        done = as_owner([sys.executable, "-I", "-c", code, mode, src, dst], store.st_uid, store.st_gid,
+                        closed_groups(source_data) + closed_groups(data))
         print(done.stdout.strip() or "", end="\n" if done.stdout.strip() else "")
         if done.returncode:
             print(done.stderr.strip(), file=sys.stderr)

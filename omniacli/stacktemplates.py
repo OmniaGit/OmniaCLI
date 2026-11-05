@@ -41,7 +41,7 @@ FILES = ("template.json", "compose.yaml", "odoo.conf.in")
 NAME = re.compile(r"[a-z0-9][a-z0-9.-]{0,62}")
 FIELD_NAME = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
 # the variables OmniaCLI gives every instance (in .env and odoo.conf)
-GENERATED = ("PROJECT", "HTTP_PORT", "WEBSOCKET_PORT", "DB_PASSWORD", "SUBNET", "SLICE")
+GENERATED = ("PROJECT", "HTTP_PORT", "WEBSOCKET_PORT", "DB_PASSWORD", "DB_SUPER_PASSWORD", "SUBNET", "SLICE")
 CONF_PLACEHOLDERS = ("ADDONS_PATH", "DB_NAME", "ADMIN_PASSWD")
 # a value of a field: one line, no quote that .env would read
 VALUE = re.compile(r"[^\n\r\"'`$\\]{0,200}")
@@ -52,13 +52,15 @@ TOP_KEYS = {"name", "services", "networks"}
 NETWORKS = {"default": {"ipam": {"config": [{"subnet": "${SUBNET}"}]}}}
 SERVICE_KEYS = {"image", "restart", "depends_on", "ports", "environment", "volumes", "healthcheck",
                 "logging", "command", "user", "working_dir", "labels", "stop_grace_period", "cgroup_parent",
-                "security_opt", "cap_drop", "cap_add", "pids_limit"}
+                "security_opt", "cap_drop", "cap_add", "pids_limit", "read_only", "tmpfs"}
 # every service without new privileges and capabilities, with a limit of
 # processes; what an image's entrypoint needs as root may be given back
 SECURITY_OPT = ["no-new-privileges:true"]
 CAP_DROP = ["ALL"]
 CAP_ADD = {"CHOWN", "SETUID", "SETGID", "DAC_OVERRIDE", "FOWNER"}
 PIDS_LIMIT = (1, 4096)
+# a tmpfs: always with its size, it is memory; the disk is for what is large
+TMPFS = re.compile(r"/[A-Za-z0-9._/-]+:size=\d{1,4}m")
 # every service in the workspace's systemd slice: its CPU and memory limits
 CGROUP_PARENT = "${SLICE}"
 # a port: on this machine only, its number from .env
@@ -289,6 +291,11 @@ def check_compose(template: Template) -> list[str]:
             found.append(f"{where}.security_opt: must be {SECURITY_OPT}")
         if svc.get("cap_drop") != CAP_DROP:
             found.append(f"{where}.cap_drop: must be {CAP_DROP}")
+        if svc.get("read_only") is not True:
+            found.append(f"{where}.read_only: must be true (what is written goes on the workspace's disk)")
+        tmpfs = svc.get("tmpfs") or []
+        if not isinstance(tmpfs, list) or not all(isinstance(t, str) and TMPFS.fullmatch(t) for t in tmpfs):
+            found.append(f"{where}.tmpfs: only <path>:size=<n>m")
         added = svc.get("cap_add") or []
         if not isinstance(added, list) or not set(map(str, added)) <= CAP_ADD:
             found.append(f"{where}.cap_add: only {', '.join(sorted(CAP_ADD))}")
@@ -314,6 +321,8 @@ def check_compose(template: Template) -> list[str]:
         if not (isinstance(logging, dict) and logging.get("driver") == "json-file"
                 and options.get("max-size") and options.get("max-file")):
             found.append(f"{where}.logging: json-file with max-size and max-file is required")
+    if "DB_SUPER_PASSWORD" in str((data["services"].get(template.odoo_service) or {}).get("environment")):
+        found.append(f"services.{template.odoo_service}: the database's superuser password is not for Odoo")
     if template.odoo_service not in data["services"] or template.db_service not in data["services"]:
         found.append(f"services {template.odoo_service} and {template.db_service} are required")
     for name in PLACEHOLDER.findall(template.conf):
