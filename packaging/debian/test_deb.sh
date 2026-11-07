@@ -411,6 +411,31 @@ curl -s -b /tmp/cookies-admin localhost:8090/options | grep -q 'id="machine">ser
 chown -R omniacli:omniacli /srv/odoo /srv/remote.git
 login admin "$PW"
 
+step "OMNIACLI_WORKSPACES: the default storage made root's, its sudoers lines, the room of its disk"
+WS_DEFAULT=/srv/omniacli/default_workspace
+WS_SUDOERS=/etc/sudoers.d/omniacli-workspaces
+[ ! -e "$WS_DEFAULT" ] || fail "$WS_DEFAULT made without OMNIACLI_WORKSPACES"
+echo OMNIACLI_WORKSPACES=1 >> /etc/default/omniacli
+dpkg-reconfigure omniacli > /tmp/reconf.log 2>&1 || { tail -20 /tmp/reconf.log; fail "dpkg-reconfigure with OMNIACLI_WORKSPACES=1"; }
+wait_up || fail "service not up with OMNIACLI_WORKSPACES=1"
+[ "$(stat -c '%U:%G %a' "$WS_DEFAULT")" = "root:root 755" ] || fail "$WS_DEFAULT is $(stat -c '%U:%G %a' "$WS_DEFAULT")"
+grep -qx "omniacli ALL=(root) NOPASSWD: /opt/omniacli/venv/bin/omniacli compose-helper $WS_DEFAULT/\* \*" "$WS_SUDOERS" \
+    || { cat "$WS_SUDOERS"; fail "no compose-helper line for $WS_DEFAULT"; }
+# the room of its disk, through the page's API: sudo, the root helper's space
+login admin "$PW"
+curl -s -b /tmp/cookies-admin localhost:8090/api/workspaces/space > /tmp/space.json
+/opt/omniacli/venv/bin/python -c 'import json, sys
+room = json.load(open("/tmp/space.json"))["roots"][sys.argv[1]][""]
+assert room["free"] > 0 and room["physical"] == room["free"] and room["promised"] == 0, room' "$WS_DEFAULT" \
+    || { cat /tmp/space.json; fail "the room of $WS_DEFAULT"; }
+curl -s -b /tmp/cookies-admin localhost:8090/workspaces | grep -q "<option>$WS_DEFAULT</option>" || fail "$WS_DEFAULT not offered"
+sed -i '/^OMNIACLI_WORKSPACES=/d' /etc/default/omniacli
+dpkg-reconfigure omniacli > /tmp/reconf.log 2>&1 || { tail -20 /tmp/reconf.log; fail "dpkg-reconfigure without OMNIACLI_WORKSPACES"; }
+wait_up || fail "service not up without OMNIACLI_WORKSPACES"
+[ ! -e "$WS_SUDOERS" ] || fail "$WS_SUDOERS left without OMNIACLI_WORKSPACES"
+[ -d "$WS_DEFAULT" ] || fail "$WS_DEFAULT removed: the workspaces' disks live there"
+login admin "$PW"
+
 step "reinstall keeps config, servers and password"
 HASH_BEFORE="$(sha256sum /etc/omniacli/omniacli.yaml)"
 dpkg -i /opt/omniacli-test/omniacli.deb > /tmp/reinstall.log 2>&1 || { tail -20 /tmp/reinstall.log; fail "reinstall"; }
@@ -432,6 +457,7 @@ apt-get purge -y -qq omniacli >/dev/null 2>&1 || fail "purge"
 [ ! -e /etc/omniacli ] || fail "/etc/omniacli left after purge"
 [ "$(ls -A /var/lib/omniacli)" = backups ] || fail "left after purge besides the backups: $(ls -A /var/lib/omniacli | tr '\n' ' ')"
 [ "$(cat "/var/lib/omniacli/backups/runas/test/$BACKUP")" = dump ] || fail "backup lost by purge"
+[ -d /srv/omniacli/default_workspace ] || fail "the default storage of the workspaces removed by purge"
 echo "ALL CHECKS PASSED"
 EOS
 

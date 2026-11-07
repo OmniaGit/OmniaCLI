@@ -51,6 +51,10 @@ of the main configuration). Of the two, the higher version is used; the instance
       {% else %}<input type="text" class="storage mono" placeholder="no workspaces.storage in the main configuration" disabled aria-label="Storage">{% endif %}
       {% for key in limits %}<label>{{ key }}</label>
       <input type="number" min="0" step="any" class="limit mono" data-limit="{{ key }}" placeholder="no limit" aria-label="{{ key }}">{% endfor %}
+      <label>Room on the real disk</label>
+      <div><span class="space muted">reading the room of the disks…</span><br>
+        <label><input type="checkbox" class="force-disk"> force: promise more than the disk has room for
+        (the disk must still fit in what is free now)</label></div>
       <label>Servers, one per line</label>
       <textarea class="servers mono" rows="3" aria-label="Servers"></textarea>
       <label>Users, one per line: <span class="mono">name role</span></label>
@@ -82,9 +86,33 @@ of the main configuration). Of the two, the higher version is used; the instance
     }
     return data;
   }
+  // the room of the disks (root helper): {roots: {root: {workspace or "": room}}}
+  const gb = (bytes) => (bytes / 1073741824).toFixed(1) + " GB";
+  const space = fetch("{{ prefix }}/api/workspaces/space").then(async (resp) => {
+    const data = await resp.json().catch(() => ({}));
+    return resp.ok ? data : {error: data.error || data.detail || ("Error " + resp.status)};
+  }).catch((e) => ({error: String(e)}));
+  async function showSpace(box, name) {
+    const out = box.querySelector(".space"), storage = box.querySelector(".storage");
+    const disk = box.querySelector('.limit[data-limit="disk_gb"]');
+    const data = await space;
+    out.className = "space muted";
+    if (data.error) { out.textContent = data.error; return; }
+    if (storage.disabled) { out.textContent = "no storage"; return; }
+    const r = ((data.roots || {})[storage.value] || {})[name];
+    if (!r) { out.textContent = storage.value + " is not there yet (the package makes it when the workspaces are allowed)"; return; }
+    let text = `Real disk ${gb(r.total)}, ${gb(r.free)} free. Workspaces' disks there: ${gb(r.promised)} promised, `
+      + `${gb(r.used)} used` + (r.own_used ? ` (${gb(r.own_used)} by this one)` : "") + `. This workspace: up to `
+      + `${gb(r.allowed)} without the room promised to the others, ${gb(r.physical)} forced.`;
+    const wanted = disk.value === "" ? 0 : Number(disk.value) * 1073741824;
+    if (wanted > r.physical) { text += " The disk asked does not fit."; out.className = "space error"; }
+    else if (wanted > r.allowed) { text += " The disk asked takes the others' room: force it."; out.className = "space error"; }
+    out.textContent = text;
+  }
   function addWorkspace(ws, isNew) {
     const box = template.content.firstElementChild.cloneNode(true);
     const field = (cls) => box.querySelector("." + cls);
+    const refresh = () => showSpace(box, isNew ? "" : ws.name);
     field("name").value = ws.name || "";
     field("name").disabled = !isNew;
     field("label").value = ws.label || "";
@@ -95,6 +123,9 @@ of the main configuration). Of the two, the higher version is used; the instance
     field("members").value = Object.entries(ws.members || {}).map(([n, r]) => `${n} ${r}`).join("\n");
     field("bounds").value = Object.entries(ws.parameter_bounds || {}).map(([n, [a, b]]) => `${n} ${a} ${b}`).join("\n");
     if (isNew) field("users-link").remove(); else field("users-link").href = "{{ prefix }}/workspaces/" + encodeURIComponent(ws.name);
+    field("storage").addEventListener("change", refresh);
+    box.querySelector('.limit[data-limit="disk_gb"]').addEventListener("input", refresh);
+    refresh();
     field("save").onclick = async () => {
       const members = {};
       for (const line of field("members").value.split("\n").map((l) => l.trim()).filter(Boolean)) {
@@ -111,6 +142,7 @@ of the main configuration). Of the two, the higher version is used; the instance
       const storage = field("storage").disabled ? "" : field("storage").value;
       const body = {name: field("name").value.trim(), new: isNew, label: field("label").value.trim(),
                     domain: field("domain").value.trim(), storage, limits, members, parameter_bounds,
+                    force_disk: field("force-disk").checked,
                     servers: field("servers").value.split("\n").map((l) => l.trim()).filter(Boolean)};
       if (await post("save", body)) location.reload();
     };

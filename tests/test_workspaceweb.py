@@ -240,7 +240,7 @@ async def test_workspace_page_sets_the_names(workspaces, client, env, monkeypatc
     monkeypatch.setattr(workspaceops, "publish", publish)
     settings.workspaces["acme"].servers = ["srv", "acme-main"]
     settings.servers["acme-main"] = settings.servers["srv"]
-    settings.workspaces["acme"].storage = "/srv/omniacli"
+    settings.workspaces["acme"].storage = "/srv/omniacli/default_workspace"
     url = "/api/workspaces/acme/web/"
     page = (await client.get("/workspaces/acme", headers=basic("mario"))).text
     assert 'id="save-names"' in page and "main.acme.example.com" in page

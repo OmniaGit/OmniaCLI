@@ -103,6 +103,91 @@ async def remove_instance(job: Job, ws: Workspace, instance: str) -> None:
     await _helper(job, "remove", ws.name, ws.storage, instance)
 
 
+class SpaceError(Exception):
+    """The root helper did not tell the room of the disks."""
+
+
+async def space() -> dict:
+    """The root helper's space: each storage root's real disk and the
+    workspaces' disks on it, in bytes."""
+    code, out = await capture(helper("space"), timeout=HELPER_TIMEOUT)
+    if code:
+        raise SpaceError(out or f"workspace-helper space failed ({code})")
+    try:
+        return json.loads(out.splitlines()[-1])
+    except (ValueError, IndexError):
+        raise SpaceError(f"workspace-helper space answered no JSON: {out}") from None
+
+
+GB = workspacehelper.GB
+
+
+def _limit_bytes(ws: Workspace) -> int:
+    return int(float(ws.limits.get("disk_gb") or 0) * GB)
+
+
+def _disks(found: dict, workspaces: dict[str, Workspace], device) -> dict[tuple[str, str], dict]:
+    """The workspaces' disks on one real disk, {(root, workspace): {promised,
+    used}}: a workspace's limit or its image, the larger (an image no
+    workspace names any more still grows up to its size)."""
+    roots = {r["root"]: r for r in found.get("roots", []) if not r.get("missing") and r.get("device") == device}
+    disks: dict[tuple[str, str], dict] = {}
+    for root, info in roots.items():
+        for name, image in info.get("images", {}).items():
+            disks[(root, name)] = {"promised": image["size"], "used": image["used"]}
+    for ws in workspaces.values():
+        if ws.storage in roots:
+            entry = disks.setdefault((ws.storage, ws.name), {"promised": 0, "used": 0})
+            entry["promised"] = max(entry["promised"], _limit_bytes(ws))
+    return disks
+
+
+def room(found: dict, workspaces: dict[str, Workspace], storage: str, name: str | None) -> dict | None:
+    """What workspace name (None: a new one) may have on storage, in bytes:
+    the room free on the real disk, what the other workspaces' disks there
+    were promised and do not take yet (reserved), and so the largest disk
+    without taking it from them (allowed) and the largest that fits now
+    (physical, an admin's choice: README, Workspaces). None: storage unknown
+    to the helper or missing."""
+    info = next((r for r in found.get("roots", []) if r.get("root") == storage), None)
+    if info is None or info.get("missing"):
+        return None
+    disks = _disks(found, workspaces, info["device"])
+    own = disks.get((storage, name), {"promised": 0, "used": 0}) if name else {"promised": 0, "used": 0}
+    others = {key: d for key, d in disks.items() if key != (storage, name)}
+    reserved = sum(max(d["promised"] - d["used"], 0) for d in others.values())
+    image = info.get("images", {}).get(name, {}) if name else {}
+    return {"total": info["total"], "free": info["free"], "reserved": reserved,
+            "promised": sum(d["promised"] for d in disks.values()), "used": sum(d["used"] for d in disks.values()),
+            "own_used": own["used"], "own_size": image.get("size", 0),
+            "allowed": max(info["free"] + own["used"] - reserved, 0), "physical": info["free"] + own["used"]}
+
+
+def disk_problem(found: dict | None, workspaces: dict[str, Workspace], ws: Workspace, force: bool) -> str | None:
+    """Why ws's disk limit may not be saved, or None. Without force, the disk
+    may not take what the other workspaces on the same real disk were
+    promised; with force, it must still fit in the room free now."""
+    limit = _limit_bytes(ws)
+    if not limit or not ws.storage:
+        return None
+    if found is None:
+        return None if force else "the room of the disks cannot be read: force it to save anyway"
+    r = room(found, workspaces, ws.storage, ws.name)
+    if r is None:
+        return None if force else f"{ws.storage} is not there yet: force it to save anyway"
+    gb = lambda value: f"{value / GB:.1f} GB"  # noqa: E731
+    if limit < r["own_size"]:
+        return f"the disk of {ws.name} is {gb(r['own_size'])} already: a disk is not made smaller"
+    if limit > r["physical"]:
+        return (f"{gb(limit)} do not fit on the real disk of {ws.storage}: {gb(r['physical'])} at most "
+                f"({gb(r['free'])} free" + (f", {gb(r['own_used'])} taken by {ws.name}" if r["own_used"] else "") + ")")
+    if limit > r["allowed"] and not force:
+        return (f"{gb(limit)} take room promised to other workspaces on the real disk of {ws.storage}: "
+                f"{gb(r['allowed'])} without it ({gb(r['free'])} free, {gb(r['reserved'])} promised and not used yet); "
+                f"force it to promise more than there is")
+    return None
+
+
 def web_spec(ws: Workspace) -> str:
     """The names of the workspace for the root helper (it reads the ports)."""
     return json.dumps({"domain": ws.domain, "main": ws.main, "subdomains": ws.subdomains,

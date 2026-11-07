@@ -186,6 +186,44 @@ def test_disk(root):
             workspacehelper.disk(*args)
 
 
+def test_a_disk_must_fit_in_the_room_free(root, monkeypatch):
+    """Made or grown, a disk fits whole in what the real disk has free now;
+    the same size again asks nothing."""
+    storage = str(root["storage"])
+    real = os.statvfs(storage)
+
+    class Room:
+        f_frsize, f_blocks = 1, 10 * workspacehelper.GB
+        f_bavail = int(1.5 * workspacehelper.GB)
+    monkeypatch.setattr(workspacehelper.os, "statvfs", lambda path: Room)
+    with pytest.raises(HelperError, match="needs 2.0 GB more .* 1.5 GB free"):
+        workspacehelper.disk("acme", storage, "2")
+    assert not (root["storage"] / ".disks" / "acme.img").exists()
+    workspacehelper.disk("acme", storage, "1")
+    Room.f_bavail = 0
+    workspacehelper.disk("acme", storage, "1")
+    with pytest.raises(HelperError, match="needs"):
+        workspacehelper.disk("acme", storage, "2")
+    assert real.f_frsize
+
+
+def test_space(root, monkeypatch):
+    """The room of each storage root's real disk and of the images there."""
+    workspacehelper.disk("acme", str(root["storage"]), "2")
+    (root["storage"] / ".disks" / "notes.txt").write_text("x")
+    (root["storage"] / ".disks" / "Bad.img").write_text("x")
+    missing = str(root["storage"].parent / "nowhere")
+    monkeypatch.setattr(workspacehelper, "storage_roots", lambda config=None: (str(root["storage"]), missing))
+    found = workspacehelper.space()
+    first, second = found["roots"]
+    assert second == {"root": missing, "missing": True}
+    assert first["root"] == str(root["storage"]) and first["device"] == root["storage"].stat().st_dev
+    assert first["total"] >= first["free"] > 0
+    image = root["storage"] / ".disks" / "acme.img"
+    assert first["images"] == {"acme": {"size": 2 * workspacehelper.GB, "used": image.stat().st_blocks * 512}}
+    assert workspacehelper.run.__name__ and "space" in workspacehelper.ACTIONS
+
+
 def test_create_and_remove(root, monkeypatch):
     storage = root["storage"]
     with pytest.raises(HelperError, match="not mounted"):

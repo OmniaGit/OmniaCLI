@@ -17,6 +17,12 @@ backup_dir: /var/lib/omniacli/backups
 jobs_dir: /var/lib/omniacli/jobs
 servers_file: /var/lib/omniacli/servers.yaml
 
+# the folders the customers' workspaces live in (README, Workspaces), root's;
+# without this, /srv/omniacli/default_workspace
+# workspaces:
+#   storage:
+#     - /srv/omniacli/default_workspace
+
 # the plugins published for download (Plugins page): believed only when they
 # verify with this public key ("ed25519:...", as omniacli package-key prints
 # it), OmniaSolutions' own; without it none can be installed

@@ -191,6 +191,15 @@ print("\n".join(parse_storage_roots(data.get("workspaces"))))' "$CONFIG") || {
         echo "omniacli: OMNIACLI_WORKSPACES=1, but workspaces.storage of $CONFIG cannot be read" >&2
         exit 1
     }
+    # the folder of the workspaces when the main configuration lists none,
+    # root's (the helpers refuse one the service's user could change)
+    default=$("$VENV/bin/python" -c 'from omniacli.config import DEFAULT_STORAGE; print(DEFAULT_STORAGE)')
+    for root in $roots; do
+        if [ "$root" = "$default" ] && [ ! -e "$root" ]; then
+            install -d -o root -g root -m 755 "$root"
+            echo "omniacli: $root made, for the workspaces"
+        fi
+    done
     tmp="$WORKSPACES_SUDOERS.tmp"
     {
         echo "# Written by the omniacli package from OMNIACLI_WORKSPACES=1 in /etc/default/omniacli"
@@ -208,7 +217,7 @@ print("\n".join(parse_storage_roots(data.get("workspaces"))))' "$CONFIG") || {
     fi
     mv "$tmp" "$WORKSPACES_SUDOERS"
     echo "omniacli: the workspaces' helpers allowed to $user (OMNIACLI_WORKSPACES)"
-    [ -n "$roots" ] || echo "omniacli: no workspaces.storage in $CONFIG: no workspace can have instances yet"
+    [ -n "$roots" ] || echo "omniacli: workspaces.storage of $CONFIG is empty: no workspace can have instances yet"
 }
 
 case "$1" in

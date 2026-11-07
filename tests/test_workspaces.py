@@ -15,6 +15,7 @@ from starlette.websockets import WebSocketDisconnect
 from omniacli.app import WORKSPACE_ROUTES, create_app
 from omniacli.auth import hash_password
 from omniacli.config import (
+    DEFAULT_STORAGE,
     Access,
     ConfigError,
     Workspace,
@@ -81,6 +82,10 @@ def test_parse_workspaces(tmp_path):
         with pytest.raises(ConfigError, match=message):
             parse_workspaces(bad, ("/srv/omniacli",))
     assert parse_storage_roots({"storage": ["/srv/omniacli/", "/data"]}) == ("/srv/omniacli", "/data")
+    # none listed: the default folder; an empty list: none
+    for data in (None, {}, {"storage": None}):
+        assert parse_storage_roots(data) == (DEFAULT_STORAGE,) == ("/srv/omniacli/default_workspace",)
+    assert parse_storage_roots({"storage": []}) == ()
     with pytest.raises(ConfigError, match="absolute"):
         parse_storage_roots({"storage": ["srv"]})
     # a user of workspaces only; never a link or a token
@@ -239,6 +244,90 @@ async def test_workspaces_page_and_api(workspaces, client, env):
     assert (await client.post("/api/workspaces/delete", headers=POST, json={"name": "gamma"})).json() == {"ok": True}
     assert "gamma" not in settings.workspaces
     assert (await client.post("/api/workspaces/save", headers=post_as("mario"), json={"name": "x"})).status_code == 403
+
+
+GB = 1024 ** 3
+
+
+def space_of(free_gb, images, device=1, root="/s", more=()):
+    """A space answer of the root helper: one root, images {name: (size, used)} in GB."""
+    return {"roots": [{"root": root, "device": device, "total": 500 * GB, "free": int(free_gb * GB),
+                       "images": {n: {"size": int(s * GB), "used": int(u * GB)} for n, (s, u) in images.items()}},
+                      *more]}
+
+
+def test_room_of_a_disk():
+    """Two workspaces of 100 GB taking 20 each, 160 GB free: a third may have
+    nothing without force, 160 forced; a disk is never made smaller."""
+    from omniacli import workspaceops
+
+    workspaces = {n: Workspace(n, storage="/s", limits={"disk_gb": 100}) for n in ("a", "b")}
+    found = space_of(160, {"a": (100, 20), "b": (100, 20)})
+    new = workspaceops.room(found, workspaces, "/s", None)
+    assert (new["allowed"], new["physical"], new["promised"], new["used"], new["reserved"]) == (
+        0, 160 * GB, 200 * GB, 40 * GB, 160 * GB)
+    c = Workspace("c", storage="/s", limits={"disk_gb": 100})
+    everyone = {**workspaces, "c": c}
+    assert "promised to other workspaces" in workspaceops.disk_problem(found, everyone, c, force=False)
+    assert workspaceops.disk_problem(found, everyone, c, force=True) is None
+    c.limits["disk_gb"] = 170
+    assert "do not fit" in workspaceops.disk_problem(found, everyone, c, force=True)
+    # a's own: what it takes counts as its own room; growing it takes from b only
+    a = workspaces["a"]
+    assert workspaceops.room(found, workspaces, "/s", "a")["allowed"] == (160 + 20 - 80) * GB
+    a.limits["disk_gb"] = 100
+    assert workspaceops.disk_problem(found, workspaces, a, force=False) is None
+    a.limits["disk_gb"] = 50
+    assert "not made smaller" in workspaceops.disk_problem(found, workspaces, a, force=True)
+    # a limit higher than the image (grown at the next instance) is promised
+    workspaces["b"].limits["disk_gb"] = 150
+    assert workspaceops.room(found, workspaces, "/s", None)["reserved"] == (80 + 130) * GB
+    # an image no workspace names any more still counts; another real disk does not
+    found = space_of(100, {"old": (30, 10)}, more=[{"root": "/t", "device": 1, "total": 500 * GB, "free": 100 * GB,
+                                                   "images": {"x": {"size": 50 * GB, "used": 0}}},
+                                                  {"root": "/u", "device": 2, "total": 500 * GB, "free": 100 * GB,
+                                                   "images": {"y": {"size": 50 * GB, "used": 0}}}])
+    assert workspaceops.room(found, {}, "/s", None)["allowed"] == (100 - 20 - 50) * GB
+    assert workspaceops.room(found, {}, "/u", None)["allowed"] == 50 * GB
+    # unknown or missing storage, or the helper not answering: only forced
+    d = Workspace("d", storage="/v", limits={"disk_gb": 1})
+    assert workspaceops.room(found, {}, "/v", None) is None
+    assert "force" in workspaceops.disk_problem(found, {}, d, force=False)
+    assert workspaceops.disk_problem(found, {}, d, force=True) is None
+    assert "cannot be read" in workspaceops.disk_problem(None, {}, d, force=False)
+    assert workspaceops.disk_problem(None, {}, Workspace("e", storage="/v"), force=False) is None
+
+
+async def test_save_checks_the_room_of_the_disk(workspaces, client, env, monkeypatch):
+    from omniacli import workspaceops
+
+    settings = env["settings"]
+    settings.storage_roots = ("/s",)
+    answers = []
+
+    async def space():
+        answers.append(1)
+        return space_of(160, {"acme": (100, 20), "beta": (100, 20)})
+    monkeypatch.setattr(workspaceops, "space", space)
+    settings.workspaces["acme"].storage = settings.workspaces["beta"].storage = "/s"
+    settings.workspaces["acme"].limits = {"disk_gb": 100}
+    settings.workspaces["beta"].limits = {"disk_gb": 100}
+    body = {"name": "gamma", "new": True, "storage": "/s", "limits": {"disk_gb": "100"}}
+    resp = await client.post("/api/workspaces/save", headers=POST, json=body)
+    assert resp.status_code == 400 and "force it" in resp.json()["error"]
+    resp = await client.post("/api/workspaces/save", headers=POST, json={**body, "limits": {"disk_gb": "170"},
+                                                                         "force_disk": True})
+    assert resp.status_code == 400 and "do not fit" in resp.json()["error"]
+    resp = await client.post("/api/workspaces/save", headers=POST, json={**body, "force_disk": True})
+    assert resp.status_code == 200, resp.text
+    # the disk limit unchanged: no question to the helper
+    count = len(answers)
+    resp = await client.post("/api/workspaces/save", headers=POST, json={**body, "new": False, "label": "G"})
+    assert resp.status_code == 200 and len(answers) == count
+    resp = await client.get("/api/workspaces/space", headers={"Authorization": AUTH})
+    rows = resp.json()["roots"]["/s"]
+    assert rows[""]["physical"] == 160 * GB and rows["acme"]["own_used"] == 20 * GB
+    assert (await client.get("/api/workspaces/space", headers=basic("mario"))).status_code == 403
 
 
 async def test_cpu_and_memory_applied_when_changed(workspaces, client, env, monkeypatch):

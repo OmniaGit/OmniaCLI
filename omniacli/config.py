@@ -1217,10 +1217,19 @@ def parse_machine(value, service_user: str | None = None) -> str:
     return MACHINE_DEVELOPMENT if service_user and service_user != "omniacli" else MACHINE_SERVER
 
 
+# the folder the workspaces live in when the main configuration lists none
+# (workspaces.storage missing): root's, made by the package (postinst) when
+# the workspaces are allowed
+DEFAULT_STORAGE = "/srv/omniacli/default_workspace"
+
+
 def parse_storage_roots(data) -> tuple[str, ...]:
     """workspaces.storage of the main configuration: the folders a workspace
-    may live in (absolute, real paths: no symbolic links)."""
+    may live in (absolute, real paths: no symbolic links). Missing (or
+    null): DEFAULT_STORAGE; an empty list: none."""
     data = data if isinstance(data, dict) else {}
+    if data.get("storage") is None:
+        return (DEFAULT_STORAGE,)
     roots = []
     for value in data.get("storage") or []:
         root = str(value).strip().rstrip("/")

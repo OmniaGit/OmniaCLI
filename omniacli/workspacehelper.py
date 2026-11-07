@@ -6,6 +6,7 @@
     omniacli workspace-helper create <workspace> <storage> <instance> <template> <values as JSON>
     omniacli workspace-helper remove <workspace> <storage> <instance>
     omniacli workspace-helper limits <workspace> <cpus> <memory in GB>
+    omniacli workspace-helper space
 
 OmniaCLI runs it with sudo (sudoers: README, Workspaces). It takes no path
 and no command of the caller's: a workspace and an instance are names
@@ -18,7 +19,11 @@ ext4 image that takes room as it is used, mounted on <storage>/<workspace>
 by a systemd mount unit (at every boot), docker started after it (a drop-in
 of docker.service); the empty folder beneath is immutable, so nothing is
 written there while the disk is not mounted. Again with a larger size, it
-grows the disk, mounted; a disk is never made smaller.
+grows the disk, mounted; a disk is never made smaller. A disk made or grown
+must fit, whole, in the room free on the real disk now.
+
+space: the room of each storage root's real disk (total, free) and of the
+workspaces' disks there (size, what each takes), in bytes.
 
 limits: the CPU and memory of all the workspace's containers together, a
 systemd slice /etc/systemd/system/omniacli_<workspace>.slice (CPUQuota of
@@ -308,6 +313,8 @@ def disk(name: str, storage: str, size_gb: str) -> dict:
     grow = False
     if image.is_symlink():
         raise HelperError(f"{image} is a symbolic link")
+    if not image.exists() or image.stat().st_size < size:
+        _fits(image, size, storage)
     if not image.exists():
         fd = os.open(image, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         os.close(fd)
@@ -343,6 +350,45 @@ def disk(name: str, storage: str, size_gb: str) -> dict:
         _run("resize2fs", loop)
     _close_mount(mount)
     return {"workspace": name, "image": str(image), "mount": str(mount), "unit": unit, "size_gb": int(size_gb)}
+
+
+def _used(image: Path) -> int:
+    """What the disk's image takes on the real disk (it grows as it is used)."""
+    return image.stat().st_blocks * 512 if image.exists() else 0
+
+
+def _fits(image: Path, size: int, storage: str) -> None:
+    """A disk made or grown to size must fit, whole, in the room free on the
+    real disk now; what other workspaces were promised is OmniaCLI's check
+    (README, Workspaces: the space of the disks), which an admin may force."""
+    vfs = os.statvfs(storage)
+    free, needed = vfs.f_bavail * vfs.f_frsize, size - _used(image)
+    if needed > free:
+        raise HelperError(f"a disk of {size // GB} GB needs {needed / GB:.1f} GB more on the real disk "
+                          f"of {storage}, which has {free / GB:.1f} GB free")
+
+
+def space() -> dict:
+    """The room of each storage root's real disk and of the workspaces' disks
+    on it, in bytes: read here, since the images are root's only."""
+    roots = []
+    for root in storage_roots():
+        folder = Path(root)
+        if not folder.is_dir():
+            roots.append({"root": root, "missing": True})
+            continue
+        vfs = os.statvfs(folder)
+        images = {}
+        disks = folder / ".disks"
+        if disks.is_dir() and not disks.is_symlink():
+            for image in sorted(disks.glob("*.img")):
+                if image.is_symlink() or not image.is_file() or not WORKSPACE_NAME.fullmatch(image.stem):
+                    continue
+                st = image.stat()
+                images[image.stem] = {"size": st.st_size, "used": st.st_blocks * 512}
+        roots.append({"root": root, "device": folder.stat().st_dev, "total": vfs.f_blocks * vfs.f_frsize,
+                      "free": vfs.f_bavail * vfs.f_frsize, "images": images})
+    return {"roots": roots}
 
 
 def network_pool() -> ipaddress.IPv4Network:
@@ -934,7 +980,7 @@ def owncert(name: str, storage: str, given: str | None = None) -> dict:
 
 ACTIONS = {"disk": (disk, 3), "limits": (limits, 3), "create": (create, 5), "remove": (remove, 3),
            "web": (web, 3), "owncert": (owncert, 2), "firewall": (firewall, 1), "template-install": (template_install, 1),
-           "conf": (conf, 5)}
+           "conf": (conf, 5), "space": (space, 0)}
 
 
 def run(argv: list[str]) -> dict:

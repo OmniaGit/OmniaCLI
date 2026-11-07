@@ -1987,6 +1987,18 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
                           f"manual: {user}", action)
         return {"job": job.id}
 
+    @app.get("/api/workspaces/space", dependencies=[Depends(admin)])
+    async def workspaces_space():
+        """The room of each storage root's real disk, for each workspace and
+        for a new one (""): what its disk may have (README, Workspaces)."""
+        try:
+            found = await workspaceops.space()
+        except workspaceops.SpaceError as exc:
+            return refuse(f"The room of the disks cannot be read: {exc}", status.HTTP_502_BAD_GATEWAY)
+        return {"roots": {root: {name or "": workspaceops.room(found, settings.workspaces, root, name)
+                                 for name in (None, *settings.workspaces)}
+                          for root in settings.storage_roots}}
+
     @app.post("/api/workspaces/save", dependencies=[Depends(admin)])
     async def workspace_save(payload: dict = Body(...), me: Principal = Depends(current_user)):
         """Create (new: true) or change a workspace: its servers and members
@@ -2016,6 +2028,16 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             strangers = [u for u in ws.members if u not in settings.users]
             if strangers:
                 return refuse(f"No user {', '.join(strangers)}")
+            if ws.storage and ws.limits.get("disk_gb") and (
+                    before is None or before.storage != ws.storage
+                    or before.limits.get("disk_gb") != ws.limits.get("disk_gb")):
+                try:
+                    room = await workspaceops.space()
+                except workspaceops.SpaceError:
+                    room = None
+                problem = workspaceops.disk_problem(room, found, ws, bool(payload.get("force_disk")))
+                if problem:
+                    return refuse(f"disk_gb: {problem}")
             refused = await store_workspaces(found)
             if refused:
                 return refused

@@ -844,9 +844,29 @@ workspace may live in are listed by root in the main configuration:
 ```yaml
 workspaces:
   storage:
-    - /srv/omniacli
+    - /srv/omniacli/default_workspace
     - /media/disk2/omniacli
 ```
+
+Without `workspaces.storage` there is one, `/srv/omniacli/default_workspace`,
+made (root's) by the package when the workspaces are allowed
+(`OMNIACLI_WORKSPACES`, below); `storage: []` is none. A folder holds all the
+workspaces placed there: `.disks/<workspace>.img` and `<workspace>/`.
+
+**The space of the disks.** A workspace's disk takes room on the real disk
+only as it is used, so the room free now is not all there is to give. Next to
+`disk_gb` the page shows, for the chosen storage, the real disk's size and
+room free, what the workspaces' disks there were promised and what they take,
+and what this workspace may have: by default no more than the room free less
+what the other workspaces on the same real disk were promised and do not take
+yet, so every GB promised is there and a full workspace stops itself only.
+**force** lets an admin promise more (two new workspaces of 100 GB taking 20
+GB each leave 160 GB free: a third of 100 GB fits now), knowing that the real
+disk must get room before they fill it; even forced, a disk is made or grown
+only if it fits whole in the room free at that moment (the root helper checks
+it), and never smaller than it is. A storage folder on the same real disk as
+another counts with it. Read by the root helper's `space` (the images are
+root's only).
 
 The domain gives the instances their names on the internet (Domains of a
 workspace, below); the storage and the limits of disk and instances apply to
@@ -940,7 +960,7 @@ Odoo 20, PostgreSQL 17). Its database's superuser is `postgres`, with a
 password Odoo does not know, and Odoo connects as `odoo`, without superuser;
 the top of the workspace's disk is `0750`, for root and OmniaCLI's group.
 
-The root helper, `omniacli workspace-helper disk|limits|create|remove|web|owncert|firewall|template-install|conf`
+The root helper, `omniacli workspace-helper disk|limits|create|remove|web|owncert|firewall|template-install|conf|space`
 (`workspacehelper.py`), takes names only (workspace, instance, template), a
 storage of `workspaces.storage` of the main configuration, which only root
 writes, a template of the package's folder, and refuses a folder or a
@@ -952,7 +972,7 @@ and one for the compose helper per storage root:
 
 ```
 omniacli ALL=(root) NOPASSWD: /opt/omniacli/venv/bin/omniacli workspace-helper *
-omniacli ALL=(root) NOPASSWD: /opt/omniacli/venv/bin/omniacli compose-helper /srv/omniacli/* *
+omniacli ALL=(root) NOPASSWD: /opt/omniacli/venv/bin/omniacli compose-helper /srv/omniacli/default_workspace/* *
 ```
 
 Without it, nothing is granted: give it only where workspaces are wanted,
