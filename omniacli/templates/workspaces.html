@@ -52,8 +52,9 @@ of the main configuration). Of the two, the higher version is used; the instance
       {% else %}<input type="text" class="storage mono" placeholder="no workspaces.storage in the main configuration" disabled aria-label="Storage">{% endif %}
       <details class="muted" style="margin-top: 4px"><summary>Add a storage (another real disk)</summary>
         <ol style="margin: 4px 0; padding-left: 20px">
-          <li>As root, mount the disk and make on it a folder of root's that OmniaCLI's user cannot change
-            (letters, digits and <span class="mono">. _ -</span>, no symbolic link):
+          <li>As root, make on the disk a folder of root's that nobody else may write (letters, digits and
+            <span class="mono">. _ -</span>, no symbolic link). The folders above it may be anyone's: OmniaCLI
+            binds it on a path of root's and checks at every boot that it is still the same folder:
             <pre class="mono">install -d -o root -g root -m 755 /media/disk2/omniacli</pre></li>
           <li>Add it to <span class="mono">workspaces.storage</span> in <span class="mono">{{ system_config }}</span>
             (root's). A list replaces the default, so keep the folders already used:
@@ -62,8 +63,8 @@ of the main configuration). Of the two, the higher version is used; the instance
 {% for r in storage_roots %}    - {{ r }}
 {% endfor %}    - /media/disk2/omniacli</pre></li>
           <li>As root, <span class="mono">dpkg-reconfigure omniacli</span>: it writes the sudoers line of the new
-            folder (with <span class="mono">OMNIACLI_WORKSPACES=1</span> in <span class="mono">/etc/default/omniacli</span>)
-            and restarts OmniaCLI, which then offers it here.</li>
+            folder (with <span class="mono">OMNIACLI_WORKSPACES=1</span> in <span class="mono">/etc/default/omniacli</span>),
+            binds it and restarts OmniaCLI, which then offers it here.</li>
         </ol>
       </details>
       </div>

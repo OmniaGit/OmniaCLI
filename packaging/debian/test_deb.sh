@@ -411,24 +411,75 @@ curl -s -b /tmp/cookies-admin localhost:8090/options | grep -q 'id="machine">ser
 chown -R omniacli:omniacli /srv/odoo /srv/remote.git
 login admin "$PW"
 
-step "OMNIACLI_WORKSPACES: the default storage made root's, its sudoers lines, the room of its disk"
+step "OMNIACLI_WORKSPACES: the storages bound on root's paths, their sudoers lines, the room of their disks"
 WS_DEFAULT=/srv/omniacli/default_workspace
 WS_SUDOERS=/etc/sudoers.d/omniacli-workspaces
+HELPER=/opt/omniacli/venv/bin/omniacli
+bound_of() { /opt/omniacli/venv/bin/python -c 'import sys; from omniacli.config import bound_root; print(bound_root(sys.argv[1]))' "$1"; }
 [ ! -e "$WS_DEFAULT" ] || fail "$WS_DEFAULT made without OMNIACLI_WORKSPACES"
+# a second storage on a user's disk: the folders above it are the user's
+WS_USER=/srv/userdisk/mine/workspaces
+install -d -o dev -g dev -m 777 /srv/userdisk
+install -d -o dev -g dev -m 755 /srv/userdisk/mine
+install -d -o root -g root -m 755 "$WS_USER"
+echo real > "$WS_USER/marker"
+printf 'workspaces:\n  storage:\n    - %s\n    - %s\n' "$WS_DEFAULT" "$WS_USER" >> /etc/omniacli/omniacli.yaml
 echo OMNIACLI_WORKSPACES=1 >> /etc/default/omniacli
 dpkg-reconfigure omniacli > /tmp/reconf.log 2>&1 || { tail -20 /tmp/reconf.log; fail "dpkg-reconfigure with OMNIACLI_WORKSPACES=1"; }
 wait_up || fail "service not up with OMNIACLI_WORKSPACES=1"
+grep 'storage ' /tmp/reconf.log || true
 [ "$(stat -c '%U:%G %a' "$WS_DEFAULT")" = "root:root 755" ] || fail "$WS_DEFAULT is $(stat -c '%U:%G %a' "$WS_DEFAULT")"
-grep -qx "omniacli ALL=(root) NOPASSWD: /opt/omniacli/venv/bin/omniacli compose-helper $WS_DEFAULT/\* \*" "$WS_SUDOERS" \
-    || { cat "$WS_SUDOERS"; fail "no compose-helper line for $WS_DEFAULT"; }
-# the room of its disk, through the page's API: sudo, the root helper's space
+B_DEFAULT=$(bound_of "$WS_DEFAULT"); B_USER=$(bound_of "$WS_USER")
+for b in "$B_DEFAULT" "$B_USER"; do
+    findmnt -n "$b" >/dev/null || { tail -20 /tmp/reconf.log; fail "$b not bound by the package"; }
+    grep -qx "omniacli ALL=(root) NOPASSWD: /opt/omniacli/venv/bin/omniacli compose-helper $b/\* \*" "$WS_SUDOERS" \
+        || { cat "$WS_SUDOERS"; fail "no compose-helper line for $b"; }
+    systemctl is-active --quiet "omniacli-storage-$(basename "$b").service" || fail "the check of $b is not active"
+    systemctl is-enabled --quiet "omniacli-storage-$(basename "$b").service" || fail "the check of $b is not enabled"
+done
+[ "$(cat "$B_USER/marker")" = real ] || fail "$B_USER does not show $WS_USER"
+grep -q "compose-helper $WS_USER/" "$WS_SUDOERS" && fail "a compose-helper line names the storage itself, not its root path"
+# the room of the disks, through the page's API: sudo, the root helper's space
 login admin "$PW"
 curl -s -b /tmp/cookies-admin localhost:8090/api/workspaces/space > /tmp/space.json
 /opt/omniacli/venv/bin/python -c 'import json, sys
 room = json.load(open("/tmp/space.json"))["roots"][sys.argv[1]][""]
 assert room["free"] > 0 and room["physical"] == room["free"] and room["promised"] == 0, room' "$WS_DEFAULT" \
     || { cat /tmp/space.json; fail "the room of $WS_DEFAULT"; }
-curl -s -b /tmp/cookies-admin localhost:8090/workspaces | grep -q "<option>$WS_DEFAULT</option>" || fail "$WS_DEFAULT not offered"
+curl -s -b /tmp/cookies-admin localhost:8090/workspaces | grep -q "<option>$WS_USER</option>" || fail "$WS_USER not offered"
+# a workspace's disk on the user's disk, through the root path; after the storage's check.
+# A container's /dev is made at its start: loop devices the kernel adds later
+# (several of these tests at once, the host's own) get their nodes here
+for i in $(seq 0 255); do [ -e "/dev/loop$i" ] || mknod "/dev/loop$i" b 7 "$i" 2>/dev/null || true; done
+"$HELPER" workspace-helper disk w1 "$WS_USER" 1 > /tmp/disk.json 2>&1 || { cat /tmp/disk.json
+    journalctl -u "$(systemd-escape -p --suffix=mount "$B_USER/w1")" --no-pager -o cat | tail -8
+    losetup -a; ls /dev/loop* | tr '\n' ' '; fail "the disk of w1"; }
+findmnt -n "$B_USER/w1" >/dev/null || fail "the disk of w1 not mounted on $B_USER/w1"
+grep -q "Requires=omniacli-storage-$(basename "$B_USER").service" /etc/systemd/system/*w1.mount || fail "the disk of w1 does not wait for its storage's check"
+# the user, everything running, renames a folder above the storage and plants its own
+su dev -s /bin/sh -c "mv /srv/userdisk/mine /srv/userdisk/moved && mkdir -p $WS_USER && echo planted > $WS_USER/marker" \
+    || fail "dev could not rename its own folders"
+[ "$(cat "$B_USER/marker")" = real ] || fail "the root path followed the rename"
+findmnt -n "$B_USER/w1" >/dev/null || fail "the disk of w1 lost by the rename"
+mv "$B_USER" "$B_USER.x" 2>/dev/null && fail "the root path was moved"
+# a boot: the units again; the path now holds the planted folder, the check unbinds it
+W1_UNIT=$(systemd-escape -p --suffix=mount "$B_USER/w1")
+systemctl stop "$W1_UNIT" "omniacli-storage-$(basename "$B_USER").service" "$(systemd-escape -p --suffix=mount "$B_USER")"
+systemctl start "$W1_UNIT" 2>/dev/null && fail "the disk of w1 mounted on a planted storage"
+findmnt -n "$B_USER" >/dev/null && fail "the planted folder stays bound on $B_USER"
+journalctl -u "omniacli-storage-$(basename "$B_USER").service" --no-pager -o cat | grep -qE "not the folder set up|root's alone" \
+    || fail "the check did not say why"
+touch "$B_USER/x" 2>/dev/null && fail "something was written beneath $B_USER (not immutable)"
+"$HELPER" workspace-helper disk w1 "$WS_USER" 1 > /tmp/disk.json 2>&1 && fail "an action took the planted storage"
+grep -qE "not the folder set up|root's alone" /tmp/disk.json || { cat /tmp/disk.json; fail "the action did not say why"; }
+# taken again on purpose: the planted folder is the user's, refused
+"$HELPER" workspace-helper storage-reset "$WS_USER" > /tmp/reset.json 2>&1 && fail "storage-reset took a folder of the user's"
+grep -q "root's alone" /tmp/reset.json || { cat /tmp/reset.json; fail "storage-reset did not say why"; }
+# the real one back: bound and checked again, the disk mounts
+su dev -s /bin/sh -c "rm -rf /srv/userdisk/mine && mv /srv/userdisk/moved /srv/userdisk/mine"
+systemctl start "$W1_UNIT" || { journalctl -u "omniacli-storage-$(basename "$B_USER").service" --no-pager | tail -5; fail "the real storage back is not taken"; }
+[ "$(cat "$B_USER/marker")" = real ] && findmnt -n "$B_USER/w1" >/dev/null || fail "the real storage and w1 not back"
+echo "storages bound: $B_DEFAULT, $B_USER; a planted folder unbound at a boot"
 sed -i '/^OMNIACLI_WORKSPACES=/d' /etc/default/omniacli
 dpkg-reconfigure omniacli > /tmp/reconf.log 2>&1 || { tail -20 /tmp/reconf.log; fail "dpkg-reconfigure without OMNIACLI_WORKSPACES"; }
 wait_up || fail "service not up without OMNIACLI_WORKSPACES"
@@ -495,6 +546,11 @@ EOF
         done
         docker exec -e EXPECT_HOME="$expect" "$cid" bash -c "apt-get update -qq >/dev/null; $CHECKS"
         local rc=$?
+        # the immutable folders of the storages' binds and of the workspaces'
+        # disks: docker cannot remove a container that keeps them
+        docker exec "$cid" sh -c 'for m in $(findmnt -rn -o TARGET | grep "^/var/lib/omniacli-storage/" | sort -r); do umount "$m"; done
+            for d in /var/lib/omniacli-storage/* /srv/*/*/workspaces/* /srv/*/*/workspaces /srv/omniacli/default_workspace/*; do
+                [ -d "$d" ] && chattr -i "$d" 2>/dev/null; done; true' >/dev/null 2>&1 || true
         docker rm -f "$cid" >/dev/null
         return $rc
     } > "$log" 2>&1

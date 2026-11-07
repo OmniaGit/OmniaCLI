@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import base64
 import datetime
+import hashlib
 import ipaddress
 import os
 import re
@@ -1229,6 +1230,20 @@ def parse_machine(value, service_user: str | None = None) -> str:
 # (workspaces.storage missing): root's, made by the package (postinst) when
 # the workspaces are allowed
 DEFAULT_STORAGE = "/srv/omniacli/default_workspace"
+
+
+# where the root helper binds each folder of workspaces.storage (a systemd
+# bind mount, README, Workspaces): root uses only these paths, which nobody
+# else can move, so the folders above a storage may be anyone's
+STORAGE_BASE = "/var/lib/omniacli-storage"
+
+
+def bound_root(storage: str) -> str:
+    """The root path storage is bound on: its name made of the path (letters,
+    digits and . _ -, as sudoers and systemd take them) and a hash of it, so
+    two storages never meet."""
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", storage.strip("/")).strip("-.")[:80] or "root"
+    return f"{STORAGE_BASE}/{slug}-{hashlib.sha256(storage.encode()).hexdigest()[:8]}"
 
 
 def parse_storage_roots(data) -> tuple[str, ...]:

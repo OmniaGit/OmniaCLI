@@ -13,7 +13,7 @@ import stat
 import sys
 from pathlib import Path
 
-from . import stacktemplates, templatestore, workspacehelper
+from . import config, stacktemplates, templatestore, workspacehelper
 from .config import OMNIACLI_COMMAND, Workspace
 from .jobs import Job, JobFailed
 from .ops import capture, run
@@ -35,6 +35,12 @@ def compose(project: str, *args: str) -> list[str]:
 def templates() -> dict[str, stacktemplates.Template]:
     """The templates the root helper creates instances from."""
     return stacktemplates.available([workspacehelper.TEMPLATES, templatestore.INSTALLED])
+
+
+def storage_path(ws: Workspace) -> Path:
+    """The root path the workspace's storage is bound on: what root uses, so
+    what OmniaCLI reads and writes too (README, Workspaces)."""
+    return Path(config.bound_root(ws.storage))
 
 
 def server_name(ws: Workspace, instance: str) -> str:
@@ -231,7 +237,7 @@ async def own_certificate(ws: Workspace, certificate: str, key: str) -> tuple[bo
 
 
 def instance_folder(ws: Workspace, instance: str) -> Path:
-    return Path(ws.storage) / ws.name / instance
+    return storage_path(ws) / ws.name / instance
 
 
 # a customer's repository: https only, no user or token in it (they are the
@@ -252,7 +258,7 @@ def check_repository(name: str, url: str, branch: str) -> None:
 
 
 def addons_folder(ws: Workspace, instance: str, role: str) -> Path:
-    return Path(ws.storage) / ws.name / instance / role / "addons"
+    return storage_path(ws) / ws.name / instance / role / "addons"
 
 
 def _remove_tree(path: Path) -> None:

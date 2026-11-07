@@ -2370,7 +2370,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
     def instance_template(ws: Workspace, instance: str):
         """The template an instance was made from (the higher version installed), or None."""
         try:
-            meta = json.loads((Path(ws.storage) / ws.name / instance / workspacehelper.INSTANCE_FILE).read_text())
+            meta = json.loads((workspaceops.storage_path(ws) / ws.name / instance / workspacehelper.INSTANCE_FILE).read_text())
         except (OSError, ValueError):
             return None
         return workspaceops.templates().get(str(meta.get("template") or ""))
@@ -2381,7 +2381,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         template = instance_template(ws, instance)
         if template is None or not template.parameters:
             return None
-        state = workspacehelper.role_state(Path(ws.storage) / ws.name / instance / role)
+        state = workspacehelper.role_state(workspaceops.storage_path(ws) / ws.name / instance / role)
         rows = []
         for param in template.parameters:
             value = state["parameters"].get(param.name, param.default)
@@ -2410,7 +2410,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         if template is None:
             return refuse(f"{name} was not made from a template installed here")
         given = {str(k): v for k, v in (payload.get("parameters") or {}).items()}
-        saved = workspacehelper.role_state(Path(ws.storage) / ws.name / instance / role)["parameters"]
+        saved = workspacehelper.role_state(workspaceops.storage_path(ws) / ws.name / instance / role)["parameters"]
         for param in template.parameters:
             # a password left empty keeps the one saved
             if param.type == "password" and not str(given.get(param.name) or "") and saved.get(param.name):

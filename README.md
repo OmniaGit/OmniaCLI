@@ -859,6 +859,23 @@ made (root's) by the package when the workspaces are allowed
 (`OMNIACLI_WORKSPACES`, below); `storage: []` is none. A folder holds all the
 workspaces placed there: `.disks/<workspace>.img` and `<workspace>/`.
 
+**The storages are bound on a path of root's.** A storage folder must be
+root's and written by nobody else, but the folders above it may be anyone's
+(a disk of a user, with its other folders). Root acts on a storage only
+through `/var/lib/omniacli-storage/<name>-<hash>` (`config.bound_root`), where
+systemd binds it (a mount unit of the root helper's `storage-setup`, which the
+package runs and every action of the helper does first): a bind holds the
+folder, not its path, so renaming a folder above the storage changes nothing
+for root, and the path of root's cannot be moved. At a boot the path counts
+again, so the identity of the folder first bound (device and inode, in
+`/var/lib/omniacli-storage/.ids/`) is checked before the workspaces' disks and docker
+(unit `omniacli-storage-<name>.service`): another folder there is unbound, the
+path beneath is immutable, and nothing of the workspaces starts on it (tried:
+a container restarted by docker fails to create its mount instead of writing
+there). A storage moved on purpose is taken again by root by hand: `omniacli
+workspace-helper storage-reset <storage>`. The sudoers lines of the compose
+helper name the paths of root's.
+
 **The space of the disks.** A workspace's disk takes room on the real disk
 only as it is used, so the room free now is not all there is to give. Next to
 `disk_gb` the page shows, for the chosen storage, the real disk's size and
@@ -983,7 +1000,7 @@ and one for the compose helper per storage root:
 
 ```
 omniacli ALL=(root) NOPASSWD: /opt/omniacli/venv/bin/omniacli workspace-helper *
-omniacli ALL=(root) NOPASSWD: /opt/omniacli/venv/bin/omniacli compose-helper /srv/omniacli/default_workspace/* *
+omniacli ALL=(root) NOPASSWD: /opt/omniacli/venv/bin/omniacli compose-helper /var/lib/omniacli-storage/srv-omniacli-default_workspace-283da566/* *
 ```
 
 Without it, nothing is granted: give it only where workspaces are wanted,

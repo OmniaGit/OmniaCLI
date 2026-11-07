@@ -200,13 +200,17 @@ print("\n".join(parse_storage_roots(data.get("workspaces"))))' "$CONFIG") || {
             echo "omniacli: $root made, for the workspaces"
         fi
     done
+    bounds=$("$VENV/bin/python" -c 'import sys
+from omniacli.config import bound_root
+print("\n".join(bound_root(root) for root in sys.argv[1:]))' $roots)
     tmp="$WORKSPACES_SUDOERS.tmp"
     {
         echo "# Written by the omniacli package from OMNIACLI_WORKSPACES=1 in /etc/default/omniacli"
         echo "# and workspaces.storage of $CONFIG: change them, then sudo dpkg-reconfigure omniacli."
         echo "$user ALL=(root) NOPASSWD: $VENV/bin/omniacli workspace-helper *"
-        for root in $roots; do
-            echo "$user ALL=(root) NOPASSWD: $VENV/bin/omniacli compose-helper $root/* *"
+        # root acts on a storage only through the root path it is bound on
+        for bound in $bounds; do
+            echo "$user ALL=(root) NOPASSWD: $VENV/bin/omniacli compose-helper $bound/* *"
         done
     } > "$tmp"
     chmod 440 "$tmp"
@@ -217,6 +221,18 @@ print("\n".join(parse_storage_roots(data.get("workspaces"))))' "$CONFIG") || {
     fi
     mv "$tmp" "$WORKSPACES_SUDOERS"
     echo "omniacli: the workspaces' helpers allowed to $user (OMNIACLI_WORKSPACES)"
+    # every storage that exists bound on its root path, checked at every boot
+    # (README, Workspaces); one refused is told and does not stop the install
+    if [ -n "$roots" ] && [ -d /run/systemd/system ]; then
+        "$VENV/bin/omniacli" workspace-helper storage-setup 2>&1 | "$VENV/bin/python" -c 'import json, sys
+text = sys.stdin.read()
+try:
+    found = json.loads(text.strip().splitlines()[-1])["storages"]
+except Exception:
+    print("omniacli: the storages were not bound: " + text.strip()); sys.exit(0)
+for root, state in found.items():
+    print("omniacli: storage %s: %s" % (root, state if not state.startswith("/") else "bound on " + state))' || true
+    fi
     [ -n "$roots" ] || echo "omniacli: workspaces.storage of $CONFIG is empty: no workspace can have instances yet"
 }
 

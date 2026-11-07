@@ -9,7 +9,9 @@ from pathlib import Path
 import pytest
 import yaml
 
+from omniacli import config, workspacehelper
 from omniacli.auth import hash_password, hash_token
+from omniacli.composehelper import HelperError
 from omniacli.config import Restart, parse_settings
 
 PASSWORD = "secret"
@@ -48,6 +50,23 @@ def make_remote(base: Path, name: str) -> Path:
 def clone(remote: Path, dest: Path, branch: str) -> Path:
     sh("git", "clone", "-q", "-b", branch, str(remote), str(dest))
     return dest
+
+
+# the storages' binds (workspacehelper.bind_storage) need root and systemd: in
+# the tests a storage is used where it is, still one of workspaces.storage;
+# the real ones are tested with these (test_stacktemplates, storage binds)
+REAL_BOUND_ROOT = config.bound_root
+REAL_BIND_STORAGE = workspacehelper.bind_storage
+
+
+@pytest.fixture(autouse=True)
+def storage_where_it_is(monkeypatch):
+    def bind_storage(storage):
+        if storage not in workspacehelper.storage_roots():
+            raise HelperError(f"{storage} is not one of workspaces.storage of {workspacehelper.SYSTEM_CONFIG}")
+        return Path(storage)
+    monkeypatch.setattr(config, "bound_root", lambda storage: storage)
+    monkeypatch.setattr(workspacehelper, "bind_storage", bind_storage)
 
 
 @pytest.fixture(autouse=True)
