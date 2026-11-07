@@ -866,7 +866,8 @@ disk must get room before they fill it; even forced, a disk is made or grown
 only if it fits whole in the room free at that moment (the root helper checks
 it), and never smaller than it is. A storage folder on the same real disk as
 another counts with it. Read by the root helper's `space` (the images are
-root's only).
+root's only): when sudo refuses it, the page says how to allow the helpers
+(`OMNIACLI_WORKSPACES=1`, below).
 
 The domain gives the instances their names on the internet (Domains of a
 workspace, below); the storage and the limits of disk and instances apply to
@@ -901,6 +902,10 @@ template and the fields it asks. A job then:
 3. creates each database (`odoo -i <modules>`, in a container of its own)
    and starts both; a step that fails removes what was made;
 4. adds the server, of type `docker`, to the workspace.
+
+The job, and that of **Remove** below, is the workspace's: its users see it on
+the Jobs page and its own page also when the creation failed (the server
+then leaves the workspace) or after the removal.
 
 **The customer's modules**: on the same page, **Add repository** on an
 instance takes an `https://` address (no user or token in it: those are the

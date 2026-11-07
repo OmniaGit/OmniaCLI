@@ -107,6 +107,17 @@ class SpaceError(Exception):
     """The root helper did not tell the room of the disks."""
 
 
+# what an admin does when sudo refuses the workspaces' helpers (README, Workspaces)
+HELPERS_HINT = ("sudo does not allow the workspaces' helpers to OmniaCLI's user: as root, add "
+                "OMNIACLI_WORKSPACES=1 to /etc/default/omniacli, then run dpkg-reconfigure omniacli "
+                "(it writes /etc/sudoers.d/omniacli-workspaces and makes the default storage)")
+
+
+def helpers_refused(message: str) -> bool:
+    """sudo's own refusal (no line of the sudoers for the helper), not the helper's."""
+    return message.startswith("sudo:") or "is not allowed to run sudo" in message
+
+
 async def space() -> dict:
     """The root helper's space: each storage root's real disk and the
     workspaces' disks on it, in bytes."""

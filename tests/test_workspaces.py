@@ -225,7 +225,10 @@ async def test_workspace_admin_manages_its_users(workspaces, client, env):
 
 async def test_workspaces_page_and_api(workspaces, client, env):
     settings = env["settings"]
-    assert "acme.example.com" in (await client.get("/workspaces", headers={"Authorization": AUTH})).text
+    page = (await client.get("/workspaces", headers={"Authorization": AUTH})).text
+    assert "acme.example.com" in page
+    # how to add a storage: the main configuration, the folders kept, dpkg-reconfigure
+    assert "Add a storage" in page and "/etc/omniacli/omniacli.yaml" in page and "dpkg-reconfigure omniacli" in page
     assert (await client.get("/workspaces", headers=basic("mario"))).status_code == 403
     resp = await client.post("/api/workspaces/save", headers=POST,
                              json={"name": "gamma", "new": True, "label": "Gamma", "servers": ["srv"]})
@@ -328,6 +331,14 @@ async def test_save_checks_the_room_of_the_disk(workspaces, client, env, monkeyp
     rows = resp.json()["roots"]["/s"]
     assert rows[""]["physical"] == 160 * GB and rows["acme"]["own_used"] == 20 * GB
     assert (await client.get("/api/workspaces/space", headers=basic("mario"))).status_code == 403
+    # sudo refuses the helper: the admin is told how to allow it; the helper's own error is told as it is
+    for said, hinted in (("sudo: a password is required", True), ("workspace-helper: cannot read x", False)):
+        async def refused(said=said):
+            raise workspaceops.SpaceError(said)
+        monkeypatch.setattr(workspaceops, "space", refused)
+        resp = await client.get("/api/workspaces/space", headers={"Authorization": AUTH})
+        error = resp.json()["error"]
+        assert resp.status_code == 502 and said in error and ("OMNIACLI_WORKSPACES=1" in error) == hinted
 
 
 async def test_cpu_and_memory_applied_when_changed(workspaces, client, env, monkeypatch):
@@ -419,6 +430,15 @@ async def test_create_and_remove_an_instance(workspaces, client, env, monkeypatc
     monkeypatch.setattr(workspaceops, "remove_instance", remove_instance)
     monkeypatch.setattr(workspaceops, "publish", publish)
     url = "/api/workspaces/acme/instances/"
+
+    async def check_job(job_id, status):
+        for user in ("mario", "luca"):
+            resp = await client.get(f"/api/jobs/{job_id}", headers=basic(user))
+            assert resp.status_code == 200 and resp.json()["status"] == status, (user, resp.text)
+            assert (await client.get(f"/jobs/{job_id}", headers=basic(user))).status_code == 200
+            assert job_id in [j["id"] for j in (await client.get("/api/jobs", headers=basic(user))).json()["jobs"]]
+        assert (await client.get(f"/api/jobs/{job_id}", headers=basic("eva"))).status_code == 403
+        assert job_id not in [j["id"] for j in (await client.get("/api/jobs", headers=basic("eva"))).json()["jobs"]]
     # the workspace needs its storage and disk limit
     resp = await client.post(url + "create", headers=post_as("mario"), json={"instance": "main", "template": "odooplm-20"})
     assert resp.status_code == 400 and "no storage" in resp.json()["error"]
@@ -458,6 +478,8 @@ async def test_create_and_remove_an_instance(workspaces, client, env, monkeypatc
     job = await wait_job(client, resp.json()["job"])
     assert job["status"] == "failed" and "acme-broken" not in settings.servers
     assert settings.workspaces["acme"].servers == ["srv", "acme-main"]
+    # its server is gone from acme, its job is still acme's: seen there, failed; not in beta
+    await check_job(job["id"], "failed")
     # remove: only an instance of the workspace (srv was not made by it)
     resp = await client.post(url + "delete", headers=post_as("mario"), json={"server": "srv"})
     assert resp.status_code == 404
@@ -466,6 +488,7 @@ async def test_create_and_remove_an_instance(workspaces, client, env, monkeypatc
     assert job["status"] == "success" and removed == [("acme", "main")]
     assert "acme-main" not in settings.servers and settings.workspaces["acme"].servers == ["srv"]
     assert published[-1] == ["srv"]
+    await check_job(job["id"], "success")
 
 
 async def test_workspaceops_create_instance(monkeypatch):

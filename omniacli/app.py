@@ -395,6 +395,12 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             names = [str(params["server"])]
         elif "job_id" in params:
             job = jobs.get(str(params["job_id"]))
+            if job is not None and job.workspace:
+                # an instance created or removed: its server is not the workspace's before or after
+                role = user.workspace_role(job.workspace)
+                if role is None:
+                    raise HTTPException(status.HTTP_403_FORBIDDEN, "Not a workspace of yours")
+                return dataclasses.replace(user, role=role)
             # a job of none of its servers is refused like one that does not exist
             names = job.servers if job is not None and job.servers else [""]
         elif "workspace" in params:
@@ -423,12 +429,13 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         return {srv for ws in settings.workspaces.values() if ws.name in mine for srv in ws.servers}
 
     def visible_jobs(user: Principal | None, found: list) -> list:
-        """Of found, the jobs user may see: for a user of workspaces, those
-        whose every server is in its workspaces."""
+        """Of found, the jobs user may see: for a user of workspaces, those of
+        its workspaces and those whose every server is in its workspaces."""
         shown = visible_servers(user)
         if shown is None:
             return found
-        return [j for j in found if j.servers and set(j.servers) <= shown]
+        mine = {ws for ws, _ in user.workspaces}
+        return [j for j in found if (j.workspace and j.workspace in mine) or (j.servers and set(j.servers) <= shown)]
 
     def current_user(request: HTTPConnection) -> Principal:
         ip = request.client.host if request.client else ""
@@ -1937,7 +1944,8 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             {"workspaces": workspace_rows(), "workspaces_file": settings.workspaces_file,
              "servers": sorted(settings.servers), "users": sorted(settings.users),
              "user_roles": {n: settings.user_role(n) for n in settings.users},
-             "storage_roots": settings.storage_roots, "roles": ACCESS_ROLES, "limits": WORKSPACE_LIMITS,
+             "storage_roots": settings.storage_roots, "system_config": pluginstore.SYSTEM_CONFIG,
+             "roles": ACCESS_ROLES, "limits": WORKSPACE_LIMITS,
              "templates": await asyncio.to_thread(template_rows),
              "templates_index": templatestore.index_url(settings.plugin_source)},
         )
@@ -1994,7 +2002,8 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         try:
             found = await workspaceops.space()
         except workspaceops.SpaceError as exc:
-            return refuse(f"The room of the disks cannot be read: {exc}", status.HTTP_502_BAD_GATEWAY)
+            hint = f". {workspaceops.HELPERS_HINT}" if workspaceops.helpers_refused(str(exc)) else ""
+            return refuse(f"The room of the disks cannot be read: {exc}{hint}", status.HTTP_502_BAD_GATEWAY)
         return {"roots": {root: {name or "": workspaceops.room(found, settings.workspaces, root, name)
                                  for name in (None, *settings.workspaces)}
                           for root in settings.storage_roots}}
@@ -2160,7 +2169,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
                     job.log(f"The instance runs, its names are not published: {exc}")
 
         job = jobs.submit(f"Create {name} from {template.name}", [f"{name}/production", f"{name}/test"],
-                          f"manual: {me}", action)
+                          f"manual: {me}", action, workspace=ws.name)
         return {"job": job.id}
 
     @app.post("/api/workspaces/{workspace}/instances/delete", dependencies=[Depends(admin)])
@@ -2191,7 +2200,8 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
                 except JobFailed as exc:
                     job.log(f"The names of the workspace are not published again: {exc}")
 
-        job = jobs.submit(f"Remove {name}", [f"{name}/production", f"{name}/test"], f"manual: {me}", action)
+        job = jobs.submit(f"Remove {name}", [f"{name}/production", f"{name}/test"], f"manual: {me}", action,
+                          workspace=ws.name)
         return {"job": job.id}
 
     @app.post("/api/workspaces/{workspace}/web/save", dependencies=[Depends(admin)])

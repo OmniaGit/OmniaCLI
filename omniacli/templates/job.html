@@ -118,6 +118,7 @@
     let data;
     try {
       const resp = await fetch("{{ prefix }}/api/jobs/{{ job.id }}?since=" + next);
+      if (resp.status === 403 || resp.status === 404) { unreadable(resp.status); return; }
       if (!resp.ok) throw new Error(resp.status);
       data = await resp.json();
     } catch (e) { setTimeout(poll, 5000); return; }
@@ -135,6 +136,16 @@
     const stop = document.getElementById("stop-form");
     if (stop && done) stop.hidden = true;
     if (!done) setTimeout(poll, 1500);
+  }
+  // the job cannot be read any more (no longer yours, or gone): said, not
+  // asked again, so the page does not look as if it still ran
+  function unreadable(code) {
+    const box = document.getElementById("job-state");
+    box.dataset.status = "failed";
+    box.querySelector(".job-failed .job-state-text").textContent =
+      `This job can no longer be read here (${code === 404 ? "it is gone" : "not open to you any more"}): its state is unknown`;
+    const st = document.getElementById("status");
+    st.textContent = "unknown"; st.className = "status";
   }
   // the animated state: changed only when the status changes, so each
   // animation plays once

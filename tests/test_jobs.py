@@ -100,3 +100,23 @@ def test_duration():
     assert job.duration == ""
     job.started, job.finished = "2026-10-25T10:00:00", "2026-10-25T10:01:30"
     assert job.duration == "1 min 30 s"
+
+
+async def test_the_workspace_of_a_job_is_kept_and_an_old_file_still_reads(tmp_path):
+    """A workspace's job keeps its workspace on disk; the others are written
+    as before, without the key (an older OmniaCLI still reads them)."""
+    import json as _json
+
+    from omniacli.jobs import JobManager
+
+    manager = JobManager(tmp_path)
+
+    async def action(job):
+        job.log("done")
+    one = manager.submit("Create acme-main", ["acme-main/production"], "manual", action, workspace="acme")
+    two = manager.submit("Pull", ["srv/production"], "manual", action)
+    await asyncio.gather(*manager._tasks)
+    assert _json.loads((tmp_path / f"{one.id}.json").read_text())["workspace"] == "acme"
+    assert "workspace" not in _json.loads((tmp_path / f"{two.id}.json").read_text())
+    again = JobManager(tmp_path)
+    assert again.get(one.id).workspace == "acme" and again.get(two.id).workspace == ""

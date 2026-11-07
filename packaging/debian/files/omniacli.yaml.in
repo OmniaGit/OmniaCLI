@@ -1,11 +1,27 @@
-# OmniaCLI main configuration, created at the first installation.
+# OmniaCLI main configuration, created at the first installation; an upgrade
+# never changes it. Root writes it (root:omniacli 640): after a change, as root,
+#   dpkg-reconfigure omniacli
+# (it writes the sudoers lines that depend on it and restarts OmniaCLI).
 # The servers are edited from the web interface (Configuration page).
+# Every option is here: those commented out show their default.
 
 auth:
   users:
     # the other users, links and MCP tokens are managed from the web
-    # interface (Users page), in /var/lib/omniacli/users.yaml
+    # interface (Users page), in users_file; those written here cannot be
+    # changed from there. A user is its password hash ("pbkdf2_sha256$...",
+    # omniacli hash-password prints it), then an admin, or {password, role},
+    # the role one of user, developer, admin, workspace
     admin: "@ADMIN_HASH@"
+    # anna: {password: "pbkdf2_sha256$...", role: developer}
+  # the MCP clients: {token: the "sha256$..." omniacli new-token prints, role:
+  # user, developer (the default) or admin}
+  # tokens:
+  #   dev-laptop: {token: "sha256$...", role: admin}
+  # the other OmniaCLIs that reach this one (Links page there): {token: the
+  # "sha256$..." omniacli new-link-token prints, role: user, developer or admin}
+  # links:
+  #   omniasolutions: {token: "sha256$...", role: developer}
 
 # server: nobody opens a shell of OmniaCLI's own user here (no Shell, no Claude,
 # psql only where it runs as another user). development: nothing is restricted.
@@ -13,15 +29,36 @@ auth:
 # otherwise server.
 # machine: server
 
+# required: where the backups and the jobs' logs go
 backup_dir: /var/lib/omniacli/backups
 jobs_dir: /var/lib/omniacli/jobs
 servers_file: /var/lib/omniacli/servers.yaml
 
-# the folders the customers' workspaces live in (README, Workspaces), root's;
-# without this, /srv/omniacli/default_workspace
+# the files the web interface writes; by default next to servers_file
+# users_file: /var/lib/omniacli/users.yaml
+# links_file: /var/lib/omniacli/links.yaml
+# groups_file: /var/lib/omniacli/groups.yaml
+# schedules_file: /var/lib/omniacli/schedules.yaml
+# options_file: /var/lib/omniacli/options.yaml
+# pullers_file: /var/lib/omniacli/pullers.yaml
+# publications_file: /var/lib/omniacli/publications.yaml
+# connections_file: /var/lib/omniacli/connections.yaml
+# workspaces_file: /var/lib/omniacli/workspaces.yaml
+# the Python scripts the scheduled actions may run (put there by root)
+# scripts_dir: /var/lib/omniacli/scripts
+
+# the customers' workspaces (README, Workspaces), with OMNIACLI_WORKSPACES=1
+# in /etc/default/omniacli
 # workspaces:
+#   # the folders they live in, each root's and on a real disk: a list
+#   # replaces the default, so keep the folders already used
 #   storage:
 #     - /srv/omniacli/default_workspace
+#   # the pool the networks of their containers are /24s of (private IPv4,
+#   # /24 or larger, no network of this machine)
+#   network: 10.213.0.0/16
+#   # the Let's Encrypt account's address for their certificates (none by default)
+#   acme_email: admin@example.com
 
 # the plugins published for download (Plugins page): believed only when they
 # verify with this public key ("ed25519:...", as omniacli package-key prints

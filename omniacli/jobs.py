@@ -51,6 +51,10 @@ class Job:
     lines: list[str] = field(default_factory=list)
     # what the action produced, e.g. {"download": url} for a backup
     result: dict = field(default_factory=dict)
+    # the workspace of a job on an instance that may not be its workspace's
+    # server before or after (an instance created or removed): its users see
+    # the job by it
+    workspace: str = ""
 
     def log(self, text: str) -> None:
         stamp = datetime.datetime.now().strftime("%H:%M:%S")
@@ -133,7 +137,11 @@ class JobManager:
     def _save(self, job: Job) -> None:
         path = self.jobs_dir / f"{job.id}.json"
         tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(asdict(job)), encoding="utf-8")
+        data = asdict(job)
+        if not data["workspace"]:
+            # the file as before: an older OmniaCLI still reads it
+            del data["workspace"]
+        tmp.write_text(json.dumps(data), encoding="utf-8")
         tmp.replace(path)
 
     def lock(self, key: str) -> asyncio.Lock:
@@ -158,6 +166,7 @@ class JobManager:
         instances: list[str],
         source: str,
         action: Callable[[Job], Awaitable[None]],
+        workspace: str = "",
     ) -> Job:
         job = Job(
             id=datetime.datetime.now().strftime("%Y%m%d-%H%M%S-")
@@ -165,6 +174,7 @@ class JobManager:
             title=title,
             instances=sorted(instances),
             source=source,
+            workspace=workspace,
         )
         self.jobs[job.id] = job
         while len(self.jobs) > self.keep:
