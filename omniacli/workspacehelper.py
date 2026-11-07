@@ -30,7 +30,8 @@ the storage this way. storage-check <storage>: that check. storage-reset
 <storage>: the folder there now taken as the storage, by root by hand only.
 
 space: the room of each storage root's real disk (total, free) and of the
-workspaces' disks there (size, what each takes), in bytes.
+workspaces' disks there (size, what each takes), in bytes, and the networks
+of each workspace's projects.
 
 limits: the CPU and memory of all the workspace's containers together, a
 systemd slice /etc/systemd/system/omniacli_<workspace>.slice (CPUQuota of
@@ -586,8 +587,22 @@ def space() -> dict:
                 st = image.stat()
                 images[image.stem] = {"size": st.st_size, "used": st.st_blocks * 512}
         roots.append({"root": root, "device": folder.stat().st_dev, "total": vfs.f_blocks * vfs.f_frsize,
-                      "free": vfs.f_bavail * vfs.f_frsize, "images": images})
+                      "free": vfs.f_bavail * vfs.f_frsize, "images": images,
+                      "networks": {name: _networks_of(folder / name) for name in images}})
     return {"roots": roots}
+
+
+def _networks_of(mount: Path) -> list[str]:
+    """The networks of a workspace's projects (SUBNET of their .env, root's
+    only): its traffic is that of their bridges (metrics.py)."""
+    found = []
+    for env_file in sorted(mount.glob("*/*/.env")):
+        try:
+            value = _env(env_file.parent).get("SUBNET", "")
+            found.append(str(ipaddress.ip_network(value)))
+        except (OSError, ValueError):
+            continue
+    return found
 
 
 def network_pool() -> ipaddress.IPv4Network:

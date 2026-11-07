@@ -295,7 +295,15 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
     jobs = JobManager(settings.jobs_dir)
     gitcredentials.bind(settings)
     updater = AutoUpdater(settings, jobs)
-    sampler = Sampler(settings)
+    async def workspace_networks() -> dict[str, list[str]]:
+        """{workspace: the networks of its projects}, from the root helper."""
+        found = await workspaceops.space()
+        networks: dict[str, list[str]] = {}
+        for root in found.get("roots", []):
+            networks.update(root.get("networks") or {})
+        return networks
+
+    sampler = Sampler(settings, networks=workspace_networks)
     # the disks once a day, next to the jobs like the sessions
     disk_history = DiskHistory(settings.jobs_dir.parent / "disk_history.json")
     disk_recorder = DiskRecorder(settings, disk_history)
@@ -1852,7 +1860,8 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             return []
 
     def workspace_rows() -> list[dict]:
-        return [{**ws.to_dict(), "name": ws.name, "storage_problem": settings.storage_problem(ws)}
+        return [{**ws.to_dict(), "name": ws.name, "storage_problem": settings.storage_problem(ws),
+                 "instances_count": len([s for s in ws.servers if s in settings.servers])}
                 for ws in sorted(settings.workspaces.values(), key=lambda w: w.name)]
 
     # --- git credentials (gitcredentials.py) ---------------------------------
@@ -1998,6 +2007,14 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         job = jobs.submit(f"Install template {name} {template.get('version', '')}".strip(), ["omniacli/templates"],
                           f"manual: {user}", action)
         return {"job": job.id}
+
+    @app.get("/api/workspaces/load", dependencies=[Depends(admin)])
+    async def workspaces_load():
+        """The machine's load and each workspace's now (metrics.py): CPU in
+        percent of one core, memory in MiB, traffic in bytes per second."""
+        machine = sampler.machine_series()
+        return {"cores": sampler.cores, "interval": 5, "machine": machine[-1] if machine else None,
+                "workspaces": sampler.workspace_now()}
 
     @app.get("/api/workspaces/space", dependencies=[Depends(admin)])
     async def workspaces_space():
