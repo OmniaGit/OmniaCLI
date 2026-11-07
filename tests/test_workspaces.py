@@ -72,7 +72,6 @@ def test_parse_workspaces(tmp_path):
     for bad, message in (
             ({"Acme": {}}, "lower case"), ({"-a": {}}, "lower case"),
             ({"a": {"domain": "not a domain"}}, "not a domain name"),
-            ({"a": {"storage": "/elsewhere"}}, "not one of the storage roots"),
             ({"a": {"limits": {"disk_gb": 0}}}, "positive"), ({"a": {"limits": {"instances": 1.5}}}, "whole"),
             ({"a": {"limits": {"ram": 1}}}, "not one of"), ({"a": {"servers": ["../x"]}}, "not a server name"),
             ({"a": {"members": {"mario": "workspace"}}}, "role must be one of"),
@@ -82,6 +81,8 @@ def test_parse_workspaces(tmp_path):
         with pytest.raises(ConfigError, match=message):
             parse_workspaces(bad, ("/srv/omniacli",))
     assert parse_storage_roots({"storage": ["/srv/omniacli/", "/data"]}) == ("/srv/omniacli", "/data")
+    # a storage taken out of the main configuration is kept: the workspace is unusable, OmniaCLI starts
+    assert parse_workspaces({"a": {"storage": "/elsewhere"}}, ("/srv/omniacli",))["a"].storage == "/elsewhere"
     # none listed: the default folder; an empty list: none
     for data in (None, {}, {"storage": None}):
         assert parse_storage_roots(data) == (DEFAULT_STORAGE,) == ("/srv/omniacli/default_workspace",)
@@ -341,6 +342,39 @@ async def test_save_checks_the_room_of_the_disk(workspaces, client, env, monkeyp
         assert resp.status_code == 502 and said in error and ("OMNIACLI_WORKSPACES=1" in error) == hinted
 
 
+async def test_a_storage_taken_out_of_the_configuration(workspaces, client, env, monkeypatch):
+    """OmniaCLI starts; the workspace says it cannot be used, creates no
+    instance, and is fixed by picking a storage that is listed."""
+    settings = env["settings"]
+    settings.storage_roots = ("/srv/omniacli/default_workspace",)
+    acme = settings.workspaces["acme"]
+    acme.storage, acme.limits = "/media/gone", {"disk_gb": 10}
+    assert "/media/gone" in settings.storage_problem(acme) and settings.storage_problem(settings.workspaces["beta"]) is None
+    page = (await client.get("/workspaces/acme", headers=basic("mario"))).text
+    assert "This workspace cannot be used" in page and "/media/gone" in page
+    resp = await client.post("/api/workspaces/acme/instances/create", headers=post_as("mario"),
+                             json={"instance": "main", "template": "odooplm-20"})
+    assert resp.status_code == 400 and "cannot be used" in resp.json()["error"], resp.text
+    # another workspace is saved as before: acme's storage stops only acme
+    resp = await client.post("/api/workspaces/save", headers=POST,
+                             json={"name": "beta", "label": "Beta", "members": {"eva": "developer"}})
+    assert resp.status_code == 200, resp.text
+    assert "cannot be used" in (await client.get("/workspaces", headers={"Authorization": AUTH})).text
+    body = {"name": "acme", "label": "ACME", "domain": "acme.example.com", "servers": ["srv"],
+            "members": {"mario": "admin", "luca": "user"}, "limits": {"disk_gb": "10"}}
+    resp = await client.post("/api/workspaces/save", headers=POST, json={**body, "storage": "/media/gone"})
+    assert resp.status_code == 400 and "pick one of them" in resp.json()["error"]
+    from omniacli import workspaceops
+
+    async def space():
+        return {"roots": [{"root": "/srv/omniacli/default_workspace", "device": 1, "total": 100 * GB,
+                           "free": 50 * GB, "images": {}}]}
+    monkeypatch.setattr(workspaceops, "space", space)
+    resp = await client.post("/api/workspaces/save", headers=POST, json={**body, "storage": "/srv/omniacli/default_workspace"})
+    assert resp.status_code == 200, resp.text
+    assert settings.storage_problem(settings.workspaces["acme"]) is None
+
+
 async def test_cpu_and_memory_applied_when_changed(workspaces, client, env, monkeypatch):
     """The machine's admins change the CPU or memory of a workspace with
     instances: a job writes its slice again; other changes do not."""
@@ -442,6 +476,7 @@ async def test_create_and_remove_an_instance(workspaces, client, env, monkeypatc
     # the workspace needs its storage and disk limit
     resp = await client.post(url + "create", headers=post_as("mario"), json={"instance": "main", "template": "odooplm-20"})
     assert resp.status_code == 400 and "no storage" in resp.json()["error"]
+    settings.storage_roots = (str(tmp_path / "storage"),)
     settings.workspaces["acme"].storage = str(tmp_path / "storage")
     settings.workspaces["acme"].limits = {"disk_gb": 10, "instances": 2}
     page = (await client.get("/workspaces/acme", headers=basic("mario"))).text

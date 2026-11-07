@@ -366,6 +366,14 @@ class Settings:
     fixed: Access = field(default_factory=Access)
     web: Access = field(default_factory=Access)
 
+    def storage_problem(self, ws: Workspace) -> str | None:
+        """Why ws cannot use its storage, None when it can (or has none yet)."""
+        if ws.storage and ws.storage not in self.storage_roots:
+            return (f"the storage {ws.storage} of workspace {ws.name} is not one of workspaces.storage of the "
+                    f"main configuration ({', '.join(self.storage_roots) or 'none'}): the machine's admins pick "
+                    f"another on Settings › Workspaces, or list it again")
+        return None
+
     def set_web_access(self, web: Access) -> None:
         """Make web current: the fixed credentials win a name clash."""
         self.web = web
@@ -1082,10 +1090,10 @@ def parse_workspace(name: str, data: dict, storage_roots: tuple[str, ...] = ()) 
     domain = str(data.get("domain") or "").strip().lower()
     if domain and not DOMAIN_NAME.fullmatch(domain):
         raise ConfigError(f"{where}.domain: {domain!r} is not a domain name")
+    # kept even when it is no storage root any more (taken out of the main
+    # configuration): the workspace is then unusable until an admin picks
+    # another (Settings.storage_problem), OmniaCLI still starts
     storage = str(data.get("storage") or "").strip()
-    if storage and storage_roots and storage not in storage_roots:
-        raise ConfigError(f"{where}.storage: {storage} is not one of the storage roots "
-                          f"({', '.join(storage_roots)})")
     limits = {}
     for key, value in (data.get("limits") or {}).items():
         if key not in WORKSPACE_LIMITS:

@@ -135,7 +135,20 @@ of the main configuration). Of the two, the higher version is used; the instance
     field("name").disabled = !isNew;
     field("label").value = ws.label || "";
     field("domain").value = ws.domain || "";
-    if (ws.storage && field("storage").tagName === "SELECT") field("storage").value = ws.storage;
+    if (ws.storage && field("storage").tagName === "SELECT") {
+      // a storage taken out of the main configuration: shown, so it is not changed unseen
+      if (![...field("storage").options].some((o) => o.value === ws.storage)) {
+        const gone = document.createElement("option");
+        gone.value = ws.storage; gone.textContent = ws.storage + " (not in workspaces.storage: pick another)";
+        field("storage").appendChild(gone);
+      }
+      field("storage").value = ws.storage;
+    }
+    if (ws.storage_problem) {
+      const warn = document.createElement("div");
+      warn.className = "banner"; warn.textContent = "This workspace cannot be used: " + ws.storage_problem + ".";
+      box.insertBefore(warn, box.querySelector(".form-grid"));
+    }
     for (const input of box.querySelectorAll(".limit")) input.value = (ws.limits || {})[input.dataset.limit] ?? "";
     field("servers").value = (ws.servers || []).join("\n");
     field("members").value = Object.entries(ws.members || {}).map(([n, r]) => `${n} ${r}`).join("\n");

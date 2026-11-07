@@ -489,6 +489,9 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         own_log = selflog.attach(own_log_file)
         _logger.warning("this machine is a %s: shells of OmniaCLI's own user %s", settings.machine,
                         "open" if settings.machine == MACHINE_DEVELOPMENT else "closed")
+        for ws in settings.workspaces.values():
+            if settings.storage_problem(ws):
+                _logger.warning("workspace %s cannot be used: %s", ws.name, settings.storage_problem(ws))
         updater.start()
         scheduler.start()
         sampler.start()
@@ -1849,7 +1852,8 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             return []
 
     def workspace_rows() -> list[dict]:
-        return [{**ws.to_dict(), "name": ws.name} for ws in sorted(settings.workspaces.values(), key=lambda w: w.name)]
+        return [{**ws.to_dict(), "name": ws.name, "storage_problem": settings.storage_problem(ws)}
+                for ws in sorted(settings.workspaces.values(), key=lambda w: w.name)]
 
     # --- git credentials (gitcredentials.py) ---------------------------------
 
@@ -2031,6 +2035,9 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             except ConfigError as exc:
                 return refuse(str(exc))
             ws = found[name]
+            if ws.storage and ws.storage not in settings.storage_roots:
+                return refuse(f"storage: {ws.storage} is not one of workspaces.storage of the main configuration "
+                              f"({', '.join(settings.storage_roots) or 'none'}): pick one of them")
             unknown = [s for s in ws.servers if s not in settings.servers]
             if unknown:
                 return refuse(f"No server {', '.join(unknown)}")
@@ -2099,7 +2106,8 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             {"ws": ws, "members": members, "roles": ACCESS_ROLES, "me": me.name, "min_password": _MIN_PASSWORD,
              "servers": [n for n in ws.servers if n in settings.servers],
              "templates": [t.to_dict() for t in found.values()],
-             "can_create": bool(ws.storage and ws.limits.get("disk_gb")),
+             "can_create": bool(ws.storage and ws.limits.get("disk_gb")) and settings.storage_problem(ws) is None,
+             "storage_problem": settings.storage_problem(ws),
              "instances": [i for i in ws.instances() if workspaceops.server_name(ws, i) in settings.servers],
              "parameters": {n: {role: role_parameters(ws, n[len(ws.name) + 1:], role) for role in ROLES}
                             for n in ws.servers if n in settings.servers and n.startswith(f"{ws.name}-")},
@@ -2134,6 +2142,8 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             return refuse(str(exc))
         if not ws.storage or not ws.limits.get("disk_gb"):
             return refuse(f"Workspace {ws.name} has no storage or no disk limit: the machine's admins set them")
+        if settings.storage_problem(ws):
+            return refuse(f"Workspace {ws.name} cannot be used: {settings.storage_problem(ws)}")
         async with workspaces_lock:
             ws = a_workspace(workspace)
             if name in settings.servers or name in ws.servers:

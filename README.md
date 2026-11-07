@@ -848,6 +848,12 @@ workspaces:
     - /media/disk2/omniacli
 ```
 
+A workspace whose storage is no longer listed there still loads: OmniaCLI
+starts, says so in its log and on both workspace pages, and the workspace
+cannot be used (no instance is created, a save keeping that storage is
+refused) until an admin picks a listed one on Settings › Workspaces or lists
+it again.
+
 Without `workspaces.storage` there is one, `/srv/omniacli/default_workspace`,
 made (root's) by the package when the workspaces are allowed
 (`OMNIACLI_WORKSPACES`, below); `storage: []` is none. A folder holds all the

@@ -69,7 +69,9 @@ A new database has the user <strong>admin</strong> with password <strong>admin</
     {% endfor %}
   </table>
   </div>
-  {% if not can_create %}
+  {% if storage_problem %}
+  <div class="banner">This workspace cannot be used: {{ storage_problem }}.</div>
+  {% elif not can_create %}
   <p class="muted">New instances need a storage and a disk limit for the workspace: the machine's administrators set them.</p>
   {% elif instances_left is not none and instances_left <= 0 %}
   <p class="muted">The workspace has all the instances its limit allows.</p>
