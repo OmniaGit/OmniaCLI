@@ -9,8 +9,33 @@
 {% include "_disk.html" %}
 {% include "_load.html" %}
 {% include "_list.html" %}
-{# this machine: its load in one line, at the top (_load.html) #}
-{% if machine %}<div class="panel machine-top">{{ machine_row("", "this machine") }}</div>{% endif %}
+{# this machine: its load in one line, at the top (_load.html); a click on it
+   opens its whole load below (the last hour, its disks), again closes it #}
+{% if machine %}
+<div class="panel machine-top">
+  <div class="machine-top-row" role="button" tabindex="0" aria-expanded="false" aria-controls="machine-detail"
+       title="Open the load of this machine"><span class="fold-icon" aria-hidden="true">▸</span>{{ machine_row("", "this machine") }}</div>
+  <div id="machine-detail" hidden>
+<p class="muted" style="margin: 10px 0 0">The whole machine, last hour: every Odoo instance, PostgreSQL and the rest together.</p>
+<div class="machine-grid">
+  <section class="panel machine-panel" data-link="">
+    <div class="tiles">
+      <div class="tile"><div class="tile-label">CPU now</div><div class="tile-value" data-tile="cpu">–</div></div>
+      <div class="tile"><div class="tile-label">Received</div><div class="tile-value" data-tile="rx">–</div></div>
+      <div class="tile"><div class="tile-label">Sent</div><div class="tile-value" data-tile="tx">–</div></div>
+    </div>
+    <p class="muted machine-state" style="margin: 6px 0 0"></p>
+    <h3 class="chart-title">CPU, % of all <span class="cores">?</span></h3>
+    <div class="chart-box"><svg class="chart" data-chart="cpu" role="img" aria-label="CPU of this machine over the last hour"></svg><div class="chart-tip" hidden></div></div>
+    <h3 class="chart-title">Network, per second <span class="muted" style="font-weight: 400"><span class="key s1"></span>received<span class="key s2"></span>sent</span></h3>
+    <div class="chart-box"><svg class="chart" data-chart="net" role="img" aria-label="Network traffic of this machine over the last hour"></svg><div class="chart-tip" hidden></div></div>
+    <h3 class="chart-title">Disks, free space</h3>
+    <div class="disk-list"><span class="muted">Loading…</span></div>
+  </section>
+</div>
+  </div>
+</div>
+{% endif %}
 <section class="fold" data-fold="servers">
 <div class="fold-head">
   <h1><button type="button" class="fold-toggle" aria-expanded="true"><span class="fold-icon" aria-hidden="true">▾</span>Servers</button></h1>
@@ -128,7 +153,8 @@
   // the lists: their search and their groups (_list.html)
   for (const root of document.querySelectorAll("[data-list]")) OmniaList.attach(root);
   // this machine's row and each linked instance's fetch their own load and disks (_load.html)
-  document.querySelectorAll(".machine-top .machine-row, #linked .machine-row").forEach((row) => OmniaLoad.watch(row));
+  // (this machine's row is filled with its panel's load, below)
+  document.querySelectorAll("#linked .machine-row").forEach((row) => OmniaLoad.watch(row));
 </script>
 <script>
 (function () {
@@ -290,6 +316,102 @@
   const round = () => sources().forEach((link) => check(link));
   setInterval(() => { if (!document.hidden) round(); }, 5000);
   window.addEventListener("omniacli:servers", round);
+})();
+</script>
+<script>
+(function () {
+  // the load of this machine: the last hour, then the new samples every 5 s
+  const rate = OmniaLoad.rate;
+  const panels = [...document.querySelectorAll(".machine-panel")];
+  const series = new Map(panels.map((p) => [p, []]));
+  const since = new Map(panels.map((p) => [p, 0]));
+  async function show(panel) {
+    const link = panel.dataset.link;
+    const base = link ? "/links/" + encodeURIComponent(link) : "{{ prefix }}";
+    const from = since.get(panel) || Math.floor(Date.now() / 1000) - 3600;
+    const state = panel.querySelector(".machine-state");
+    let data;
+    try {
+      const resp = await fetch(`${base}/api/metrics?machine_only=1&since=${from}`);
+      if (!resp.ok) { state.textContent = "No answer: HTTP " + resp.status; return; }
+      data = await resp.json();
+    } catch (e) { state.textContent = "No answer."; return; }
+    if (!data.machine) { state.textContent = "Not available: that OmniaCLI is older."; return; }
+    state.textContent = "";
+    const points = series.get(panel).concat(data.machine).slice(-720);
+    series.set(panel, points);
+    if (points.length) since.set(panel, points[points.length - 1].t);
+    panel.querySelector(".cores").textContent = data.cores + (data.cores === 1 ? " core" : " cores");
+    OmniaCharts.draw(panel.querySelector('[data-chart="cpu"]'), points, "cpu",
+      {unit: "%", minMax: 10, format: (v) => v.toFixed(0), tip: (p) => `${p.cpu}% CPU`});
+    OmniaCharts.draw(panel.querySelector('[data-chart="net"]'), points, "rx",
+      {also: "tx", minMax: 1024, format: rate, padLeft: 70, tip: (p) => `received ${rate(p.rx)} · sent ${rate(p.tx)}`});
+    const last = points[points.length - 1];
+    if (last) {
+      panel.querySelector('[data-tile="cpu"]').textContent = last.cpu === null ? "–" : last.cpu.toFixed(1) + "%";
+      panel.querySelector('[data-tile="rx"]').textContent = rate(last.rx);
+      panel.querySelector('[data-tile="tx"]').textContent = rate(last.tx);
+    }
+    // the folded section's row: the last 15 minutes (_load.html)
+    if (!link) OmniaLoad.machine(document.querySelector('.machine-top .machine-row'), points, data.cores);
+  }
+  const refresh = () => panels.forEach((p) => show(p));
+  refresh();
+  setInterval(() => { if (!document.hidden) refresh(); }, 5000);
+  window.addEventListener("resize", () => panels.forEach((p) => { series.set(p, []); since.set(p, 0); show(p); }));
+})();
+</script>
+<script>
+(function () {
+  // the disks of each machine, in its panel, once a minute (_disk.html)
+  async function show(panel) {
+    const link = panel.dataset.link, list = panel.querySelector(".disk-list");
+    const base = link ? "/links/" + encodeURIComponent(link) : "{{ prefix }}";
+    let disks = null, error = "";
+    try {
+      const resp = await fetch(base + "/api/disks");
+      if (resp.ok) disks = (await resp.json()).disks;
+      else error = resp.status === 404 ? "Not available: that OmniaCLI is older." : "No answer: HTTP " + resp.status;
+    } catch (e) { error = "No answer."; }
+    // the folded section's row: the disks' compact widgets (_load.html)
+    if (!link) OmniaLoad.machineDisks(document.querySelector(".machine-top .machine-row"), disks, base);
+    if (!disks || !disks.length) { OmniaDisk.message(list, error || "No disks found.", !!error); return; }
+    list.replaceChildren();
+    for (const d of disks) {
+      const item = document.createElement("div");
+      OmniaDisk.render(item, OmniaLoad.machineDisk(d, base));
+      list.appendChild(item);
+    }
+  }
+  const refresh = () => document.querySelectorAll(".machine-panel").forEach((p) => show(p));
+  refresh();
+  setInterval(() => { if (!document.hidden) refresh(); }, 60000);
+})();
+</script>
+<script>
+(function () {
+  // this machine's row opens and closes its whole load; each viewer's choice is kept in this browser
+  const row = document.querySelector(".machine-top-row"), detail = document.getElementById("machine-detail");
+  if (!row) return;
+  const key = "omniacli.fold.machine";
+  const set = (open) => {
+    detail.hidden = !open;
+    row.setAttribute("aria-expanded", String(open));
+    row.title = open ? "Close the load of this machine" : "Open the load of this machine";
+    row.querySelector(".fold-icon").textContent = open ? "▾" : "▸";
+    // the charts drawn while hidden had no size: again at their size
+    if (open) window.dispatchEvent(new Event("resize"));
+  };
+  try { set(localStorage.getItem(key) === "open"); } catch (e) { set(false); }
+  const toggle = (e) => {
+    // a disk of the row is a link to its history: followed, not a toggle
+    if (e.target.closest("a")) return;
+    const open = detail.hidden;
+    set(open);
+    try { localStorage.setItem(key, open ? "open" : "closed"); } catch (err) { /* no storage */ }
+  };
+  row.addEventListener("click", toggle);
+  row.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(e); } });
 })();
 </script>
 {% if load_workspaces %}

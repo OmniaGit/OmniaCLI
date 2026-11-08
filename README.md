@@ -54,7 +54,9 @@ The screenshots show demo data.
 ![The login page](docs/images/login.jpg)
 
 **Dashboard**: on top, one row for the machine OmniaCLI runs on (CPU and
-network of the last 15 minutes, its disks: a disk opens its history), then
+network of the last 15 minutes, its disks: a disk opens its history); a
+click on the row opens its whole load below it (the last hour's charts, its
+disks with their estimate), another closes it, as each viewer left it, then
 this instance's servers with their workspace, the state of their Odoo and
 their CPU, then (for admins) **Workspaces**, the list of the Workspaces page,
 then **Linked**, one row for each linked instance's machine (the same row;

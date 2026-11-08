@@ -422,10 +422,12 @@ async def test_metrics_api(client, env):
     only = (await client.get("/api/metrics?machine_only=1", headers={"Authorization": AUTH})).json()
     assert only["instances"] == {} and only["machine"]
     page = (await client.get("/", headers={"Authorization": AUTH})).text
-    # this machine: one row at the top, before Servers, no section of its own
-    assert page.index('<div class="panel machine-top"><span class="machine-row" data-link="">') < page.index(
-        'data-fold="servers"')
-    assert "machine-panel" not in page and 'data-fold="machine"' not in page
+    # this machine: one row at the top, before Servers; a click opens its whole load (the panel, hidden)
+    top = page.index('<div class="machine-top-row" role="button"')
+    assert top < page.index('<span class="machine-row" data-link="">') < page.index('data-fold="servers"')
+    assert top < page.index('<div id="machine-detail" hidden>') < page.index(
+        '<section class="panel machine-panel" data-link="">') < page.index('data-fold="servers"')
+    assert 'data-fold="machine"' not in page and 'localStorage.getItem(key) === "open"' in page
 
 
 def test_machine_counters(tmp_path):
