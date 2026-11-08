@@ -93,6 +93,14 @@ async def test_servers_page_lists_the_links_servers(mine):
     page = (await mine.get("/", headers=as_user("admin"))).text
     assert "cliente › srv" not in page and 'data-lazy="/dashboard/servers?q="' in page
     assert "Loading the servers of the linked instances" in page
+    # This machine is this machine only; each link has its row in Linked, with
+    # the same load widgets as This machine's row (_load.html)
+    assert page.count('class="panel machine-panel"') == 1 and 'class="panel machine-panel" data-link=""' in page
+    assert page.index('data-fold="servers"') < page.index('data-fold="linked"') < page.index('data-fold="machine"')
+    for link in ("cliente", "down"):
+        assert f'<a href="/links/{link}/"><strong>{link}</strong></a>' in page
+        assert f'<span class="machine-row" data-link="{link}">' in page
+    assert page.count('class="load-cpu"') >= 3 and page.count('class="load-net"') == 3
     page = (await mine.get("/dashboard/servers", headers=as_user("admin"))).text
     assert "cliente › srv" in page and 'href="/links/cliente/servers/srv"><strong>cliente › srv</strong>' in page
     assert 'data-link="cliente" data-key="srv/test"' in page

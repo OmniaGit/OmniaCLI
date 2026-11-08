@@ -72,7 +72,13 @@ async def test_the_list_and_its_load(workspaces, client, env):  # noqa: F811
     assert 'class="ws-row" data-ws="acme"' in page and 'class="ws-row" data-ws="beta"' in page
     assert "New workspace" in page and 'id="edit-view" hidden' in page
     resp = await client.get("/api/workspaces/load", headers={"Authorization": AUTH})
-    assert resp.status_code == 200 and set(resp.json()) == {"cores", "interval", "machine", "workspaces"}
+    assert resp.status_code == 200 and set(resp.json()) == {"cores", "interval", "machine", "workspaces", "series"}
+    # the list's sparks: each workspace's points after since
+    data = (await client.get("/api/workspaces/load?since=1", headers={"Authorization": AUTH})).json()
+    assert set(data["series"]) == {"acme", "beta"}
+    # the machine and each workspace in the list: the load widgets of every row
+    assert '<span class="machine-row" data-link="">' in page
+    assert page.count('class="load-cpu"') == 3 and page.count('class="load-net"') == 3
     # a user of workspaces: refused, as the page
     assert (await client.get("/api/workspaces/load", headers=basic("mario"))).status_code == 403
     assert settings.workspaces["acme"].name == "acme"

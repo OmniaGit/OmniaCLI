@@ -174,7 +174,13 @@ svg.spark { width: 160px; height: 28px; display: block; }
 .sparks { min-width: 230px; }
 .spark-row { display: flex; align-items: center; gap: 8px; margin: 2px 0; }
 .spark-row .role { width: 34px; font-size: 11px; }
-.spark-value { width: 40px; text-align: right; color: var(--text); }
+/* the load widgets (_load.html): a spark and its last value */
+.load-cpu, .load-net { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.load-cpu svg.spark, .load-net svg.spark { width: 120px; }
+.load-value { color: var(--text); }
+.load-cpu .load-value { min-width: 40px; text-align: right; }
+.load-disks { display: inline-flex; gap: 10px; flex-wrap: wrap; }
+.machine-row { display: inline-flex; align-items: center; gap: 18px; flex-wrap: wrap; font-size: 13px; }
 .fold { margin-bottom: 24px; }
 .fold-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
 .fold-head h1 { margin: 0; font-size: inherit; }

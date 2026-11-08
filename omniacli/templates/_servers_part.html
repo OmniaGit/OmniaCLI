@@ -1,4 +1,5 @@
 {# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C · SPDX-License-Identifier: AGPL-3.0-or-later -#}
+{% from "_load.html" import cpu as load_cpu %}
 {# The server tables of the Dashboard: rendered with the page, or, when there
    are links, first with this instance's servers only and then again, with
    the links' servers, by /dashboard/servers (lazy: a slow link never holds
@@ -29,8 +30,7 @@
         {% for role in row.roles %}
         <div class="spark-row" data-link="{{ row.link }}" data-key="{{ row.name }}/{{ role }}">
           <span class="role {{ role }}">{{ "Prod" if role == "production" else "Test" }}</span>
-          <svg class="spark" role="img" aria-label="CPU of {{ row.label }} {{ role }}"></svg>
-          <span class="spark-value mono">–</span>
+          {{ load_cpu(row.label ~ " " ~ role) }}
           {% set st = row.state.get(role) %}
           {% if st %}
           {# the same buttons as on the server page, as icons #}

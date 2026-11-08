@@ -53,8 +53,13 @@ The screenshots show demo data.
 
 ![The login page](docs/images/login.jpg)
 
-**Dashboard**: the servers with the state of their Odoo and their CPU, the
-whole machine (CPU, network, disks) and the last jobs, updated as they run.
+**Dashboard**: the servers with the state of their Odoo and their CPU, then
+**Linked**, one row for each linked instance's machine (its CPU and network of
+the last 15 minutes, its disks; the name opens it), then **This machine**,
+the machine OmniaCLI runs on only (CPU, network, disks), and the last jobs,
+updated as they run. CPU, network and disks are shown by one widget each
+(`templates/_load.html`), the same in every row that shows them: This
+machine folded, Linked, the servers' CPU, the Workspaces list.
 Every disk is recorded once a day (kept three years, in
 `<data>/disk_history.json`): its panel row says when it will be full, from the
 trend of the last 90 days (at least 7 days of data), and **Disks** (`/disks`)

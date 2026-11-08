@@ -2,6 +2,7 @@
 {% extends "base.html" %}
 {% block content %}
 {% from "_icons.html" import icon, runner %}
+{% from "_load.html" import machine_row %}
 <section class="fold" data-fold="servers">
 <div class="fold-head">
   <h1><button type="button" class="fold-toggle" aria-expanded="true"><span class="fold-icon" aria-hidden="true">▾</span>Servers</button></h1>
@@ -20,27 +21,35 @@
 </div>
 </div></div>
 </section>
+{% if machine and machine_links %}
+<section class="fold" data-fold="linked">
+<div class="fold-head">
+  <h1><button type="button" class="fold-toggle" aria-expanded="true"><span class="fold-icon" aria-hidden="true">▾</span>Linked</button></h1>
+</div>
+<div class="fold-body"><div class="fold-inner">
+<p class="muted" style="margin-top: 0">The machine of each linked instance, through its link: CPU and network of the last 15 minutes, its disks. A name opens it.</p>
+<div class="panel"><div class="scroll">
+<table id="linked">
+  {% for link in machine_links %}
+  <tr class="linked-row"><td><a href="/links/{{ link | urlencode }}/"><strong>{{ link }}</strong></a></td>
+    <td>{{ machine_row(link, link) }}</td></tr>
+  {% endfor %}
+</table>
+</div></div>
+</div></div>
+</section>
+{% endif %}
 {% if machine %}
 <section class="fold" data-fold="machine">
 <div class="fold-head">
   <h1><button type="button" class="fold-toggle" aria-expanded="true"><span class="fold-icon" aria-hidden="true">▾</span>This machine</button></h1>
   {# shown when the section is folded: the last 15 minutes, and the disks #}
-  <div class="fold-summary" title="Open This machine">
-    <span class="sum-item"><span class="muted">CPU</span>
-      <svg class="spark" data-sum="cpu" width="120" height="28" role="img" aria-label="CPU of this machine, last 15 minutes"></svg>
-      <span class="mono" data-sum-value="cpu">–</span></span>
-    <span class="sum-item"><span class="muted">Network</span>
-      <svg class="spark" data-sum="net" width="120" height="28" role="img" aria-label="Network traffic of this machine, last 15 minutes"></svg>
-      <span class="mono" data-sum-value="net">–</span></span>
-    <span class="sum-item"><span class="muted">Disks</span><span class="sum-disks"></span></span>
-  </div>
+  <div class="fold-summary" title="Open This machine">{{ machine_row("", "this machine") }}</div>
 </div>
 <div class="fold-body"><div class="fold-inner">
 <p class="muted" style="margin-top: 0">The whole machine, last hour: every Odoo instance, PostgreSQL and the rest together.</p>
 <div class="machine-grid">
-  {% for link in [""] + machine_links %}
-  <section class="panel machine-panel" data-link="{{ link }}">
-    {% if link %}<h2 style="margin: 0 0 8px">Linked instance {{ link }}</h2>{% endif %}
+  <section class="panel machine-panel" data-link="">
     <div class="tiles">
       <div class="tile"><div class="tile-label">CPU now</div><div class="tile-value" data-tile="cpu">–</div></div>
       <div class="tile"><div class="tile-label">Received</div><div class="tile-value" data-tile="rx">–</div></div>
@@ -48,13 +57,12 @@
     </div>
     <p class="muted machine-state" style="margin: 6px 0 0"></p>
     <h3 class="chart-title">CPU, % of all <span class="cores">?</span></h3>
-    <div class="chart-box"><svg class="chart" data-chart="cpu" role="img" aria-label="CPU of {{ link or 'this machine' }} over the last hour"></svg><div class="chart-tip" hidden></div></div>
+    <div class="chart-box"><svg class="chart" data-chart="cpu" role="img" aria-label="CPU of this machine over the last hour"></svg><div class="chart-tip" hidden></div></div>
     <h3 class="chart-title">Network, per second <span class="muted" style="font-weight: 400"><span class="key s1"></span>received<span class="key s2"></span>sent</span></h3>
-    <div class="chart-box"><svg class="chart" data-chart="net" role="img" aria-label="Network traffic of {{ link or 'this machine' }} over the last hour"></svg><div class="chart-tip" hidden></div></div>
+    <div class="chart-box"><svg class="chart" data-chart="net" role="img" aria-label="Network traffic of this machine over the last hour"></svg><div class="chart-tip" hidden></div></div>
     <h3 class="chart-title">Disks, free space</h3>
     <div class="disk-list"><span class="muted">Loading…</span></div>
   </section>
-  {% endfor %}
 </div>
 </div></div>
 </section>
@@ -125,6 +133,12 @@
 })();
 </script>
 {% include "_charts.html" %}
+{% include "_disk.html" %}
+{% include "_load.html" %}
+<script>
+  // each linked instance's row fetches its own load and disks (_load.html)
+  document.querySelectorAll("#linked .machine-row").forEach((row) => OmniaLoad.watch(row));
+</script>
 <script>
 (function () {
   const WINDOW = 15 * 60;
@@ -145,10 +159,8 @@
         const data = metrics[row.dataset.link];
         if (!data) continue;
         const series = (data.instances[row.dataset.key] || {points: []}).points;
-        OmniaCharts.draw(row.querySelector("svg"), series, "cpu", {spark: true, minMax: 10});
-        const last = series.filter((p) => p.cpu !== null).pop();
-        row.querySelector(".spark-value").textContent = last ? last.cpu.toFixed(0) + "%" : "–";
-        row.title = last ? `${last.cpu}% CPU, ${last.mem} MiB, ${last.procs} processes` : "no samples yet";
+        OmniaLoad.cpu(row.querySelector(".load-cpu"), series,
+                      {title: (p) => `${p.cpu}% CPU, ${p.mem} MiB, ${p.procs} processes`});
       }
     } catch (e) { /* next round */ }
   }
@@ -281,7 +293,7 @@
     }
   }
 
-  const sources = () => [...new Set([""].concat([...document.querySelectorAll(".machine-panel")].map((p) => p.dataset.link)))];
+  const sources = () => [...new Set([""].concat([...document.querySelectorAll("#linked .machine-row")].map((r) => r.dataset.link)))];
   const round = () => sources().forEach((link) => check(link));
   setInterval(() => { if (!document.hidden) round(); }, 5000);
   window.addEventListener("omniacli:servers", round);
@@ -306,9 +318,8 @@
 </script>
 <script>
 (function () {
-  // the load of each machine: the last hour, then the new samples every 5 s
-  const rate = (b) => b >= 1048576 ? (b / 1048576).toFixed(1) + " MiB/s"
-    : b >= 1024 ? (b / 1024).toFixed(0) + " KiB/s" : b.toFixed(0) + " B/s";
+  // the load of this machine: the last hour, then the new samples every 5 s
+  const rate = OmniaLoad.rate;
   const panels = [...document.querySelectorAll(".machine-panel")];
   const series = new Map(panels.map((p) => [p, []]));
   const since = new Map(panels.map((p) => [p, 0]));
@@ -339,18 +350,8 @@
       panel.querySelector('[data-tile="rx"]').textContent = rate(last.rx);
       panel.querySelector('[data-tile="tx"]').textContent = rate(last.tx);
     }
-    if (!link) {
-      // the folded section's row: the last 15 minutes
-      const recent = points.slice(-180);
-      OmniaCharts.draw(document.querySelector('[data-sum="cpu"]'), recent, "cpu", {spark: true, minMax: 10});
-      OmniaCharts.draw(document.querySelector('[data-sum="net"]'), recent, "rx", {spark: true, also: "tx", minMax: 1024});
-      if (last) {
-        document.querySelector('[data-sum-value="cpu"]').textContent = last.cpu === null ? "–" : last.cpu.toFixed(0) + "%";
-        const net = document.querySelector('[data-sum-value="net"]');
-        net.textContent = "↓" + rate(last.rx) + " ↑" + rate(last.tx);
-        net.title = `received ${rate(last.rx)}, sent ${rate(last.tx)}`;
-      }
-    }
+    // the folded section's row: the last 15 minutes (_load.html)
+    if (!link) OmniaLoad.machine(document.querySelector('.fold-summary .machine-row'), points, data.cores);
   }
   const refresh = () => panels.forEach((p) => show(p));
   refresh();
@@ -358,7 +359,6 @@
   window.addEventListener("resize", () => panels.forEach((p) => { series.set(p, []); since.set(p, 0); show(p); }));
 })();
 </script>
-{% include "_disk.html" %}
 <script>
 (function () {
   // the disks of each machine, in its panel, once a minute (_disk.html)
@@ -371,26 +371,13 @@
       if (resp.ok) disks = (await resp.json()).disks;
       else error = resp.status === 404 ? "Not available: that OmniaCLI is older." : "No answer: HTTP " + resp.status;
     } catch (e) { error = "No answer."; }
-    const widget = (d) => ({label: d.mount, title: `${d.device} (${d.type})`, used: d.used, free: d.free, total: d.total,
-                            forecast: d.forecast, note: d.holds.length ? d.holds.join(", ") : "",
-                            // an OmniaCLI older than the history has no Disks page
-                            href: "forecast" in d ? base + "/disks#" + encodeURIComponent(d.mount) : null});
-    if (!link) {
-      // the folded section's row: one compact widget per disk
-      const summary = document.querySelector(".sum-disks");
-      summary.replaceChildren();
-      if (!disks || !disks.length) summary.textContent = "–";
-      for (const d of disks || []) {
-        const item = document.createElement("span");
-        OmniaDisk.render(item, widget(d), {compact: true});
-        summary.appendChild(item);
-      }
-    }
+    // the folded section's row: the disks' compact widgets (_load.html)
+    if (!link) OmniaLoad.machineDisks(document.querySelector(".fold-summary .machine-row"), disks, base);
     if (!disks || !disks.length) { OmniaDisk.message(list, error || "No disks found.", !!error); return; }
     list.replaceChildren();
     for (const d of disks) {
       const item = document.createElement("div");
-      OmniaDisk.render(item, widget(d));
+      OmniaDisk.render(item, OmniaLoad.machineDisk(d, base));
       list.appendChild(item);
     }
   }
@@ -404,8 +391,7 @@
 (function () {
   // the load of each of the user's workspaces: the last hour, then every 5 s;
   // the disk with each answer (it is read through the root helper)
-  const rate = (b) => b >= 1048576 ? (b / 1048576).toFixed(1) + " MiB/s"
-    : b >= 1024 ? (b / 1024).toFixed(0) + " KiB/s" : b.toFixed(0) + " B/s";
+  const rate = OmniaLoad.rate;
   const panels = [...document.querySelectorAll(".ws-load-panel")];
   const series = new Map(panels.map((p) => [p, []]));
   const since = new Map(panels.map((p) => [p, 0]));

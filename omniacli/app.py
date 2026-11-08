@@ -2026,12 +2026,14 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         return {"job": job.id}
 
     @app.get("/api/workspaces/load", dependencies=[Depends(admin)])
-    async def workspaces_load():
+    async def workspaces_load(since: int = 0):
         """The machine's load and each workspace's now (metrics.py): CPU in
-        percent of one core, memory in MiB, traffic in bytes per second."""
+        percent of one core, memory in MiB, traffic in bytes per second;
+        series, each workspace's points after since (the list's sparks)."""
         machine = sampler.machine_series()
         return {"cores": sampler.cores, "interval": 5, "machine": machine[-1] if machine else None,
-                "workspaces": sampler.workspace_now()}
+                "workspaces": sampler.workspace_now(),
+                "series": {name: sampler.workspace_series(name, since) for name in settings.workspaces} if since else {}}
 
     @app.get("/api/workspaces/{workspace}/load")
     async def workspace_load(workspace: str, since: int = 0):
