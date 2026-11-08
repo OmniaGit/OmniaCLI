@@ -358,22 +358,10 @@
   window.addEventListener("resize", () => panels.forEach((p) => { series.set(p, []); since.set(p, 0); show(p); }));
 })();
 </script>
+{% include "_disk.html" %}
 <script>
 (function () {
-  // the free space of each machine's disks, in its panel, once a minute
-  // a full date within 30 days is an error, within 90 a warning
-  function fullLevel(day) {
-    const days = (new Date(day) - new Date()) / 86400000;
-    return days < 30 ? "error" : days < 90 ? "warn" : "muted";
-  }
-  const size = (b) => b >= 1099511627776 ? (b / 1099511627776).toFixed(2) + " TiB"
-    : b >= 1073741824 ? (b / 1073741824).toFixed(1) + " GiB" : (b / 1048576).toFixed(0) + " MiB";
-  const node = (tag, cls, text) => {
-    const el = document.createElement(tag);
-    if (cls) el.className = cls;
-    if (text !== undefined) el.textContent = text;
-    return el;
-  };
+  // the disks of each machine, in its panel, once a minute (_disk.html)
   async function show(panel) {
     const link = panel.dataset.link, list = panel.querySelector(".disk-list");
     const base = link ? "/links/" + encodeURIComponent(link) : "{{ prefix }}";
@@ -383,51 +371,27 @@
       if (resp.ok) disks = (await resp.json()).disks;
       else error = resp.status === 404 ? "Not available: that OmniaCLI is older." : "No answer: HTTP " + resp.status;
     } catch (e) { error = "No answer."; }
-    list.textContent = "";
+    const widget = (d) => ({label: d.mount, title: `${d.device} (${d.type})`, used: d.used, free: d.free, total: d.total,
+                            forecast: d.forecast, note: d.holds.length ? d.holds.join(", ") : "",
+                            // an OmniaCLI older than the history has no Disks page
+                            href: "forecast" in d ? base + "/disks#" + encodeURIComponent(d.mount) : null});
     if (!link) {
-      // the folded section's row: one small bar per disk
+      // the folded section's row: one compact widget per disk
       const summary = document.querySelector(".sum-disks");
-      summary.textContent = disks && disks.length ? "" : "–";
+      summary.replaceChildren();
+      if (!disks || !disks.length) summary.textContent = "–";
       for (const d of disks || []) {
-        const item = node("span", "sum-disk");
-        item.title = `${d.mount}: ${size(d.free)} free of ${size(d.total)}`;
-        const bar = node("div", "disk-bar");
-        const fill = node("div", "disk-fill " + d.level);
-        fill.style.width = Math.min(100, d.used / d.total * 100).toFixed(1) + "%";
-        bar.appendChild(fill);
-        item.append(bar, node("span", "mono " + (d.level === "ok" ? "" : d.level), d.free_percent.toFixed(0) + "%"));
+        const item = document.createElement("span");
+        OmniaDisk.render(item, widget(d), {compact: true});
         summary.appendChild(item);
       }
     }
-    if (!disks || !disks.length) {
-      list.appendChild(node("span", error ? "error" : "muted", error || "No disks found."));
-      return;
-    }
+    if (!disks || !disks.length) { OmniaDisk.message(list, error || "No disks found.", !!error); return; }
+    list.replaceChildren();
     for (const d of disks) {
-      const row = node("div", "disk");
-      const head = node("div", "disk-head");
-      const where = node("span", "mono", d.mount);
-      where.title = `${d.device} (${d.type})`;
-      head.append(where, node("span", "mono " + (d.level === "ok" ? "" : d.level),
-                              `${size(d.free)} free · ${d.free_percent.toFixed(0)}%`));
-      const bar = node("div", "disk-bar");
-      const fill = node("div", "disk-fill " + d.level);
-      fill.style.width = Math.min(100, d.used / d.total * 100).toFixed(1) + "%";
-      bar.appendChild(fill);
-      const note = node("div", "muted disk-note", "of " + size(d.total) + (d.holds.length ? " · " + d.holds.join(", ") : ""));
-      row.append(head, bar, note);
-      // when it will be full (an OmniaCLI older than the history gives none)
-      if (d.forecast) {
-        const f = d.forecast;
-        const when = node("div", "disk-note " + (f.full ? fullLevel(f.full) : "muted"));
-        when.textContent = f.full ? `full around ${new Date(f.full).toLocaleDateString()} (+${size(f.per_day)}/day) · `
-                                  : f.reason[0].toUpperCase() + f.reason.slice(1) + " · ";
-        const history = node("a", "", "history");
-        history.href = base + "/disks#" + encodeURIComponent(d.mount);
-        when.appendChild(history);
-        row.appendChild(when);
-      }
-      list.appendChild(row);
+      const item = document.createElement("div");
+      OmniaDisk.render(item, widget(d));
+      list.appendChild(item);
     }
   }
   const refresh = () => document.querySelectorAll(".machine-panel").forEach((p) => show(p));
@@ -442,7 +406,6 @@
   // the disk with each answer (it is read through the root helper)
   const rate = (b) => b >= 1048576 ? (b / 1048576).toFixed(1) + " MiB/s"
     : b >= 1024 ? (b / 1024).toFixed(0) + " KiB/s" : b.toFixed(0) + " B/s";
-  const gb = (b) => (b / 1073741824).toFixed(1) + " GB";
   const panels = [...document.querySelectorAll(".ws-load-panel")];
   const series = new Map(panels.map((p) => [p, []]));
   const since = new Map(panels.map((p) => [p, 0]));
@@ -482,32 +445,7 @@
     }
     if (!withDisk) return;
     const box = panel.querySelector(".ws-disk");
-    box.textContent = "";
-    if (!data.disk) {
-      const note = document.createElement("span");
-      note.className = data.disk_error ? "error" : "muted";
-      note.textContent = data.disk_error || "No disk yet.";
-      box.appendChild(note);
-      return;
-    }
-    const limit = limits.disk_gb ? limits.disk_gb * 1073741824 : data.disk.size;
-    const share = limit ? Math.min(data.disk.used / limit, 1) : 0;
-    const head = document.createElement("div");
-    head.className = "disk-head";
-    const used = document.createElement("span");
-    used.className = "mono" + (share > 0.9 ? " error" : "");
-    used.textContent = `${gb(data.disk.used)} used of ${limit ? gb(limit) : "—"}`;
-    const pct = document.createElement("span");
-    pct.className = "mono";
-    pct.textContent = limit ? (share * 100).toFixed(0) + "%" : "";
-    head.append(used, pct);
-    const bar = document.createElement("div");
-    bar.className = "disk-bar";
-    const fill = document.createElement("div");
-    fill.className = "disk-fill " + (share > 0.9 ? "error" : share > 0.75 ? "warn" : "ok");
-    fill.style.width = (share * 100).toFixed(1) + "%";
-    bar.appendChild(fill);
-    box.append(head, bar);
+    OmniaDisk.workspace(box, name, data);
   }
   const refresh = () => { const disk = rounds++ % 12 === 0; panels.forEach((p) => show(p, disk)); };
   refresh();

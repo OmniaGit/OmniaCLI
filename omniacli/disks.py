@@ -59,7 +59,7 @@ def known_paths(settings: Settings) -> list[tuple[str, str]]:
     return paths
 
 
-def _holder(path: str, points: list[str]) -> str | None:
+def holder(path: str, points: list[str]) -> str | None:
     """The longest mount point that holds path."""
     path = os.path.normpath(os.path.abspath(path))
     best = None
@@ -85,7 +85,7 @@ async def disks(settings: Settings) -> list[dict]:
     points = [m[1] for m in found]
     holds: dict[str, list[str]] = {}
     for what, path in await asyncio.to_thread(known_paths, settings):
-        point = _holder(path, points)
+        point = holder(path, points)
         if point:
             holds.setdefault(point, []).append(what)
     result = []

@@ -447,7 +447,7 @@ def test_machine_counters(tmp_path):
 
 
 def test_disk_mounts(tmp_path):
-    from omniacli.disks import _holder, mounts
+    from omniacli.disks import holder, mounts
 
     table = tmp_path / "mounts"
     table.write_text(
@@ -461,9 +461,9 @@ def test_disk_mounts(tmp_path):
     found = mounts(table)
     assert found == [("/dev/sda1", "/", "ext4"), ("/dev/sdb1", "/srv/bound", "ext4")]
     points = ["/", "/media/My Disk", "/srv/bound"]
-    assert _holder("/media/My Disk/backups/x.zip", points) == "/media/My Disk"
-    assert _holder("/media/My Diskette/x", points) == "/"
-    assert _holder("/srv/bound", points) == "/srv/bound"
+    assert holder("/media/My Disk/backups/x.zip", points) == "/media/My Disk"
+    assert holder("/media/My Diskette/x", points) == "/"
+    assert holder("/srv/bound", points) == "/srv/bound"
 
 
 async def test_disks_api(client, env, monkeypatch):

@@ -194,9 +194,6 @@ svg.spark { width: 160px; height: 28px; display: block; }
 .sum-item { display: inline-flex; align-items: center; gap: 6px; }
 .fold-summary svg.spark { width: 120px; }
 .sum-disks { display: inline-flex; gap: 10px; flex-wrap: wrap; }
-.sum-disk { display: inline-flex; align-items: center; gap: 4px; }
-.sum-disk .disk-bar { width: 40px; height: 6px; }
-.sum-disk .warn { color: var(--warn); }
 @media (prefers-reduced-motion: reduce) { .fold.closed .fold-summary { animation: none; } }
 .chart-line-2 { stroke: var(--series-2); }
 /* the job's state: a runner, a thumbs up, a danger sign */
@@ -305,10 +302,16 @@ button.icon-btn .icon { margin: 0; }
 .disk-head { display: flex; justify-content: space-between; gap: 12px; font-size: 13px; margin-bottom: 4px; }
 .disk-head .mono { overflow-wrap: anywhere; } .disk-head .warn { color: var(--warn); }
 .disk-note { font-size: 12px; margin-top: 3px; }
-.disk-bar { height: 8px; border-radius: 4px; background: var(--border); overflow: hidden; }
+.disk-bar { height: 8px; border-radius: 4px; background: var(--border); overflow: hidden; display: flex; }
 .disk-fill { height: 100%; background: var(--series-1); }
 .disk-fill.warn { background: var(--warn); } .disk-fill.error { background: var(--err); }
+/* what is promised on a real disk and not used yet */
+.disk-promised { height: 100%; background: repeating-linear-gradient(45deg, var(--series-1) 0 3px, transparent 3px 6px); opacity: .45; }
 .disk-note.warn { color: var(--warn); }
+/* the one-line widget: a table cell, a folded summary (_disk.html) */
+.disk-compact { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.disk-compact .disk-bar { width: 60px; }
+.disk-compact .warn { color: var(--warn); }
 .server-rows td { vertical-align: middle; }
 .server-name { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 12px; }
 .view-buttons { display: inline-flex; flex-wrap: wrap; gap: 6px; }

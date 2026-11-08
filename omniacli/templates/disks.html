@@ -10,15 +10,18 @@
 .chart-capacity { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 3 4; }
 .chart-capacity-label { fill: var(--muted); font-size: 11px; }
 .disk-chart { width: 100%; height: 220px; display: block; }
-.disk-summary { margin: 2px 0 8px; }
-.disk-summary .warn { color: var(--warn); }
 </style>
 <h1>Disks</h1>
 <p class="muted">The used space of each disk, recorded once a day and kept three years. The dashed line is the
 forecast: the trend of the last 90 days (at least 7 days of data), up to the day the disk is full, that is
 when no space is left to a service (ext4 keeps 5% for root).</p>
 <div id="disks"><p class="muted">Loading…</p></div>
-
+<div id="ws-disks-box" hidden>
+<h2>Workspaces' disks</h2>
+<p class="muted">The space each workspace's disk takes, recorded the same way: full is its limit (disk_gb).</p>
+<div id="ws-disks"></div>
+</div>
+{% include "_disk.html" %}
 <script>
 (function () {
   const NS = "http://www.w3.org/2000/svg";
@@ -34,8 +37,7 @@ when no space is left to a service (ext4 keeps 5% for root).</p>
     if (text !== undefined) e.textContent = text;
     return e;
   };
-  const size = (b) => b >= 1099511627776 ? (b / 1099511627776).toFixed(2) + " TiB"
-    : b >= 1073741824 ? (b / 1073741824).toFixed(1) + " GiB" : (b / 1048576).toFixed(0) + " MiB";
+  const size = OmniaDisk.size;
   // days as UTC midnights: no daylight saving step between two of them
   const time = (day) => Date.parse(day + "T00:00:00Z");
   const dayText = (t) => new Date(t).toLocaleDateString(undefined, {timeZone: "UTC"});
@@ -116,20 +118,12 @@ when no space is left to a service (ext4 keeps 5% for root).</p>
     });
   }
 
-  function summary(disk) {
+  // the disk now and its estimate: the widget of every page (_disk.html)
+  function summary(disk, label) {
     const last = disk.points[disk.points.length - 1];
-    const f = disk.forecast;
-    const p = node("p", "disk-summary");
-    p.appendChild(node("span", "", `Used ${size(last.used)}, free ${size(last.free)} of ${size(last.total)} · `));
-    if (f.full) {
-      const days = (time(f.full) - time(last.day)) / DAY;
-      const cls = days < 30 ? "error" : days < 90 ? "warn" : "";
-      p.appendChild(node("strong", cls, `full around ${dayText(time(f.full))}`));
-      p.appendChild(node("span", "muted", ` (+${size(f.per_day)} a day over the last ${f.days} days)`));
-    } else {
-      p.appendChild(node("span", "muted", f.reason + (f.per_day !== null ? ` (${size(Math.abs(f.per_day))} a day ${f.per_day < 0 ? "freed" : "used"} over the last ${f.days} days)` : "")));
-    }
-    return p;
+    const box = node("div");
+    OmniaDisk.render(box, {label, used: last.used, free: last.free, total: last.total, forecast: disk.forecast});
+    return box;
   }
 
   function table(disk) {
@@ -149,32 +143,35 @@ when no space is left to a service (ext4 keeps 5% for root).</p>
     return box;
   }
 
-  let data = [];
+  let data = [], workspaces = [];
+  function panelOf(disk, id, label, title) {
+    const panel = node("section", "panel");
+    panel.id = id;
+    panel.style.marginBottom = "16px";
+    const h = node("h2", "mono", label);
+    if (title) h.title = title;
+    panel.append(h, summary(disk, ""));
+    if (disk.points.length < 2) {
+      panel.append(node("p", "muted", "Recorded once a day: the chart starts with the second day."), table(disk));
+      return panel;
+    }
+    const box = node("div", "chart-box");
+    const svg = el("svg", {class: "chart disk-chart", role: "img",
+                           "aria-label": `Used space of ${label} by day, with the forecast`});
+    const tip = node("div", "chart-tip"); tip.hidden = true;
+    box.append(svg, tip);
+    panel.append(box, table(disk));
+    requestAnimationFrame(() => draw(svg, tip, disk));
+    return panel;
+  }
   function render() {
     const root = document.getElementById("disks");
     root.replaceChildren();
-    if (!data.length) { root.appendChild(node("p", "muted", "No day recorded yet: the first is recorded within ten minutes of the start.")); return; }
-    for (const disk of data) {
-      const panel = node("section", "panel");
-      panel.id = disk.mount;
-      panel.style.marginBottom = "16px";
-      const h = node("h2", "mono", disk.mount);
-      h.title = `${disk.device} (${disk.type})`;
-      panel.append(h, summary(disk));
-      if (disk.points.length < 2) {
-        panel.append(node("p", "muted", "Recorded once a day: the chart starts with the second day."), table(disk));
-        root.appendChild(panel);
-        continue;
-      }
-      const box = node("div", "chart-box");
-      const svg = el("svg", {class: "chart disk-chart", role: "img",
-                             "aria-label": `Used space of ${disk.mount} by day, with the forecast`});
-      const tip = node("div", "chart-tip"); tip.hidden = true;
-      box.append(svg, tip);
-      panel.append(box, table(disk));
-      root.appendChild(panel);
-      draw(svg, tip, disk);
-    }
+    if (!data.length) root.appendChild(node("p", "muted", "No day recorded yet: the first is recorded within ten minutes of the start."));
+    for (const disk of data) root.appendChild(panelOf(disk, disk.mount, disk.mount, `${disk.device} (${disk.type})`));
+    const wsRoot = document.getElementById("ws-disks");
+    document.getElementById("ws-disks-box").hidden = !workspaces.length;
+    wsRoot.replaceChildren(...workspaces.map((disk) => panelOf(disk, "workspace-" + disk.name, disk.name, "")));
     if (location.hash) {
       const target = document.getElementById(decodeURIComponent(location.hash.slice(1)));
       if (target) target.scrollIntoView();
@@ -184,7 +181,9 @@ when no space is left to a service (ext4 keeps 5% for root).</p>
     try {
       const resp = await fetch("{{ prefix }}/api/disks/history");
       if (!resp.ok) throw new Error("HTTP " + resp.status);
-      data = (await resp.json()).disks;
+      const found = await resp.json();
+      data = found.disks;
+      workspaces = found.workspaces || [];
     } catch (e) {
       document.getElementById("disks").replaceChildren(node("p", "error", "Could not load the history: " + e.message));
       return;
@@ -192,7 +191,7 @@ when no space is left to a service (ext4 keeps 5% for root).</p>
     render();
   }
   load();
-  window.addEventListener("resize", () => { if (data.length) render(); });
+  window.addEventListener("resize", () => { if (data.length || workspaces.length) render(); });
 })();
 </script>
 {% endblock %}

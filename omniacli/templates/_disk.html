@@ -1,0 +1,123 @@
+{# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C · SPDX-License-Identifier: AGPL-3.0-or-later -#}
+{# The disk widget: every page that shows a disk (a disk of the machine, of a
+   linked or published instance, a workspace's disk) shows it with this, so
+   each looks and reads the same.
+
+   OmniaDisk.render(box, disk, opts) fills box with one disk:
+     disk: {label, title, used, free, total, reserved, forecast, href, note}
+       used, free, total: bytes; free defaults to total - used (a disk of the
+         machine passes its own: ext4 keeps 5% for root)
+       reserved: bytes promised on it and not used yet (a real disk under
+         workspaces), shown as a lighter part of the bar after the used one
+       forecast: diskhistory.forecast ({full, per_day, days, reason}), the
+         estimated consumption; none: not recorded yet
+       href: its history (the Disks page)
+       note: one more line under the bar
+     opts.compact: one line (a table cell, a folded summary): the bar, the
+       percent used and, when near, the day it is full; the rest in its title
+   OmniaDisk.level(disk): "ok", "warn" or "error", the same thresholds as
+   disks.py (free under 15% and 5%), or a full day within 90 and 30 days.
+   OmniaDisk.size(bytes): the size as text.
+   OmniaDisk.workspace(box, name, load): a workspace's disk from the answer of
+   /api/workspaces/<name>/load (its limit, or its image's size), or why not. #}
+<script>
+const OmniaDisk = (function () {
+  const WARN_PERCENT = 15, ERROR_PERCENT = 5, DAY = 86400000;
+  const size = (b) => b >= 1099511627776 ? (b / 1099511627776).toFixed(2) + " TiB"
+    : b >= 1073741824 ? (b / 1073741824).toFixed(1) + " GiB" : (b / 1048576).toFixed(0) + " MiB";
+  const node = (tag, cls, text) => {
+    const el = document.createElement(tag);
+    if (cls) el.className = cls;
+    if (text !== undefined) el.textContent = text;
+    return el;
+  };
+  const freeOf = (d) => d.free !== undefined && d.free !== null ? d.free : Math.max(d.total - d.used, 0);
+  const dayText = (iso) => new Date(iso + "T00:00:00").toLocaleDateString();
+  function fullLevel(f) {
+    if (!f || !f.full) return "ok";
+    const days = (new Date(f.full + "T00:00:00") - new Date()) / DAY;
+    return days < 30 ? "error" : days < 90 ? "warn" : "ok";
+  }
+  function spaceLevel(d) {
+    if (!d.total) return "ok";
+    const percent = freeOf(d) / d.total * 100;
+    return percent < ERROR_PERCENT ? "error" : percent < WARN_PERCENT ? "warn" : "ok";
+  }
+  const ORDER = ["ok", "warn", "error"];
+  const level = (d) => ORDER[Math.max(ORDER.indexOf(spaceLevel(d)), ORDER.indexOf(fullLevel(d.forecast)))];
+  // the estimated consumption, in words
+  function forecastText(f) {
+    if (!f) return "no estimate yet: the disk is recorded once a day";
+    if (f.full) return `full around ${dayText(f.full)} (+${size(f.per_day)} a day over the last ${f.days} days)`;
+    const pace = f.per_day !== null && f.per_day !== undefined
+      ? ` (${size(Math.abs(f.per_day))} a day ${f.per_day < 0 ? "freed" : "used"} over the last ${f.days} days)` : "";
+    return f.reason + pace;
+  }
+  function bar(d, cls) {
+    const outer = node("div", "disk-bar" + (cls ? " " + cls : ""));
+    const share = d.total ? Math.min(d.used / d.total, 1) : 0;
+    const fill = node("div", "disk-fill " + spaceLevel(d));
+    fill.style.width = (share * 100).toFixed(1) + "%";
+    outer.appendChild(fill);
+    if (d.reserved > 0 && d.total) {
+      const more = node("div", "disk-promised");
+      more.style.width = (Math.min(d.reserved / d.total, 1 - share) * 100).toFixed(1) + "%";
+      outer.appendChild(more);
+    }
+    return outer;
+  }
+  function summaryText(d) {
+    const parts = [`${size(d.used)} used, ${size(freeOf(d))} free of ${size(d.total)}`];
+    if (d.reserved > 0) parts.push(`${size(d.reserved)} promised, not used yet`);
+    parts.push(forecastText(d.forecast));
+    return parts.join(" · ");
+  }
+  function render(box, d, opts) {
+    opts = opts || {};
+    box.replaceChildren();
+    const lvl = level(d), percent = d.total ? d.used / d.total * 100 : 0;
+    if (opts.compact) {
+      const item = node("span", "disk-compact");
+      item.title = (d.label ? d.label + ": " : "") + summaryText(d) + (d.note ? " · " + d.note : "");
+      item.append(bar(d), node("span", "mono " + (lvl === "ok" ? "" : lvl), percent.toFixed(0) + "%"));
+      if (d.forecast && d.forecast.full && fullLevel(d.forecast) !== "ok") {
+        item.appendChild(node("span", "mono " + fullLevel(d.forecast), "full ~" + dayText(d.forecast.full)));
+      }
+      box.appendChild(item);
+      return;
+    }
+    const row = node("div", "disk");
+    const head = node("div", "disk-head");
+    const where = node("span", "mono", d.label || "");
+    if (d.title) where.title = d.title;
+    head.append(where, node("span", "mono " + (spaceLevel(d) === "ok" ? "" : spaceLevel(d)),
+                            `${size(d.used)} used of ${size(d.total)} · ${size(freeOf(d))} free`));
+    const notes = [];
+    if (d.reserved > 0) notes.push(`${size(d.reserved)} promised to workspaces, not used yet`);
+    if (d.note) notes.push(d.note);
+    row.append(head, bar(d));
+    if (notes.length) row.appendChild(node("div", "muted disk-note", notes.join(" · ")));
+    const when = node("div", "disk-note " + (fullLevel(d.forecast) === "ok" ? "muted" : fullLevel(d.forecast)));
+    when.textContent = "Estimate: " + forecastText(d.forecast);
+    if (d.href) {
+      when.appendChild(document.createTextNode(" · "));
+      const history = node("a", "", "history");
+      history.href = d.href;
+      when.appendChild(history);
+    }
+    row.appendChild(when);
+    box.appendChild(row);
+  }
+  // a message in place of a disk (not readable, none yet)
+  function message(box, text, isError) {
+    box.replaceChildren(node("span", isError ? "error" : "muted", text));
+  }
+  function workspace(box, name, load) {
+    if (!load.disk) { message(box, load.disk_error || "No disk yet: the first instance makes it.", !!load.disk_error); return; }
+    const limit = (load.limits || {}).disk_gb;
+    render(box, {label: name, used: load.disk.used, forecast: load.disk.forecast,
+                 total: limit ? limit * 1073741824 : load.disk.size});
+  }
+  return {render, message, workspace, level, size, forecastText};
+})();
+</script>

@@ -139,7 +139,7 @@ async def space() -> dict:
 GB = workspacehelper.GB
 
 
-def _limit_bytes(ws: Workspace) -> int:
+def limit_bytes(ws: Workspace) -> int:
     return int(float(ws.limits.get("disk_gb") or 0) * GB)
 
 
@@ -155,7 +155,7 @@ def _disks(found: dict, workspaces: dict[str, Workspace], device) -> dict[tuple[
     for ws in workspaces.values():
         if ws.storage in roots:
             entry = disks.setdefault((ws.storage, ws.name), {"promised": 0, "used": 0})
-            entry["promised"] = max(entry["promised"], _limit_bytes(ws))
+            entry["promised"] = max(entry["promised"], limit_bytes(ws))
     return disks
 
 
@@ -184,7 +184,7 @@ def disk_problem(found: dict | None, workspaces: dict[str, Workspace], ws: Works
     """Why ws's disk limit may not be saved, or None. Without force, the disk
     may not take what the other workspaces on the same real disk were
     promised; with force, it must still fit in the room free now."""
-    limit = _limit_bytes(ws)
+    limit = limit_bytes(ws)
     if not limit or not ws.storage:
         return None
     if found is None:

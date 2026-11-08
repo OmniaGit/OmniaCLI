@@ -11,6 +11,8 @@
 starts and stops, <strong>developer</strong> also pulls, updates and backs up, <strong>admin</strong> also manages
 these users. A user created here sees this workspace's servers only.</p>
 <div id="error" class="banner" hidden></div>
+<h2>Disk</h2>
+<div class="panel" style="margin-bottom: 16px"><div id="ws-disk"><span class="muted">Loading…</span></div></div>
 <h2>Instances</h2>
 <p class="muted">Each instance has a production and a test, made from a template, on the workspace's disk.
 A new database has the user <strong>admin</strong> with password <strong>admin</strong>: change it at the first login.</p>
@@ -349,4 +351,22 @@ A new database has the user <strong>admin</strong> with password <strong>admin</
 })();
 </script>
 {{ credentials_script() }}
+{% include "_disk.html" %}
+<script>
+(function () {
+  // the workspace's disk and its estimate, once a minute (_disk.html)
+  const box = document.getElementById("ws-disk"), name = {{ ws.name | tojson }};
+  async function show() {
+    let data;
+    try {
+      const resp = await fetch("{{ prefix }}/api/workspaces/" + encodeURIComponent(name) + "/load?since=" + Math.floor(Date.now() / 1000));
+      if (!resp.ok) { OmniaDisk.message(box, "No answer: HTTP " + resp.status, true); return; }
+      data = await resp.json();
+    } catch (e) { OmniaDisk.message(box, "No answer.", true); return; }
+    OmniaDisk.workspace(box, name, data);
+  }
+  show();
+  setInterval(() => { if (!document.hidden) show(); }, 60000);
+})();
+</script>
 {% endblock %}

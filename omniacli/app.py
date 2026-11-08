@@ -306,7 +306,21 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
     sampler = Sampler(settings, networks=workspace_networks)
     # the disks once a day, next to the jobs like the sessions
     disk_history = DiskHistory(settings.jobs_dir.parent / "disk_history.json")
-    disk_recorder = DiskRecorder(settings, disk_history)
+    async def workspace_disks() -> list[dict]:
+        """[{name, used, capacity}] of the workspaces' disks, from the root
+        helper: capacity is disk_gb, or the image's size without one."""
+        found = await workspaceops.space()
+        result = []
+        for ws in settings.workspaces.values():
+            if not ws.storage or settings.storage_problem(ws):
+                continue
+            r = workspaceops.room(found, settings.workspaces, ws.storage, ws.name)
+            capacity = workspaceops.limit_bytes(ws) or (r or {}).get("own_size", 0)
+            if r is not None and capacity:
+                result.append({"name": ws.name, "used": r["own_used"], "capacity": capacity})
+        return result
+
+    disk_recorder = DiskRecorder(settings, disk_history, workspaces=workspace_disks)
     link_clients = LinkClients(link_transport)
     # the links through SSH: their ssh -L, and OmniaCLI's key, next to the links file
     ssh_tunnels = sshlinks.SshTunnels((settings.links_file or settings.servers_file).parent / "ssh")
@@ -943,8 +957,9 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
 
     @app.get("/api/disks/history")
     async def disk_history_json():
-        """Every disk's daily points (up to three years) and its forecast."""
-        return {"disks": disk_history.series()}
+        """Every disk's daily points (up to three years) and its forecast,
+        and the workspaces' disks the same way."""
+        return {"disks": disk_history.series(), "workspaces": disk_history.workspace_series(settings.workspaces)}
 
     @app.get("/disks")
     async def disks_page(request: Request):
@@ -2037,7 +2052,8 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             else:
                 r = workspaceops.room(found, settings.workspaces, ws.storage, ws.name)
                 if r is not None:
-                    disk = {"used": r["own_used"], "size": r["own_size"]}
+                    disk = {"used": r["own_used"], "size": r["own_size"],
+                            "forecast": disk_history.workspace_forecast(ws.name)}
         return {"interval": 5, "points": sampler.workspace_series(ws.name, since),
                 "limits": {k: ws.limits.get(k) for k in ("cpus", "memory_gb", "disk_gb")},
                 "disk": disk, "disk_error": disk_error}
@@ -2053,7 +2069,19 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             return refuse(f"The room of the disks cannot be read: {exc}{hint}", status.HTTP_502_BAD_GATEWAY)
         return {"roots": {root: {name or "": workspaceops.room(found, settings.workspaces, root, name)
                                  for name in (None, *settings.workspaces)}
-                          for root in settings.storage_roots}}
+                          for root in settings.storage_roots},
+                "forecasts": {name: disk_history.workspace_forecast(name) for name in settings.workspaces},
+                # the machine's disk under each storage, and its estimate (Disks page)
+                "real_disks": await storage_disks()}
+
+    async def storage_disks() -> dict[str, dict]:
+        points = [m[1] for m in await asyncio.to_thread(disks.mounts)]
+        found = {}
+        for root in settings.storage_roots:
+            mount = disks.holder(root, points)
+            if mount:
+                found[root] = {"mount": mount, "forecast": disk_history.forecast_of(mount)}
+        return found
 
     @app.post("/api/workspaces/save", dependencies=[Depends(admin)])
     async def workspace_save(payload: dict = Body(...), me: Principal = Depends(current_user)):

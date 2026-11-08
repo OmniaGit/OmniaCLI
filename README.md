@@ -58,7 +58,18 @@ whole machine (CPU, network, disks) and the last jobs, updated as they run.
 Every disk is recorded once a day (kept three years, in
 `<data>/disk_history.json`): its panel row says when it will be full, from the
 trend of the last 90 days (at least 7 days of data), and **Disks** (`/disks`)
-charts each disk's used space with that forecast.
+charts each disk's used space with that forecast. The workspaces' disks are
+recorded the same way (the space their image takes, full at their
+`disk_gb`), and **Disks** charts them too.
+
+Every page that shows a disk shows it with one widget
+(`templates/_disk.html`): the Dashboard (this machine's and the linked
+instances' disks, the folded row, a workspace's panel), Workspaces (each
+workspace's disk, the real disk under its storage with what the workspaces
+were promised there), a workspace's page, a puller's page, and Disks. Each
+reads the same: used, free and size, a bar that turns orange under 15% free
+and red under 5%, and the estimate (the day it is full, the growth a day, or
+why there is none yet), orange within 90 days of full and red within 30.
 
 ![The Dashboard](docs/images/dashboard.png)
 

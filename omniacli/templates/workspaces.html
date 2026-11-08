@@ -18,7 +18,7 @@
     <table id="ws-list">
       <tr><th>Workspace</th><th>Domain</th><th>Servers</th><th>CPU (cores)</th><th>Memory</th>
         <th title="what its containers receive and send, on the bridges of its projects">Network in / out</th>
-        <th>Disk used / limit</th><th>Real disk free</th></tr>
+        <th>Disk used / limit</th><th title="the real disk under its storage, with what the workspaces were promised there">Real disk</th></tr>
       {% for ws in workspaces %}
       <tr class="ws-row" data-ws="{{ ws.name }}" tabindex="0" style="cursor: pointer" title="Edit {{ ws.name }}">
         <td><strong>{{ ws.name }}</strong>{% if ws.label %} <span class="muted">{{ ws.label }}</span>{% endif %}
@@ -102,7 +102,7 @@ of the main configuration). Of the two, the higher version is used; the instance
       {% for key in limits %}<label>{{ key }}</label>
       <input type="number" min="0" step="any" class="limit mono" data-limit="{{ key }}" placeholder="no limit" aria-label="{{ key }}">{% endfor %}
       <label>Room on the real disk</label>
-      <div><span class="space muted">reading the room of the disks…</span><br>
+      <div><div class="real-disk"></div><span class="space muted">reading the room of the disks…</span><br>
         <label><input type="checkbox" class="force-disk"> force: promise more than the disk has room for
         (the disk must still fit in what is free now)</label></div>
       <label>Servers, one per line</label>
@@ -119,6 +119,7 @@ of the main configuration). Of the two, the higher version is used; the instance
     </div>
   </fieldset>
 </template>
+{% include "_disk.html" %}
 <script>
 (function () {
   const list = document.getElementById("workspaces"), template = document.getElementById("ws-template");
@@ -142,16 +143,27 @@ of the main configuration). Of the two, the higher version is used; the instance
     const data = await resp.json().catch(() => ({}));
     return resp.ok ? data : {error: data.error || data.detail || ("Error " + resp.status)};
   }).catch((e) => ({error: String(e)}));
+  // the real disk under a storage, for the widget: what the workspaces were
+  // promised there and do not use yet is the room of a new one ("") reserved
+  function realDisk(data, storage) {
+    const r = (data.roots || {})[storage][""], under = (data.real_disks || {})[storage];
+    return {label: under ? under.mount : storage, title: "the real disk under " + storage,
+            used: r.total - r.free, free: r.free, total: r.total, reserved: r.reserved,
+            forecast: under ? under.forecast : null, href: under ? "{{ prefix }}/disks#" + encodeURIComponent(under.mount) : null};
+  }
   async function showSpace(box, name) {
     const out = box.querySelector(".space"), storage = box.querySelector(".storage");
     const disk = box.querySelector('.limit[data-limit="disk_gb"]');
     const data = await space;
     out.className = "space muted";
+    const real = box.querySelector(".real-disk");
+    real.replaceChildren();
     if (data.error) { out.textContent = data.error; return; }
     if (storage.disabled) { out.textContent = "no storage"; return; }
     const r = ((data.roots || {})[storage.value] || {})[name];
     if (!r) { out.textContent = storage.value + " is not there yet (the package makes it when the workspaces are allowed)"; return; }
-    let text = `Real disk ${gb(r.total)}, ${gb(r.free)} free. Workspaces' disks there: ${gb(r.promised)} promised, `
+    OmniaDisk.render(real, realDisk(data, storage.value));
+    let text = `Workspaces' disks there: ${gb(r.promised)} promised, `
       + `${gb(r.used)} used` + (r.own_used ? ` (${gb(r.own_used)} by this one)` : "") + `. This workspace: up to `
       + `${gb(r.allowed)} without the room promised to the others, ${gb(r.physical)} forced.`;
     const wanted = disk.value === "" ? 0 : Number(disk.value) * 1073741824;
@@ -295,20 +307,14 @@ of the main configuration). Of the two, the higher version is used; the instance
     for (const row of document.querySelectorAll(".ws-row")) {
       const ws = byName[row.dataset.ws], limit = (ws.limits || {}).disk_gb;
       const r = data.error ? null : ((data.roots || {})[ws.storage] || {})[ws.name];
-      const cell = row.querySelector(".disk");
-      if (!r) { cell.textContent = data.error ? "?" : (ws.storage ? "not there" : "no storage");
-        row.querySelector(".free").textContent = "—"; cell.title = data.error || ""; continue; }
-      const used = r.own_used / 1073741824, share = limit ? Math.min(used / limit, 1) : 0;
-      cell.innerHTML = "";
-      const text = document.createElement("span");
-      text.textContent = `${used.toFixed(1)} / ${limit ?? "—"} GB `;
-      const bar = document.createElement("span");
-      bar.style.cssText = "display:inline-block;width:60px;height:8px;border:1px solid var(--border);border-radius:4px;vertical-align:middle;overflow:hidden";
-      const fill = document.createElement("span");
-      fill.style.cssText = `display:block;height:100%;width:${(share * 100).toFixed(0)}%;background:${share > 0.9 ? "var(--err)" : "var(--ok)"}`;
-      bar.appendChild(fill);
-      cell.append(text, bar);
-      row.querySelector(".free").textContent = gb(r.free);
+      const cell = row.querySelector(".disk"), free = row.querySelector(".free");
+      if (!r) { OmniaDisk.message(cell, data.error ? "?" : (ws.storage ? "not there" : "no storage"), !!data.error);
+        cell.title = data.error || ""; OmniaDisk.message(free, "—"); continue; }
+      const total = limit ? limit * 1073741824 : r.own_size;
+      if (total) OmniaDisk.render(cell, {label: ws.name, used: r.own_used, total,
+                                         forecast: (data.forecasts || {})[ws.name]}, {compact: true});
+      else OmniaDisk.message(cell, "no disk yet");
+      OmniaDisk.render(free, realDisk(data, ws.storage), {compact: true});
     }
   }
   if (!editing && !params.has("new")) { showLoad(); showDisks(); }

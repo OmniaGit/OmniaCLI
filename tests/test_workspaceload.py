@@ -111,12 +111,17 @@ async def test_a_member_sees_the_load_of_its_workspace(workspaces, client, monke
     assert 'class="panel ws-load-panel" data-ws="acme"' in page and 'data-ws="beta"' not in page
     assert 'data-fold="machine"' not in page and '/workspaces/acme"' not in page  # luca is no admin there
     assert '<a href="/workspaces/acme">' in (await client.get("/", headers=basic("mario"))).text
+    # the workspace's page shows its disk with the same widget
+    page = (await client.get("/workspaces/acme", headers=basic("mario"))).text
+    assert 'id="ws-disk"' in page and "OmniaDisk.workspace(box, name, data)" in page
     # an admin of the machine has its machine, not these panels
     assert "ws-load-panel" not in (await client.get("/", headers={"Authorization": AUTH})).text
     resp = await client.get("/api/workspaces/acme/load", headers=basic("luca"))
     assert resp.status_code == 200
     data = resp.json()
-    assert data["disk"] == {"used": 3 * 2**30, "size": 10 * 2**30} and data["disk_error"] == ""
+    assert data["disk"]["used"] == 3 * 2**30 and data["disk"]["size"] == 10 * 2**30 and data["disk_error"] == ""
+    # the recorder took today's point at the start: the estimate needs a week of them
+    assert data["disk"]["forecast"]["reason"] == "a forecast needs 7 days of data"
     assert data["limits"] == {"cpus": 2, "memory_gb": None, "disk_gb": 10}
     # no slice here: the sampler's points measure nothing, and say so
     assert all(p["cpu"] is None and p["mem"] is None for p in data["points"])
