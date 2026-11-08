@@ -194,7 +194,7 @@ WORKSPACE_ROUTES = frozenset({
     "/api/workspaces/{workspace}/web/publish", "/api/workspaces/{workspace}/web/certificate",
     "/api/workspaces/{workspace}/credentials/save", "/api/workspaces/{workspace}/credentials/delete",
     "/api/workspaces/{workspace}/repositories/add", "/api/workspaces/{workspace}/repositories/remove",
-    "/api/workspaces/{workspace}/parameters/save",
+    "/api/workspaces/{workspace}/parameters/save", "/api/workspaces/{workspace}/load",
 })
 
 
@@ -778,6 +778,8 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             "machine": shown is None,
             "machine_links": list(settings.link_targets) if me.kind == "user" and shown is None else [],
             "jobs": visible_jobs(me, jobs.recent(len(jobs.jobs)))[:10],
+            # a user of workspaces: the load of each of its workspaces instead
+            "load_workspaces": sorted((ws, role) for ws, role in me.workspaces if ws in settings.workspaces) if me.scoped else [],
         })
         return _TEMPLATES.TemplateResponse(request, "index.html", context)
 
@@ -2015,6 +2017,30 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         machine = sampler.machine_series()
         return {"cores": sampler.cores, "interval": 5, "machine": machine[-1] if machine else None,
                 "workspaces": sampler.workspace_now()}
+
+    @app.get("/api/workspaces/{workspace}/load")
+    async def workspace_load(workspace: str, since: int = 0):
+        """One workspace's load for its members (the Dashboard): its points
+        after since (metrics.py), its limits, and its disk, used and size, in
+        bytes. Not the machine's load, nor the room of its real disk."""
+        ws = settings.workspaces.get(workspace)
+        if ws is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, f"No workspace {workspace}")
+        disk, disk_error = None, ""
+        if settings.storage_problem(ws):
+            disk_error = "its storage is not usable: ask an admin"
+        elif ws.storage:
+            try:
+                found = await workspaceops.space()
+            except workspaceops.SpaceError:
+                disk_error = "the disk cannot be read now"
+            else:
+                r = workspaceops.room(found, settings.workspaces, ws.storage, ws.name)
+                if r is not None:
+                    disk = {"used": r["own_used"], "size": r["own_size"]}
+        return {"interval": 5, "points": sampler.workspace_series(ws.name, since),
+                "limits": {k: ws.limits.get(k) for k in ("cpus", "memory_gb", "disk_gb")},
+                "disk": disk, "disk_error": disk_error}
 
     @app.get("/api/workspaces/space", dependencies=[Depends(admin)])
     async def workspaces_space():

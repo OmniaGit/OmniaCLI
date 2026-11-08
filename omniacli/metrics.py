@@ -254,6 +254,10 @@ class Sampler:
                 self.workspaces.pop(name, None)
                 self._ws_prev.pop(name, None)
 
+    def workspace_series(self, name: str, since: float = 0) -> list[dict]:
+        """The points of workspace name after since, the last hour at most."""
+        return [p for p in self.workspaces.get(name, ()) if p["t"] > since]
+
     def workspace_now(self) -> dict[str, dict]:
         """The last point of each workspace."""
         return {name: points[-1] for name, points in self.workspaces.items() if points}

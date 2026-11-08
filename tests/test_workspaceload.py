@@ -91,3 +91,49 @@ def test_space_tells_the_networks_of_a_workspace(tmp_path, monkeypatch):
     found = workspacehelper.space()["roots"][0]
     assert found["networks"] == {"acme": ["10.213.0.0/24", "10.213.1.0/24"]}
     assert json.dumps(found)
+
+
+async def test_a_member_sees_the_load_of_its_workspace(workspaces, client, monkeypatch):  # noqa: F811
+    from omniacli import workspaceops
+
+    settings = workspaces
+    storage = settings.storage_roots[0]
+    settings.workspaces["acme"].storage = storage
+    settings.workspaces["acme"].limits = {"disk_gb": 10, "cpus": 2}
+    found = {"roots": [{"root": storage, "device": 1, "total": 100 * 2**30, "free": 50 * 2**30,
+                        "images": {"acme": {"size": 10 * 2**30, "used": 3 * 2**30}}}]}
+
+    async def space():
+        return found
+    monkeypatch.setattr(workspaceops, "space", space)
+    # the dashboard of a user of workspaces: its workspaces' load, not the machine's
+    page = (await client.get("/", headers=basic("luca"))).text
+    assert 'class="panel ws-load-panel" data-ws="acme"' in page and 'data-ws="beta"' not in page
+    assert 'data-fold="machine"' not in page and '/workspaces/acme"' not in page  # luca is no admin there
+    assert '<a href="/workspaces/acme">' in (await client.get("/", headers=basic("mario"))).text
+    # an admin of the machine has its machine, not these panels
+    assert "ws-load-panel" not in (await client.get("/", headers={"Authorization": AUTH})).text
+    resp = await client.get("/api/workspaces/acme/load", headers=basic("luca"))
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["disk"] == {"used": 3 * 2**30, "size": 10 * 2**30} and data["disk_error"] == ""
+    assert data["limits"] == {"cpus": 2, "memory_gb": None, "disk_gb": 10}
+    # no slice here: the sampler's points measure nothing, and say so
+    assert all(p["cpu"] is None and p["mem"] is None for p in data["points"])
+    assert "machine" not in data and "free" not in json.dumps(data)
+    # another workspace: refused
+    assert (await client.get("/api/workspaces/beta/load", headers=basic("luca"))).status_code == 403
+    assert (await client.get("/api/workspaces/acme/load", headers=basic("zoe"))).status_code == 403
+    # the helper does not answer: the load still comes, the disk says why not
+    async def broken():
+        raise workspaceops.SpaceError("sudo: a password is required")
+    monkeypatch.setattr(workspaceops, "space", broken)
+    data = (await client.get("/api/workspaces/acme/load", headers=basic("luca"))).json()
+    assert data["disk"] is None and data["disk_error"] == "the disk cannot be read now"
+
+
+def test_the_series_of_a_workspace():
+    sampler = metrics.Sampler(Settings(users={}, backup_dir=None, jobs_dir=None, servers_file=None, servers={}))
+    sampler.workspaces["acme"] = metrics.deque([{"t": 10}, {"t": 20}, {"t": 30}])
+    assert [p["t"] for p in sampler.workspace_series("acme", 15)] == [20, 30]
+    assert sampler.workspace_series("none") == []

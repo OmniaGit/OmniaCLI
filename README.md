@@ -1115,6 +1115,13 @@ user of workspaces reaches only the routes listed in `WORKSPACE_ROUTES`, and
 of a plugin's own routes those of an instance; a route added later is closed
 to them until it is listed (a test goes through every route).
 
+On its Dashboard, in place of This machine, a user of workspaces sees the
+load of each of its workspaces (`/api/workspaces/<name>/load`, its members
+only): CPU in cores and memory against the workspace's limits, the traffic
+of its projects' networks (received, sent), the last hour sampled every 5 s,
+and its disk, used against `disk_gb`. Not the machine's load, nor the room
+of the real disk under it: those stay the machine's admins'.
+
 The admins of a workspace manage its users (the workspace's name in the
 menu, `/workspaces/<name>`): a user they create is a user of workspaces only,
 of theirs; they change the role of its users, the password of a user of

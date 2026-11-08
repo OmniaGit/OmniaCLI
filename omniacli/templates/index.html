@@ -59,6 +59,36 @@
 </div></div>
 </section>
 {% endif %}
+{% if load_workspaces %}
+<section class="fold" data-fold="my-workspaces">
+<div class="fold-head">
+  <h1><button type="button" class="fold-toggle" aria-expanded="true"><span class="fold-icon" aria-hidden="true">▾</span>{{ "Your workspace" if load_workspaces | length == 1 else "Your workspaces" }}</button></h1>
+</div>
+<div class="fold-body"><div class="fold-inner">
+<p class="muted" style="margin-top: 0">What the workspace's containers use, last hour, against its limits. Network: the traffic of its projects' networks, not the traffic inside one project.</p>
+<div class="machine-grid">
+  {% for name, ws_role in load_workspaces %}
+  <section class="panel ws-load-panel" data-ws="{{ name }}">
+    <h2 style="margin: 0 0 8px">{% if ws_role == "admin" %}<a href="{{ prefix }}/workspaces/{{ name | urlencode }}">{{ name }}</a>{% else %}{{ name }}{% endif %}</h2>
+    <div class="tiles">
+      <div class="tile"><div class="tile-label">CPU now</div><div class="tile-value" data-tile="cpu">–</div></div>
+      <div class="tile"><div class="tile-label">Memory</div><div class="tile-value" data-tile="mem">–</div></div>
+      <div class="tile"><div class="tile-label">Received</div><div class="tile-value" data-tile="in">–</div></div>
+      <div class="tile"><div class="tile-label">Sent</div><div class="tile-value" data-tile="out">–</div></div>
+    </div>
+    <p class="muted ws-load-state" style="margin: 6px 0 0"></p>
+    <h3 class="chart-title">CPU, cores <span class="muted ws-cpu-limit" style="font-weight: 400"></span></h3>
+    <div class="chart-box"><svg class="chart" data-chart="cpu" role="img" aria-label="CPU of workspace {{ name }} over the last hour"></svg><div class="chart-tip" hidden></div></div>
+    <h3 class="chart-title">Network, per second <span class="muted" style="font-weight: 400"><span class="key s1"></span>received<span class="key s2"></span>sent</span></h3>
+    <div class="chart-box"><svg class="chart" data-chart="net" role="img" aria-label="Network traffic of workspace {{ name }} over the last hour"></svg><div class="chart-tip" hidden></div></div>
+    <h3 class="chart-title">Disk</h3>
+    <div class="ws-disk"><span class="muted">Loading…</span></div>
+  </section>
+  {% endfor %}
+</div>
+</div></div>
+</section>
+{% endif %}
 <section class="fold" data-fold="jobs">
 <div class="fold-head">
   <h1><button type="button" class="fold-toggle" aria-expanded="true"><span class="fold-icon" aria-hidden="true">▾</span>Last jobs</button></h1>
@@ -405,4 +435,85 @@
   setInterval(() => { if (!document.hidden) refresh(); }, 60000);
 })();
 </script>
+{% if load_workspaces %}
+<script>
+(function () {
+  // the load of each of the user's workspaces: the last hour, then every 5 s;
+  // the disk with each answer (it is read through the root helper)
+  const rate = (b) => b >= 1048576 ? (b / 1048576).toFixed(1) + " MiB/s"
+    : b >= 1024 ? (b / 1024).toFixed(0) + " KiB/s" : b.toFixed(0) + " B/s";
+  const gb = (b) => (b / 1073741824).toFixed(1) + " GB";
+  const panels = [...document.querySelectorAll(".ws-load-panel")];
+  const series = new Map(panels.map((p) => [p, []]));
+  const since = new Map(panels.map((p) => [p, 0]));
+  let rounds = 0;
+  async function show(panel, withDisk) {
+    const name = panel.dataset.ws, state = panel.querySelector(".ws-load-state");
+    const from = since.get(panel) || Math.floor(Date.now() / 1000) - 3600;
+    let data;
+    try {
+      const resp = await fetch(`{{ prefix }}/api/workspaces/${encodeURIComponent(name)}/load?since=${from}`);
+      if (!resp.ok) { state.textContent = "No answer: HTTP " + resp.status; return; }
+      data = await resp.json();
+    } catch (e) { state.textContent = "No answer."; return; }
+    state.textContent = "";
+    // CPU comes in percent of one core: shown in cores
+    const fresh = data.points.map((p) => ({...p, cores: p.cpu === null ? null : p.cpu / 100}));
+    const points = series.get(panel).concat(fresh).slice(-720);
+    series.set(panel, points);
+    if (points.length) since.set(panel, points[points.length - 1].t);
+    const limits = data.limits || {};
+    panel.querySelector(".ws-cpu-limit").textContent = limits.cpus ? `(limit ${limits.cpus})` : "(no limit)";
+    OmniaCharts.draw(panel.querySelector('[data-chart="cpu"]'), points, "cores",
+      {minMax: 0.1, format: (v) => v.toFixed(v < 1 ? 2 : 1), tip: (p) => `${p.cores.toFixed(2)} cores · ${p.mem ?? "–"} MiB`});
+    OmniaCharts.draw(panel.querySelector('[data-chart="net"]'), points, "in",
+      {also: "out", minMax: 1024, format: rate, padLeft: 70, tip: (p) => `received ${rate(p.in)} · sent ${rate(p.out)}`});
+    const last = points[points.length - 1];
+    if (last) {
+      const tile = (k, text) => { panel.querySelector(`[data-tile="${k}"]`).textContent = text; };
+      tile("cpu", last.cores === null ? "–" : last.cores.toFixed(2) + (limits.cpus ? " / " + limits.cpus : ""));
+      tile("mem", last.mem === null ? "–" : (last.mem / 1024).toFixed(1) + (limits.memory_gb ? " / " + limits.memory_gb : "") + " GB");
+      tile("in", last.in === null ? "–" : rate(last.in));
+      tile("out", last.out === null ? "–" : rate(last.out));
+      if (last.cpu === null && last.mem === null) state.textContent = "Nothing running in this workspace now.";
+      else if (!last.bridges) state.textContent = "Network: its projects' networks are not known yet (looked at once a minute).";
+    } else {
+      state.textContent = "No samples yet.";
+    }
+    if (!withDisk) return;
+    const box = panel.querySelector(".ws-disk");
+    box.textContent = "";
+    if (!data.disk) {
+      const note = document.createElement("span");
+      note.className = data.disk_error ? "error" : "muted";
+      note.textContent = data.disk_error || "No disk yet.";
+      box.appendChild(note);
+      return;
+    }
+    const limit = limits.disk_gb ? limits.disk_gb * 1073741824 : data.disk.size;
+    const share = limit ? Math.min(data.disk.used / limit, 1) : 0;
+    const head = document.createElement("div");
+    head.className = "disk-head";
+    const used = document.createElement("span");
+    used.className = "mono" + (share > 0.9 ? " error" : "");
+    used.textContent = `${gb(data.disk.used)} used of ${limit ? gb(limit) : "—"}`;
+    const pct = document.createElement("span");
+    pct.className = "mono";
+    pct.textContent = limit ? (share * 100).toFixed(0) + "%" : "";
+    head.append(used, pct);
+    const bar = document.createElement("div");
+    bar.className = "disk-bar";
+    const fill = document.createElement("div");
+    fill.className = "disk-fill " + (share > 0.9 ? "error" : share > 0.75 ? "warn" : "ok");
+    fill.style.width = (share * 100).toFixed(1) + "%";
+    bar.appendChild(fill);
+    box.append(head, bar);
+  }
+  const refresh = () => { const disk = rounds++ % 12 === 0; panels.forEach((p) => show(p, disk)); };
+  refresh();
+  setInterval(() => { if (!document.hidden) refresh(); }, 5000);
+  window.addEventListener("resize", () => panels.forEach((p) => { series.set(p, []); since.set(p, 0); show(p, false); }));
+})();
+</script>
+{% endif %}
 {% endblock %}
