@@ -23,6 +23,8 @@
 </div>
 {%- endmacro %}
 {% block content %}
+{% from "_list.html" import list_search, item %}
+{% include "_list.html" %}
 <h1>Links</h1>
 <p class="muted">Other OmniaCLI instances this one operates: their servers are listed on the Dashboard and their pages open here, under <span class="mono">/links/&lt;name&gt;/</span>.
 The other instance creates the token on its <strong>Users</strong> page and decides its role; here each user acts there with at most their own role.
@@ -44,10 +46,13 @@ link through it; the URL is then <span class="mono">http://</span> as that serve
 </div>
 <div class="panel">
   <div class="scroll">
-  <table>
-    <tr><th>Link</th><th>URL</th><th>Token</th><th>CA file</th><th>SSH</th><th></th></tr>
+  {{ list_search("links", "Search link, address, SSH host…", request.query_params.get("q", "")) }}
+  <table data-list="links">
+    <thead><tr><th>Link</th><th>URL</th><th>Token</th><th>CA file</th><th>SSH</th><th></th></tr></thead>
     {% for link in links %}
     {% set s = ssh.get(link.name) %}
+    {# the link and its SSH fields: one item of the list widget #}
+    <tbody {{ item(link.name ~ " " ~ link.url ~ " " ~ (link.ssh.user ~ "@" ~ link.ssh.host if link.ssh else "")) }}>
     <tr data-link="{{ link.name }}">
       <td><strong><a href="/links/{{ link.name }}/">{{ link.name }}</a></strong></td>
       <td><input type="text" class="url mono" value="{{ link.url }}" aria-label="URL of {{ link.name }}">
@@ -80,9 +85,11 @@ link through it; the URL is then <span class="mono">http://</span> as that serve
         {% endif %}
       </td>
     </tr>
+    </tbody>
     {% else %}
     <tr><td colspan="6" class="muted">No links yet.</td></tr>
     {% endfor %}
+    <tbody>
     <tr id="new-row">
       <td><input type="text" id="new-name" placeholder="customer" aria-label="New link name"></td>
       <td><input type="text" id="new-url" class="mono" placeholder="https://omniacli.customer.example" aria-label="New link URL"></td>
@@ -95,6 +102,7 @@ link through it; the URL is then <span class="mono">http://</span> as that serve
       <td></td>
       <td colspan="5">{{ ssh_fields(None, "ssh-new") }}</td>
     </tr>
+    </tbody>
   </table>
   </div>
 </div>
@@ -162,5 +170,9 @@ link through it; the URL is then <span class="mono">http://</span> as that serve
     if (await post("save", body)) location.reload();
   };
 })();
+</script>
+<script>
+  // the lists' search (_list.html)
+  OmniaList.attach(document.querySelector('[data-list="links"]'));
 </script>
 {% endblock %}

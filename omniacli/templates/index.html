@@ -3,39 +3,57 @@
 {% block content %}
 {% from "_icons.html" import icon, runner %}
 {% from "_load.html" import machine_row %}
+{% from "_list.html" import list_search, grouped, item %}
+{# the widgets first: the lists below use them as they are drawn #}
+{% include "_charts.html" %}
+{% include "_disk.html" %}
+{% include "_load.html" %}
+{% include "_list.html" %}
 <section class="fold" data-fold="servers">
 <div class="fold-head">
   <h1><button type="button" class="fold-toggle" aria-expanded="true"><span class="fold-icon" aria-hidden="true">▾</span>Servers</button></h1>
   {% if is_admin and not prefix %}<a class="button" href="/groups">Edit groups</a>{% endif %}
 </div>
 <div class="fold-body"><div class="fold-inner">
-{% if total > 1 or q or lazy %}
-<form class="actions job-filter" method="get" action="{{ prefix }}/" style="margin: 0 0 12px">
-  <input type="search" name="q" value="{{ q }}" placeholder="Search server, database, repository, branch…" aria-label="Search servers">
-  <button>Search</button>
-  {% if q %}<a class="button" href="{{ prefix }}/">Clear</a>{% endif %}
-</form>
-{% endif %}
-<div id="server-sections" {% if lazy %}data-lazy="{{ prefix }}/dashboard/servers?q={{ q | urlencode }}"{% endif %}>
+{% if total > 1 or q %}{{ list_search("servers", "Search server, workspace, group, database, repository, branch…", q) }}{% endif %}
+<div id="server-sections" data-list="servers">
 {% include "_servers_part.html" %}
 </div>
 </div></div>
 </section>
+{% if dashboard_workspaces %}
+<section class="fold" data-fold="workspaces">
+<div class="fold-head">
+  <h1><button type="button" class="fold-toggle" aria-expanded="true"><span class="fold-icon" aria-hidden="true">▾</span>Workspaces</button></h1>
+  <a class="button" href="{{ prefix }}/workspaces?new=1">New workspace</a>
+</div>
+<div class="fold-body"><div class="fold-inner">
+{% if dashboard_workspaces | length > 1 %}{{ list_search("workspaces", "Search workspace, domain, storage, server…") }}{% endif %}
+{% with workspaces = dashboard_workspaces %}{% include "_workspaces_list.html" %}{% endwith %}
+</div></div>
+</section>
+{% endif %}
 {% if machine and machine_links %}
 <section class="fold" data-fold="linked">
 <div class="fold-head">
   <h1><button type="button" class="fold-toggle" aria-expanded="true"><span class="fold-icon" aria-hidden="true">▾</span>Linked</button></h1>
+  {% if is_admin and not prefix %}<a class="button" href="/groups#links">Edit groups</a>{% endif %}
 </div>
 <div class="fold-body"><div class="fold-inner">
 <p class="muted" style="margin-top: 0">The machine of each linked instance, through its link: CPU and network of the last 15 minutes, its disks. A name opens it.</p>
-<div class="panel"><div class="scroll">
-<table id="linked">
-  {% for link in machine_links %}
-  <tr class="linked-row"><td><a href="/links/{{ link | urlencode }}/"><strong>{{ link }}</strong></a></td>
-    <td>{{ machine_row(link, link) }}</td></tr>
+{% macro linked_table(links) %}
+<div class="panel" data-list-box><div class="scroll">
+<table class="linked-rows">
+  {% for link in links %}
+  <tr class="linked-row" {{ item(link.name ~ " " ~ link.url) }}><td><a href="/links/{{ link.name | urlencode }}/"><strong>{{ link.name }}</strong></a>
+    <br><span class="muted mono">{{ link.url }}</span></td>
+    <td>{{ machine_row(link.name, link.name) }}</td></tr>
   {% endfor %}
 </table>
 </div></div>
+{% endmacro %}
+{% if machine_links | length > 1 %}{{ list_search("linked", "Search linked instance, address, group…") }}{% endif %}
+<div id="linked" data-list="linked">{{ grouped(linked_sections, linked_table, "linked") }}</div>
 </div></div>
 </section>
 {% endif %}
@@ -132,10 +150,9 @@
   }
 })();
 </script>
-{% include "_charts.html" %}
-{% include "_disk.html" %}
-{% include "_load.html" %}
 <script>
+  // the lists: their search and their groups (_list.html)
+  for (const root of document.querySelectorAll("[data-list]")) OmniaList.attach(root);
   // each linked instance's row fetches its own load and disks (_load.html)
   document.querySelectorAll("#linked .machine-row").forEach((row) => OmniaLoad.watch(row));
 </script>
@@ -185,11 +202,12 @@
     clearTimeout(redraw);
     redraw = setTimeout(async () => {
       const box = document.getElementById("server-sections");
-      if (!box || box.dataset.lazy && box.querySelector(".links-loading")) return;  // the first load is still on its way
+      if (!box) return;
       try {
         const resp = await fetch("{{ prefix }}/dashboard/servers?q=" + encodeURIComponent({{ q | tojson }}));
         if (!resp.ok) return;
         box.innerHTML = await resp.text();
+        OmniaList.apply(box);
         window.dispatchEvent(new Event("omniacli:servers"));
       } catch (e) { /* the next change tries again */ }
     }, 300);
@@ -281,7 +299,8 @@
       if (el.dataset.link === link) el.hidden = !busy.has(el.dataset.busy);
     }
     const key = [...busy].sort().join(" ");
-    if (link in busyBefore && busyBefore[link] !== key) redrawServers();
+    // only this instance's servers are drawn here: a link's are on its own Dashboard
+    if (!link && link in busyBefore && busyBefore[link] !== key) redrawServers();
     busyBefore[link] = key;
     if (!link) updateTable(data.jobs);
     const first = !polled.has(link);
@@ -297,23 +316,6 @@
   const round = () => sources().forEach((link) => check(link));
   setInterval(() => { if (!document.hidden) round(); }, 5000);
   window.addEventListener("omniacli:servers", round);
-})();
-</script>
-<script>
-(function () {
-  // lazy: the linked instances' servers, once they answer
-  const box = document.getElementById("server-sections");
-  if (!box || !box.dataset.lazy) return;
-  fetch(box.dataset.lazy).then((resp) => {
-    if (!resp.ok) throw new Error("HTTP " + resp.status);
-    return resp.text();
-  }).then((html) => {
-    box.innerHTML = html;
-    window.dispatchEvent(new Event("omniacli:servers"));
-  }).catch((e) => {
-    const note = box.querySelector(".links-loading");
-    if (note) { note.textContent = "The servers of the linked instances could not be loaded (" + e.message + ")."; note.className = "error"; }
-  });
 })();
 </script>
 <script>

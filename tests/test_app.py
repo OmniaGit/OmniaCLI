@@ -948,8 +948,8 @@ async def test_jobs_server_column_and_filter(client, env):
 
 async def test_servers_filter(client, env):
     get = lambda url: client.get(url, headers={"Authorization": AUTH})
-    # one server: no filter to show
-    assert 'name="q"' not in (await get("/")).text
+    # one server: no search to show
+    assert 'data-list-search="servers"' not in (await get("/")).text
     settings = client.app.state.settings
     srv = settings.servers["srv"]
     settings.servers["other"] = dataclasses.replace(srv, name="other", instances={
@@ -959,14 +959,13 @@ async def test_servers_filter(client, env):
     })
 
     page = (await get("/")).text
-    assert 'name="q"' in page and 'href="/servers/other"' in page and 'href="/servers/srv"' in page
-    page = (await get("/?q=other_TEST")).text  # a database, any case
-    assert "1 of 2 servers." in page and 'href="/servers/other"' in page
-    assert 'href="/servers/srv"' not in page and 'href="/">Clear' in page
-    page = (await get("/?q=addons+test")).text  # every word: a repository and a branch
-    assert "2 of 2 servers." in page
-    assert "No servers match." in (await get("/?q=srv+OTHER_")).text
-
+    assert 'data-list-search="servers"' in page and 'href="/servers/other"' in page and 'href="/servers/srv"' in page
+    # the list widget searches in the browser: each row carries its text, in
+    # lower case (database, repositories, branches), and ?q= fills the field
+    texts = re.findall(r'<tr data-list-item data-text="([^"]*)"', page)
+    assert len(texts) == 2 and any("other_test" in t and "addons" in t for t in texts)
+    page = (await get("/?q=other_TEST")).text
+    assert 'data-list-search="servers" value="other_TEST"' in page and 'href="/servers/srv"' in page
 
 
 def basic(user):
@@ -1312,16 +1311,20 @@ async def test_servers_page_groups(client, env):
     assert 'data-member="srv"' in page
     assert (await client.get("/groups", headers={"Authorization": basic("dev")})).status_code == 403
 
-    body = {"groups": [{"name": "Main servers", "members": ["srv"]}, {"name": "Empty", "members": ["nope"]}]}
+    body = {"lists": {"servers": [{"name": "Main servers", "members": ["nope"], "groups": [
+        {"name": "Odoo", "members": ["s?v"]}]}, {"name": "Empty", "members": ["nope"]}]}}
     assert (await client.post("/api/groups/save", json=body, headers=headers)).json() == {"ok": True}
     assert "Main servers" in settings.groups_file.read_text()
     page = (await client.get("/", headers=headers)).text
-    assert "<h2>Main servers <span" in page and "Empty" not in page and "Other servers" not in page
-    # the filter finds a server by its group too
-    assert "1 of 1 server." in (await client.get("/?q=main", headers=headers)).text
-    resp = await client.post("/api/groups/save", json={"groups": [{"name": "x", "members": ["a b"]}]},
+    # a group and its subgroup, folding headings of the list widget; no empty one, no Others
+    assert '<details class="group list-group level-1" open data-group="/Main servers">' in page
+    assert '<details class="group list-group level-2" open data-group="/Main servers/Odoo">' in page
+    assert "<h2>Empty" not in page and "<h2>Others" not in page
+    # the search finds a server by its groups too
+    assert re.search(r'data-text="[^"]*main servers odoo[^"]*"', page)
+    resp = await client.post("/api/groups/save", json={"lists": {"servers": [{"name": "x", "members": ["a b"]}]}},
                              headers=headers)
-    assert resp.status_code == 400 and "is not a server" in resp.json()["error"]
+    assert resp.status_code == 400 and "is not a name or a pattern" in resp.json()["error"]
     resp = await client.post("/api/groups/save", json=body,
                              headers={"Authorization": basic("dev"), "Origin": f"http://{HOST}"})
     assert resp.status_code == 403

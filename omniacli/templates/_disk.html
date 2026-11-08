@@ -19,7 +19,10 @@
    disks.py (free under 15% and 5%), or a full day within 90 and 30 days.
    OmniaDisk.size(bytes): the size as text.
    OmniaDisk.workspace(box, name, load): a workspace's disk from the answer of
-   /api/workspaces/<name>/load (its limit, or its image's size), or why not. #}
+   /api/workspaces/<name>/load (its limit, or its image's size), or why not.
+   OmniaDisk.realDisk(space, storage): the real disk under a storage, from
+   /api/workspaces/space: what the workspaces were promised there and do not
+   use yet is the room of a new one ("") reserved. #}
 <script>
 const OmniaDisk = (function () {
   const WARN_PERCENT = 15, ERROR_PERCENT = 5, DAY = 86400000;
@@ -118,6 +121,12 @@ const OmniaDisk = (function () {
     render(box, {label: name, used: load.disk.used, forecast: load.disk.forecast,
                  total: limit ? limit * 1073741824 : load.disk.size});
   }
-  return {render, message, workspace, level, size, forecastText};
+  function realDisk(space, storage) {
+    const r = (space.roots || {})[storage][""], under = (space.real_disks || {})[storage];
+    return {label: under ? under.mount : storage, title: "the real disk under " + storage,
+            used: r.total - r.free, free: r.free, total: r.total, reserved: r.reserved,
+            forecast: under ? under.forecast : null, href: under ? "{{ prefix }}/disks#" + encodeURIComponent(under.mount) : null};
+  }
+  return {render, message, workspace, realDisk, level, size, forecastText};
 })();
 </script>

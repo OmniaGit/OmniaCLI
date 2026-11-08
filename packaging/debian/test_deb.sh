@@ -128,8 +128,10 @@ PY
 sed -i 's/status: draft/status: active/' /var/lib/omniacli/servers.yaml
 systemctl restart omniacli
 for i in $(seq 30); do curl -s -o /dev/null localhost:8090 && break; sleep 1; done
-# links.yaml read again at startup: the link lists this instance's server
-curl -s -b /tmp/cookies-admin localhost:8090/dashboard/servers | grep -q "me › demo" || fail "linked server row"
+# links.yaml read again at startup: the link has its row in Linked, and its
+# servers come through it (they are on its own Dashboard, not in Servers)
+curl -s -b /tmp/cookies-admin localhost:8090/ | grep -q '<span class="machine-row" data-link="me">' || fail "linked row"
+curl -s -b /tmp/cookies-admin localhost:8090/links/me/api/servers | grep -q '"demo"' || fail "linked servers"
 
 step "git pull + restart through the web service"
 git -C /srv/dev commit -q --allow-empty -m two && git -C /srv/dev push -q origin main

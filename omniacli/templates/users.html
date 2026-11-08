@@ -5,6 +5,8 @@
 {{ crumbs([("Dashboard", "/"), ("Users", None)]) }}
 {% endblock %}
 {% block content %}
+{% from "_list.html" import list_search, item %}
+{% include "_list.html" %}
 <div class="server-head" style="padding: 0; border: 0">
   <h1>Users</h1>
   <a class="button" href="{{ prefix }}/access">Access log</a>
@@ -21,12 +23,13 @@
 </div>
 
 <h2>Users</h2>
+{{ list_search("users", "Search user, role…", request.query_params.get("q", "")) }}
 <div class="panel">
   <div class="scroll">
-  <table>
+  <table data-list="users">
     <tr><th>User</th><th>Role</th><th>New password</th><th></th></tr>
     {% for u in users %}
-    <tr data-user="{{ u.name }}">
+    <tr data-user="{{ u.name }}" {{ item(u.name ~ " " ~ u.role) }}>
       <td><strong>{{ u.name }}</strong>{% if u.name == account %} <span class="muted">(you)</span>{% endif %}
         {% if u.fixed %}<br><span class="muted">main config</span>{% endif %}</td>
       {% if u.fixed %}
@@ -54,12 +57,13 @@
 
 <h2 style="margin-top: 24px">Incoming links</h2>
 <p class="muted">Other OmniaCLI instances let in to operate this one. Each gets a token, entered in its link there (its Links page).</p>
+{{ list_search("incoming", "Search link, role…") }}
 <div class="panel">
   <div class="scroll">
-  <table>
+  <table data-list="incoming">
     <tr><th>Link</th><th>Role</th><th></th></tr>
     {% for l in links %}
-    <tr data-link="{{ l.name }}">
+    <tr data-link="{{ l.name }}" {{ item(l.name ~ " " ~ l.role) }}>
       <td><strong>{{ l.name }}</strong>{% if l.fixed %}<br><span class="muted">main config</span>{% endif %}</td>
       {% if l.fixed %}
       <td>{{ l.role }}</td><td></td>
@@ -87,12 +91,13 @@
 <h2 style="margin-top: 24px">MCP tokens</h2>
 <p class="muted">For AI clients of the <span class="mono">/mcp</span> interface: they read, and their only actions are the MCP tools.
 <strong>developer</strong> also updates and backs up test instances, <strong>admin</strong> also adds draft servers; <strong>user</strong> only reads.</p>
+{{ list_search("tokens", "Search token, role…") }}
 <div class="panel">
   <div class="scroll">
-  <table>
+  <table data-list="tokens">
     <tr><th>Token</th><th>Role</th><th></th></tr>
     {% for t in tokens %}
-    <tr data-token="{{ t.name }}">
+    <tr data-token="{{ t.name }}" {{ item(t.name ~ " " ~ t.role) }}>
       <td><strong>{{ t.name }}</strong>{% if t.fixed %}<br><span class="muted">main config</span>{% endif %}</td>
       {% if t.fixed %}
       <td>{{ t.role }}</td><td></td>
@@ -185,5 +190,11 @@
     if (data) showSecret(`MCP token ${name}: give it to the client as "Authorization: Bearer <token>".`, data.token);
   };
 })();
+</script>
+<script>
+  // the lists' search (_list.html)
+  OmniaList.attach(document.querySelector('[data-list="users"]'));
+  OmniaList.attach(document.querySelector('[data-list="incoming"]'));
+  OmniaList.attach(document.querySelector('[data-list="tokens"]'));
 </script>
 {% endblock %}

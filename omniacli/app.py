@@ -34,7 +34,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.background import BackgroundTask
 from starlette.requests import ClientDisconnect, HTTPConnection
 
-from . import (checks, consumer, disks, gitcredentials, linkcopy, ops, packages, plugins, pluginstore, puller, publisher,
+from . import (checks, consumer, disks, gitcredentials, linkcopy, listgroups, ops, packages, plugins, pluginstore, puller, publisher,
                schedules, selflog, sshlinks, shell, stacktemplates, templatestore, tunnel, workspacehelper, workspaceops)
 from .accesslog import AccessLog
 from .diskhistory import DiskHistory, DiskRecorder
@@ -65,7 +65,6 @@ from .config import (
     Workspace,
     load_settings,
     matches,
-    parse_groups,
     parse_link,
     parse_connection,
     parse_options,
@@ -75,7 +74,6 @@ from .config import (
     parse_workspaces,
     save_access,
     save_connections,
-    save_groups,
     save_links,
     save_options,
     save_publications,
@@ -736,18 +734,19 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         found = await asyncio.gather(*(one(link) for link in settings.link_targets.values()))
         return [row for rows in found for row in rows]
 
-    async def server_sections(request: Request, q: str, me: Principal, with_links: bool) -> dict:
-        """The Dashboard's server tables: this instance's live servers, and
-        with_links those of every link (asked to them), filtered by text (link,
-        name, database, service, repositories and branches). A user of
-        workspaces sees its workspaces' servers only, and no link's."""
+    async def server_sections(request: Request, q: str, me: Principal) -> dict:
+        """The Dashboard's server table: this instance's live servers (a
+        linked instance's are on its own Dashboard, opened from Linked),
+        arranged by the groups of the servers list (listgroups.py); the list
+        widget searches them (_list.html), q fills its search. A user of
+        workspaces sees its workspaces' servers only, with no groups."""
         shown = visible_servers(me)
         live = [srv for srv in settings.active_servers() if shown is None or srv.name in shown]
-        with_links = with_links and shown is None
         states = await run_states(live)
         rows = [
             {
                 "link": "", "name": srv.name, "label": srv.name, "base": prefix_of(request),
+                "workspace": settings.workspace_of(srv.name) or "",
                 "roles": [r for r in ("production", "test") if r in srv.instances],
                 "busy": {r: jobs.is_busy(i.key) for r, i in srv.instances.items()},
                 "state": {r: states[i.key] for r, i in srv.instances.items()},
@@ -757,40 +756,36 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             }
             for srv in live
         ]
-        remote = await remote_servers(me) if with_links else []
-        errors = [r for r in remote if "error" in r]
-        rows += [r for r in remote if "error" not in r]
-        # each row under the first group that has it, the rest under "Other"
+        groups = settings.groups.get("servers", []) if shown is None else []
         for row in rows:
-            row["group"] = next((g.name for g in settings.groups if g.contains(row["link"], row["name"])), "")
-            row["text"] += " " + row["group"]
-        shown = [r for r in rows if matches(r["text"], q)]
-        sections = [{"name": g.name, "rows": [r for r in shown if r["group"] == g.name]} for g in settings.groups]
-        sections.append({"name": "Other servers" if settings.groups else "",
-                         "rows": [r for r in shown if not r["group"]]})
-        return {
-            "rows": shown,
-            "sections": [sec for sec in sections if sec["rows"]],
-            "link_errors": [e for e in errors if matches(e["link"], q)],
-            "total": len(rows),
-            "q": q,
-            "lazy": False,
-        }
+            # the search finds a server by its workspace and its groups too
+            row["text"] += " " + " ".join([row["workspace"], *group_names(groups, row["name"])])
+        return {"rows": rows, "sections": listgroups.sections(rows, groups, lambda r: r["name"]),
+                "total": len(rows), "q": q}
+
+    def group_names(groups: list, key: str) -> list[str]:
+        """The names of the groups that hold key, from the top down."""
+        for group in groups:
+            if group.contains(key):
+                return [group.name, *group_names(group.groups, key)]
+        return []
 
     @app.get("/")
     async def index(request: Request, q: str = "", me: Principal = Depends(current_user)):
-        """The Dashboard. With links, their servers come after the page
-        (/dashboard/servers): a link that answers slowly never holds it back."""
+        """The Dashboard: this instance's servers, its workspaces (for its
+        admins), the machine of each link (Linked), this machine, the jobs."""
         shown = visible_servers(me)
-        lazy = me.kind == "user" and bool(settings.link_targets) and shown is None
-        context = await server_sections(request, q, me, with_links=False)
+        context = await server_sections(request, q, me)
+        links = sorted(settings.link_targets) if me.kind == "user" and shown is None else []
+        linked = [{"name": n, "url": settings.link_targets[n].url} for n in links]
         context.update({
-            "lazy": lazy,
-            # the load and disks of this machine, and of every link (a link
-            # that does not answer says so in its panel): not for a user of
+            # the load and disks of this machine: not for a user of
             # workspaces, who sees its own servers only
             "machine": shown is None,
-            "machine_links": list(settings.link_targets) if me.kind == "user" and shown is None else [],
+            "machine_links": links,
+            "linked_sections": listgroups.sections(linked, settings.groups.get("links", []), lambda r: r["name"]),
+            # the workspaces of this machine, as on the Workspaces page
+            "dashboard_workspaces": workspace_rows() if shown is None and me.can("admin") else [],
             "jobs": visible_jobs(me, jobs.recent(len(jobs.jobs)))[:10],
             # a user of workspaces: the load of each of its workspaces instead
             "load_workspaces": sorted((ws, role) for ws, role in me.workspaces if ws in settings.workspaces) if me.scoped else [],
@@ -799,8 +794,8 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
 
     @app.get("/dashboard/servers")
     async def dashboard_servers(request: Request, q: str = "", me: Principal = Depends(current_user)):
-        """The Dashboard's server tables with the links' servers (lazy part)."""
-        context = await server_sections(request, q, me, with_links=True)
+        """The Dashboard's server table again (a job started or ended)."""
+        context = await server_sections(request, q, me)
         return _TEMPLATES.TemplateResponse(request, "_servers_part.html", context)
 
     @app.get("/servers/{server}")
@@ -3188,26 +3183,27 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
 
     @app.get("/groups")
     async def groups_page(request: Request, me: Principal = Depends(admin)):
-        known = [srv.name for srv in settings.active_servers()]
-        known += [f"{r['link']}/{r['name']}" for r in await remote_servers(me) if "error" not in r]
+        """The groups of the Dashboard's lists: servers and linked instances."""
         return _TEMPLATES.TemplateResponse(
             request, "groups.html",
-            {"groups": [{"name": g.name, "members": g.members} for g in settings.groups],
-             "known": known, "links": list(settings.link_targets), "groups_file": settings.groups_file},
+            {"lists": {name: [g.to_dict() for g in settings.groups.get(name, [])] for name in listgroups.LISTS},
+             "known": {"servers": [srv.name for srv in settings.active_servers()],
+                       "links": sorted(settings.link_targets)},
+             "groups_file": settings.groups_file},
         )
 
     @app.post("/api/groups/save", dependencies=[Depends(admin)])
     async def groups_save(payload: dict = Body(...)):
-        """The whole list of groups, in order."""
+        """The groups of every list: {lists: {servers: [...], links: [...]}}."""
         try:
-            groups = parse_groups(payload.get("groups"))
-        except ConfigError as exc:
+            lists = listgroups.parse_lists({"lists": payload.get("lists") or {}})
+        except listgroups.GroupsError as exc:
             return refuse(str(exc))
         try:
-            await asyncio.to_thread(save_groups, settings.groups_file, groups)
+            await asyncio.to_thread(listgroups.save, settings.groups_file, lists)
         except OSError as exc:
             return refuse(f"Cannot write {settings.groups_file}: {exc}", 500)
-        settings.groups = groups
+        settings.groups = lists
         return {"ok": True}
 
     # --- pullers this instance relays ----------------------------------

@@ -5,6 +5,8 @@
 {{ crumbs([("Dashboard", "/"), ("Schedules", None)]) }}
 {% endblock %}
 {% block content %}
+{% from "_list.html" import list_search, item %}
+{% include "_list.html" %}
 <h1>Schedules</h1>
 <p class="muted">Actions run on an instance at the times of a crontab expression (minute hour day month weekday,
 this computer's time): a git pull of its repositories, a copy of a linked instance's database (as
@@ -14,11 +16,14 @@ Saved in <span class="mono">{{ schedules_file }}</span>.</p>
 {% if load_error %}<div class="banner">{{ load_error }}: OmniaCLI runs no schedule until it is saved again.</div>{% endif %}
 <div id="error" class="banner" hidden></div>
 
+{{ list_search("schedules", "Search schedule, instance, step, user…", request.query_params.get("q", "")) }}
 <div class="panel scroll">
-<table>
-  <tr><th>Name</th><th>Instance</th><th>When</th><th>Steps</th><th>As</th><th>Last run</th><th></th></tr>
+<table data-list="schedules">
+  <thead><tr><th>Name</th><th>Instance</th><th>When</th><th>Steps</th><th>As</th><th>Last run</th><th></th></tr></thead>
   {% for s in schedules %}
   {% set last = s.runs[0] if s.runs else None %}
+  {# the schedule and its history: one item of the list widget #}
+  <tbody {{ item(s.name ~ " " ~ s.data.instance ~ " " ~ (s.steps | join(" ")) ~ " " ~ s.user) }}>
   <tr>
     <td><strong>{{ s.name }}</strong>{% if not s.data.enabled %} <span class="badge draft">off</span>{% endif %}</td>
     <td><a href="{{ prefix }}/servers/{{ s.data.instance.split('/')[0] }}?view={{ s.data.instance.split('/')[1] }}">{{ s.data.instance }}</a>
@@ -46,6 +51,7 @@ Saved in <span class="mono">{{ schedules_file }}</span>.</p>
     </table></details>
   </td></tr>
   {% endif %}
+  </tbody>
   {% else %}
   <tr><td colspan="7" class="muted">No schedules yet.</td></tr>
   {% endfor %}
@@ -264,5 +270,9 @@ Saved in <span class="mono">{{ schedules_file }}</span>.</p>
     };
   }
 })();
+</script>
+<script>
+  // the list's search (_list.html)
+  OmniaList.attach(document.querySelector('[data-list="schedules"]'));
 </script>
 {% endblock %}

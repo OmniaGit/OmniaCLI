@@ -244,22 +244,53 @@ def test_users_file_round_trip_and_main_config_wins(tmp_path):
     assert load_access(path).token_roles == {"old": "developer"}
 
 
-def test_groups_parse_match_and_round_trip(tmp_path):
-    from omniacli.config import ServerGroup, load_groups, parse_groups, save_groups
+def test_list_groups_parse_match_and_round_trip(tmp_path):
+    from omniacli import listgroups
+    from omniacli.config import load_groups
 
-    groups = parse_groups([{"name": "Customers", "members": ["cliente/*", "acme/one", "acme/one", " "]},
-                           {"name": "Mine", "members": ["*"]}])
-    assert groups[0].members == ["cliente/*", "acme/one"]  # once each, blanks dropped
-    assert groups[0].contains("cliente", "any") and groups[0].contains("acme", "one")
-    assert not groups[0].contains("acme", "two") and not groups[0].contains("", "cliente")
-    assert groups[1].contains("", "srv") and not groups[1].contains("cliente", "srv")
+    lists = listgroups.parse_lists({"lists": {"servers": [
+        {"name": "Customers", "members": ["acme-*", "beta", "beta", " "],
+         "groups": [{"name": "Tests", "members": ["*-test"]}]},
+        {"name": "All", "members": ["*"]}]}})
+    customers = lists["servers"][0]
+    assert customers.members == ["acme-*", "beta"] and lists["links"] == []  # once each, blanks dropped
+    assert customers.contains("acme-one") and customers.contains("beta") and not customers.contains("gamma")
+    # a subgroup's member is the group's too
+    assert customers.groups[0].contains("gamma-test") and customers.contains("gamma-test")
     path = tmp_path / "groups.yaml"
-    assert load_groups(path) == []
-    save_groups(path, groups)
-    assert load_groups(path) == groups
+    assert load_groups(path) == {"servers": [], "links": []}
+    listgroups.save(path, lists)
+    assert load_groups(path) == lists
     for data, error in (([{"name": ""}], "needs a name"), ([{"name": "a"}, {"name": "a"}], "two groups"),
-                        ([{"name": "a", "members": ["a b"]}], "is not a server"),
-                        ([{"name": "a", "members": ["x/y/z"]}], "is not a server"), ({"a": 1}, "must be a list")):
-        with pytest.raises(ConfigError, match=error):
-            parse_groups(data)
-    assert ServerGroup("x", ["*/db"]).contains("anylink", "db")
+                        ([{"name": "a", "members": ["a b"]}], "is not a name or a pattern"),
+                        ([{"name": "a", "members": ["x/y"]}], "is not a name or a pattern"), ({"a": 1}, "must be a list"),
+                        ([{"name": "1", "groups": [{"name": "2", "groups": [{"name": "3", "groups": [
+                            {"name": "4", "groups": [{"name": "5"}]}]}]}]}], "4 levels deep")):
+        with pytest.raises(listgroups.GroupsError, match=error):
+            listgroups.parse_lists({"lists": {"servers": data}})
+    with pytest.raises(listgroups.GroupsError, match="workspaces is not one of"):
+        listgroups.parse_lists({"lists": {"workspaces": []}})
+    # a file of before: this instance's servers to servers, a link's every server to links
+    old = listgroups.parse_lists({"groups": [{"name": "Customers", "members": ["cliente/*", "acme/one", "srv"]},
+                                             {"name": "Mine", "members": ["*"]}]})
+    assert [(g.name, g.members) for g in old["servers"]] == [("Customers", ["srv"]), ("Mine", ["*"])]
+    assert [(g.name, g.members) for g in old["links"]] == [("Customers", ["cliente"])]
+
+
+def test_list_sections():
+    from omniacli import listgroups
+
+    groups = listgroups.parse_tree([{"name": "Customers", "members": ["acme-*"],
+                                     "groups": [{"name": "Tests", "members": ["*-test"]}]},
+                                    {"name": "Empty", "members": ["nobody"]}])
+    items = [{"name": n} for n in ("acme-prod", "acme-test", "beta-test", "solo")]
+    found = listgroups.sections(items, groups, lambda i: i["name"])
+    # under the first group that has it, then its first subgroup; empty groups left out
+    assert [s["name"] for s in found] == ["Customers", "Others"]
+    assert [i["name"] for i in found[0]["items"]] == ["acme-prod"] and found[0]["count"] == 3
+    # a subgroup's member is its group's too: beta-test (*-test) goes under Customers › Tests
+    assert [(g["name"], [i["name"] for i in g["items"]]) for g in found[0]["groups"]] == [
+        ("Tests", ["acme-test", "beta-test"])]
+    assert [i["name"] for i in found[1]["items"]] == ["solo"]
+    # no groups: one section with no name
+    assert listgroups.sections(items, [], lambda i: i["name"]) == [{"name": "", "items": items, "groups": [], "count": 4}]

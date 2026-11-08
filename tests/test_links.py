@@ -88,11 +88,11 @@ async def test_proxy_asks_the_encoding_the_browser_accepts(mine):
     assert mine.network.requests[-1].headers["accept-encoding"] == "identity"
 
 
-async def test_servers_page_lists_the_links_servers(mine):
-    # lazy: the page comes without asking the links, its tables follow
+async def test_the_dashboard_shows_the_links_in_linked(mine):
+    # Servers: this instance's only; no link is asked for its servers, so no
+    # link's error shows there; each link has its row in Linked
     page = (await mine.get("/", headers=as_user("admin"))).text
-    assert "cliente › srv" not in page and 'data-lazy="/dashboard/servers?q="' in page
-    assert "Loading the servers of the linked instances" in page
+    assert "cliente › srv" not in page and "data-lazy" not in page and "Link <strong>down</strong>" not in page
     # This machine is this machine only; each link has its row in Linked, with
     # the same load widgets as This machine's row (_load.html)
     assert page.count('class="panel machine-panel"') == 1 and 'class="panel machine-panel" data-link=""' in page
@@ -101,22 +101,13 @@ async def test_servers_page_lists_the_links_servers(mine):
         assert f'<a href="/links/{link}/"><strong>{link}</strong></a>' in page
         assert f'<span class="machine-row" data-link="{link}">' in page
     assert page.count('class="load-cpu"') >= 3 and page.count('class="load-net"') == 3
+    # the linked rows are searched as every list (_list.html)
+    assert 'data-list-search="linked"' in page and 'id="linked" data-list="linked"' in page
     page = (await mine.get("/dashboard/servers", headers=as_user("admin"))).text
-    assert "cliente › srv" in page and 'href="/links/cliente/servers/srv"><strong>cliente › srv</strong>' in page
-    assert 'data-link="cliente" data-key="srv/test"' in page
-    assert "Link <strong>down</strong>: cannot connect" in page
-    # the filter knows the link, the database and the branch of a remote server
-    for q in ("cliente", "DB_test", "addons test"):
-        assert f'data-lazy="/dashboard/servers?q={q.replace(" ", "%20")}"' in (
-            await mine.get(f"/?q={q}", headers=as_user("admin"))).text
-        page = (await mine.get(f"/dashboard/servers?q={q}", headers=as_user("admin"))).text
-        assert "cliente › srv" in page and "1 of 1 server." in page, q
-    page = (await mine.get("/dashboard/servers?q=nothing", headers=as_user("admin"))).text
-    assert "No servers match." in page and "down" not in page
+    assert "cliente" not in page and "down" not in page
     # tokens do not see the links
     page = (await mine.get("/", headers={"Authorization": f"Bearer {TOKEN}"})).text
-    assert "cliente" not in page and "data-lazy" not in page
-    assert "cliente" not in (await mine.get("/dashboard/servers", headers={"Authorization": f"Bearer {TOKEN}"})).text
+    assert "cliente" not in page and 'data-fold="linked"' not in page
 
 
 async def test_proxied_pages_and_actions(mine):
@@ -204,15 +195,17 @@ async def test_links_page(mine):
     assert "bad" not in settings.link_targets and "bad" not in settings.links_file.read_text()
 
 
-async def test_groups_with_linked_servers(mine):
+async def test_groups_of_the_linked(mine):
     headers = as_user("admin", post=True)
     page = (await mine.get("/groups", headers=headers)).text
-    assert 'data-member="cliente/srv"' in page and 'data-member="cliente/*"' in page
-    body = {"groups": [{"name": "Customers", "members": ["cliente/*"]}]}
+    assert 'id="links" data-list-name="links"' in page and 'data-member="cliente"' in page
+    body = {"lists": {"links": [{"name": "Customers", "members": ["cli*"]}]}}
     assert (await mine.post("/api/groups/save", json=body, headers=headers)).json() == {"ok": True}
-    page = (await mine.get("/dashboard/servers", headers=headers)).text
-    assert "<h2>Customers <span" in page and "cliente › srv" in page
-    assert page.index("<h2>Customers") < page.index("cliente › srv")
+    page = (await mine.get("/", headers=headers)).text
+    linked = page[page.index('data-fold="linked"'):page.index('data-fold="machine"')]
+    # cliente under Customers, down under Others
+    assert linked.index("<h2>Customers") < linked.index('data-link="cliente"') < linked.index("<h2>Others")
+    assert linked.index("<h2>Others") < linked.index('data-link="down"')
     # the linked instance's own page has no groups of ours
     assert "Edit groups" not in (await mine.get("/links/cliente/", headers=headers)).text
 

@@ -1,0 +1,105 @@
+{# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C · SPDX-License-Identifier: AGPL-3.0-or-later -#}
+{# The list widget: every list of things (servers, linked instances,
+   workspaces, users, links, pullers, schedules, plugins) is searched the
+   same way, and, where the list offers it, grouped the same way.
+
+   Markup (import the macros):
+     list_search(id, placeholder, q): the search field of list id, with its
+       count; q fills it (a ?q= of the page)
+     grouped(sections, render, id): the grouping, an option: sections of
+       listgroups.sections ({name, items, groups, count}), each group a
+       heading that folds, its subgroups inside it; render(items) draws the
+       items of one group (a table: the list's own; its box, if any, marked
+       data-list-box, is hidden with it when the search leaves it empty)
+     item(text): the attributes of one item, the text the search looks in:
+       <tr {{ item(text) }}>
+   The list itself is any element with data-list="<id>" holding the items.
+   Script (include this file once): OmniaList.attach(root) searches the
+   list (every word, any case, as config.matches) and hides the groups left
+   with no item; it keeps each viewer's folded groups in this browser.
+   OmniaList.apply(root): again, after the list was drawn again. #}
+{% macro list_search(id, placeholder, q="") -%}
+<div class="list-search">
+  <input type="search" data-list-search="{{ id }}" value="{{ q }}" placeholder="{{ placeholder }}" aria-label="{{ placeholder }}">
+  <span class="muted list-shown" data-list-shown="{{ id }}"></span>
+</div>
+{%- endmacro %}
+{% macro item(text) -%}
+data-list-item data-text="{{ text | lower }}"
+{%- endmacro %}
+{% macro grouped(sections, render, id, path="", level=1) -%}
+{% for section in sections %}
+{% if section.name %}
+<details class="group list-group level-{{ level }}" open data-group="{{ path ~ '/' ~ section.name }}">
+  <summary><h2>{{ section.name }} <span class="muted list-count">({{ section.count }})</span></h2></summary>
+  {% if section["items"] %}{{ render(section["items"]) }}{% endif %}
+  {{ grouped(section.groups, render, id, path ~ "/" ~ section.name, level + 1) }}
+</details>
+{% elif section["items"] %}
+{{ render(section["items"]) }}
+{% endif %}
+{% endfor %}
+{%- endmacro %}
+<script>
+const OmniaList = (function () {
+  const words = (text) => text.toLowerCase().split(/\s+/).filter(Boolean);
+  const storeKey = (root, path) => `omniacli.list.${root.dataset.list}.${path}`;
+  function apply(root) {
+    const input = document.querySelector(`[data-list-search="${root.dataset.list}"]`);
+    const wanted = input ? words(input.value) : [];
+    const items = [...root.querySelectorAll("[data-list-item]")];
+    let shown = 0;
+    for (const item of items) {
+      const text = item.dataset.text || "";
+      const ok = wanted.every((w) => text.includes(w));
+      item.hidden = !ok;
+      if (ok) shown++;
+    }
+    // a group, and a table, with nothing left to show is hidden too
+    for (const group of [...root.querySelectorAll(".list-group")].reverse()) {
+      const left = group.querySelectorAll("[data-list-item]:not([hidden])").length;
+      group.hidden = !left;
+      const count = group.querySelector(":scope > summary .list-count");
+      if (count) count.textContent = `(${left})`;
+    }
+    // a table (or its box: data-list-box) with nothing left to show
+    for (const table of root.querySelectorAll("table")) {
+      const own = table.querySelectorAll("[data-list-item]");
+      if (own.length) (table.closest("[data-list-box]") || table).hidden = ![...own].some((i) => !i.hidden);
+    }
+    const note = document.querySelector(`[data-list-shown="${root.dataset.list}"]`);
+    if (note) note.textContent = wanted.length ? `${shown} of ${items.length}` : "";
+    // "Nothing matches" after the list (a table holds no paragraph)
+    let empty = document.querySelector(`[data-list-empty="${root.dataset.list}"]`);
+    if (wanted.length && !shown && items.length) {
+      if (!empty) {
+        empty = document.createElement("p");
+        empty.className = "muted list-empty";
+        empty.dataset.listEmpty = root.dataset.list;
+        root.after(empty);
+      }
+      empty.textContent = "Nothing matches.";
+    } else if (empty) empty.remove();
+  }
+  function folds(root) {
+    for (const group of root.querySelectorAll(".list-group:not([data-folds])")) {
+      group.dataset.folds = "1";
+      try { if (localStorage.getItem(storeKey(root, group.dataset.group)) === "closed") group.open = false; } catch (e) { /* no storage */ }
+      group.addEventListener("toggle", () => {
+        try { localStorage.setItem(storeKey(root, group.dataset.group), group.open ? "open" : "closed"); } catch (e) { /* no storage */ }
+      });
+    }
+  }
+  function attach(root) {
+    if (!root) return;
+    const input = document.querySelector(`[data-list-search="${root.dataset.list}"]`);
+    if (input && !input.dataset.attached) {
+      input.dataset.attached = "1";
+      input.addEventListener("input", () => apply(document.querySelector(`[data-list="${root.dataset.list}"]`)));
+    }
+    folds(root);
+    apply(root);
+  }
+  return {attach, apply: (root) => { if (root) { folds(root); apply(root); } }};
+})();
+</script>

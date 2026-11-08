@@ -53,8 +53,9 @@ The screenshots show demo data.
 
 ![The login page](docs/images/login.jpg)
 
-**Dashboard**: the servers with the state of their Odoo and their CPU, then
-**Linked**, one row for each linked instance's machine (its CPU and network of
+**Dashboard**: this instance's servers with their workspace, the state of
+their Odoo and their CPU, then (for admins) **Workspaces**, the list of the
+Workspaces page, then **Linked**, one row for each linked instance's machine (its CPU and network of
 the last 15 minutes, its disks; the name opens it), then **This machine**,
 the machine OmniaCLI runs on only (CPU, network, disks), and the last jobs,
 updated as they run. CPU, network and disks are shown by one widget each
@@ -770,13 +771,23 @@ The routes, for links in the puller only (a JSON `{"error": ...}` otherwise):
 
 ### Groups
 
-With many servers, **Edit groups** on the Dashboard (admins) puts them
-under headings, in the order you choose. A member is `srv` (a server of this
-instance), `*` (all of them), `customer/srv` (a server of a link) or
-`customer/*` (all the servers of a link); a server shows under the first
-group that has it, the rest under "Other servers". The filter finds a server
-by its group name too. The groups are this instance's own: a linked
-instance's pages do not show them.
+Every list of things (the Dashboard's Servers, Workspaces and Linked, and
+the Workspaces, Settings › Servers, Users, Links, Pullers, Schedules and
+Plugins pages) is one list widget (`templates/_list.html`): its search finds
+every word typed, in any case, in the browser (`?q=` fills it). Grouping is
+an option of the widget, offered by the Dashboard's **Servers** and
+**Linked**: **Edit groups** (admins, `/groups`) puts their items under
+headings and subheadings, four levels at most, in the order you choose. A
+member is a name of the list (`srv`, `cliente`) or a pattern of names
+(`acme-*`, `*`, `?` one character); an item shows under the first group
+that has it, itself or in a subgroup, then under the first of its subgroups
+that has it, the rest under "Others". The search finds an item by its groups
+too, and each viewer's folded groups are kept in its browser. A file of an
+older OmniaCLI (one list for this instance's and the links' servers) is
+read as the groups of both: `srv` and `*` the servers', `customer/*` the
+link `customer`; a single server of a link (`customer/srv`) is dropped, the
+linked servers being on their own Dashboard now. The groups are this
+instance's own: a linked instance's pages do not show them.
 
 The other instance must be reachable from yours: through an HTTPS reverse
 proxy, a VPN, or an SSH tunnel (`http://` is accepted for a tunnel or a VPN,

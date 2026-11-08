@@ -1,19 +1,17 @@
 {# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C · SPDX-License-Identifier: AGPL-3.0-or-later -#}
 {% from "_load.html" import cpu as load_cpu %}
-{# The server tables of the Dashboard: rendered with the page, or, when there
-   are links, first with this instance's servers only and then again, with
-   the links' servers, by /dashboard/servers (lazy: a slow link never holds
-   the page back). #}
+{% from "_list.html" import grouped, item %}
+{# The server tables of the Dashboard: this instance's servers, in the
+   groups of the servers list (the list widget, _list.html), rendered with
+   the page and again by /dashboard/servers when a job starts or ends. #}
 {% from "_icons.html" import icon, runner %}
-{% if q %}<p class="muted">{{ rows | length }} of {{ total }} server{{ "" if total == 1 else "s" }}{{ " here; the linked instances' are loading" if lazy }}.</p>{% endif %}
-{% for e in link_errors %}<div class="banner">Link <strong>{{ e.link }}</strong>: {{ e.error }}</div>{% endfor %}
 {% macro server_table(rows) %}
-<div class="panel">
+<div class="panel" data-list-box>
   <div class="scroll">
   <table class="server-rows">
-    <tr><th>Server</th><th>Odoo, CPU of the last 15 minutes</th></tr>
+    <tr><th>Server</th><th>Workspace</th><th>Odoo, CPU of the last 15 minutes</th></tr>
     {% for row in rows %}
-    <tr>
+    <tr {{ item(row.text) }}>
       <td><div class="server-name"><a href="{{ row.base }}/servers/{{ row.name }}"><strong>{{ row.label }}</strong></a>
         <span class="view-buttons">
           {# the instance itself, at its domain or on localhost, in a new tab;
@@ -23,9 +21,9 @@
           {% else %}<a class="button view-{{ role }}" href="{{ row.base }}/servers/{{ row.name }}?view={{ role }}" title="{{ role | capitalize }} of {{ row.label }}">{{ icon(role) }}{{ role | capitalize }}</a>{% endif %}
           {% endfor %}
         </span></div>
-        {% if row.link %}<br><span class="muted">linked instance {{ row.link }}</span>{% endif %}
         {# shown and hidden by the Dashboard as jobs start and end #}
         {% for role in row.roles %}<span class="job-busy" data-link="{{ row.link }}" data-busy="{{ row.name }}/{{ role }}" {% if not row.busy[role] %}hidden{% endif %}><br><span class="status running">{{ runner("mini") }}job running on {{ role }}</span></span>{% endfor %}</td>
+      <td>{% if row.workspace %}{% if is_admin %}<a href="{{ prefix }}/workspaces?edit={{ row.workspace | urlencode }}">{{ row.workspace }}</a>{% else %}{{ row.workspace }}{% endif %}{% else %}<span class="muted">—</span>{% endif %}</td>
       <td class="sparks">
         {% for role in row.roles %}
         <div class="spark-row" data-link="{{ row.link }}" data-key="{{ row.name }}/{{ role }}">
@@ -67,18 +65,8 @@
   </div>
 </div>
 {% endmacro %}
-{% for section in sections %}
-{% if section.name %}
-<details class="group" open>
-  <summary><h2>{{ section.name }} <span class="muted">({{ section.rows | length }})</span></h2></summary>
-  {{ server_table(section.rows) }}
-</details>
+{% if rows %}
+{{ grouped(sections, server_table, "servers") }}
 {% else %}
-{{ server_table(section.rows) }}
+<div class="panel"><p class="muted" style="margin: 0">No live servers.{% if is_admin %} Add one in <a href="{{ prefix }}/config">Servers</a>, then use Test &amp; activate.{% endif %}</p></div>
 {% endif %}
-{% else %}
-{% if not lazy %}
-<div class="panel"><p class="muted" style="margin: 0">{% if q %}No servers match.{% else %}No live servers.{% if is_admin %} Add one in <a href="{{ prefix }}/config">Servers</a>, then use Test &amp; activate.{% endif %}{% endif %}</p></div>
-{% endif %}
-{% endfor %}
-{% if lazy %}<p class="muted links-loading">Loading the servers of the linked instances…</p>{% endif %}

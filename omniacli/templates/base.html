@@ -69,6 +69,12 @@ header strong { font-size: 16px; }
 details.group { margin-bottom: 16px; }
 details.group > summary { cursor: pointer; margin-bottom: 8px; }
 details.group > summary h2 { display: inline; font-size: 17px; }
+/* the list widget (_list.html): its search, and the subgroups inside a group */
+.list-search { display: flex; align-items: center; gap: 10px; margin: 0 0 12px; flex-wrap: wrap; }
+.list-search input[type="search"] { flex: 1 1 260px; max-width: 520px; }
+details.list-group details.list-group { margin-left: 18px; }
+details.list-group.level-2 > summary h2 { font-size: 15px; } details.list-group.level-3 > summary h2,
+details.list-group.level-4 > summary h2 { font-size: 14px; }
 .group-box textarea { width: 100%; font: inherit; padding: 5px 8px; border: 1px solid var(--border);
   border-radius: var(--r); background: var(--bg); color: var(--text); }
 header a { color: var(--text); text-decoration: none; }

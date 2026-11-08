@@ -148,3 +148,30 @@ def test_the_series_of_a_workspace():
     sampler.workspaces["acme"] = metrics.deque([{"t": 10}, {"t": 20}, {"t": 30}])
     assert [p["t"] for p in sampler.workspace_series("acme", 15)] == [20, 30]
     assert sampler.workspace_series("none") == []
+
+
+async def test_the_dashboard_lists_the_workspaces(workspaces, client):  # noqa: F811
+    from .test_app import basic as machine_user
+
+    page = (await client.get("/", headers={"Authorization": AUTH})).text
+    # Workspaces, after Servers: the list of the Workspaces page itself, searched as every list
+    assert page.index('data-fold="servers"') < page.index('data-fold="workspaces"')
+    assert 'class="ws-row" data-ws="acme"' in page and 'id="ws-list" data-list="workspaces"' in page
+    # each server tells its workspace: srv is acme's
+    row = page[page.index('href="/servers/srv"'):]
+    assert '<a href="/workspaces?edit=acme">acme</a>' in row[:row.index("</tr>")]
+    # a developer of the machine: its servers, no workspaces (they are the admins')
+    page = (await client.get("/", headers={"Authorization": machine_user("dev")})).text
+    assert 'data-fold="workspaces"' not in page and "<th>Workspace</th>" in page
+
+
+async def test_every_list_is_searched_by_the_list_widget(workspaces, client):  # noqa: F811
+    for path, lists in (("/users", ("users", "incoming", "tokens")), ("/links", ("links",)),
+                        ("/schedules", ("schedules",)), ("/plugins", ("plugins",)), ("/config", ("config-servers",)),
+                        ("/pullers", ("pullers", "publications", "connections")), ("/workspaces", ("workspaces",))):
+        page = (await client.get(path, headers={"Authorization": AUTH})).text
+        assert "const OmniaList" in page, path
+        for name in lists:
+            assert f'data-list-search="{name}"' in page and f'data-list="{name}"' in page, (path, name)
+    page = (await client.get("/users", headers={"Authorization": AUTH})).text
+    assert 'data-user="mario" data-list-item data-text="mario workspace"' in page

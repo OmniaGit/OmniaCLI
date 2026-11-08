@@ -1,0 +1,91 @@
+{# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C · SPDX-License-Identifier: AGPL-3.0-or-later -#}
+{# The list of the workspaces, one line each: its servers, CPU and network
+   (_load.html), memory, its disk and the real disk under its storage
+   (_disk.html); a click opens its form. The Workspaces page and the
+   Dashboard show it; workspaces: app.workspace_rows. Needs _charts.html,
+   _disk.html, _load.html and _list.html included before it. #}
+{% from "_load.html" import cpu as load_cpu, net as load_net %}
+{% from "_list.html" import item %}
+<div class="panel" data-list-box>
+  <div class="scroll">
+  <table id="ws-list" data-list="workspaces">
+    <tr><th>Workspace</th><th>Domain</th><th>Servers</th><th>CPU (cores)</th><th>Memory</th>
+      <th title="what its containers receive and send, on the bridges of its projects">Network in / out</th>
+      <th>Disk used / limit</th><th title="the real disk under its storage, with what the workspaces were promised there">Real disk</th></tr>
+    {% for ws in workspaces %}
+    <tr class="ws-row" data-ws="{{ ws.name }}" tabindex="0" style="cursor: pointer" title="Edit {{ ws.name }}"
+        {{ item([ws.name, ws.label, ws.domain, ws.storage, ws.servers | join(" ")] | join(" ")) }}>
+      <td><strong>{{ ws.name }}</strong>{% if ws.label %} <span class="muted">{{ ws.label }}</span>{% endif %}
+        {% if ws.storage_problem %} <span class="error" title="{{ ws.storage_problem }}">⚠ unusable</span>{% endif %}</td>
+      <td class="mono">{{ ws.domain or "" }}</td>
+      <td class="mono">{{ ws.instances_count }}</td>
+      <td class="cpu">{{ load_cpu(ws.name) }}</td><td class="mono mem">…</td><td class="net">{{ load_net(ws.name) }}</td>
+      <td class="mono disk">…</td><td class="mono free">…</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="8" class="muted">No workspace yet: New workspace makes one.</td></tr>
+    {% endfor %}
+  </table>
+  </div>
+</div>
+<script>
+(function () {
+  const all = {{ workspaces | tojson }};
+  const byName = Object.fromEntries(all.map((w) => [w.name, w]));
+  const rows = [...document.querySelectorAll("#ws-list .ws-row")];
+  if (!rows.length) return;
+  for (const row of rows) {
+    const open = () => { location.href = "{{ prefix }}/workspaces?edit=" + encodeURIComponent(row.dataset.ws); };
+    row.onclick = open;
+    row.onkeydown = (e) => { if (e.key === "Enter") open(); };
+  }
+  // CPU and network: the widgets of every row, the last 15 minutes, every 5 s
+  const series = {};
+  let since = 0;
+  async function showLoad() {
+    const from = since || Math.floor(Date.now() / 1000) - 15 * 60;
+    const resp = await fetch("{{ prefix }}/api/workspaces/load?since=" + from).catch(() => null);
+    const data = resp && resp.ok ? await resp.json() : null;
+    if (data) {
+      for (const row of rows) {
+        const name = row.dataset.ws, limits = byName[name].limits || {};
+        const points = series[name] = (series[name] || []).concat(data.series[name] || []).slice(-180);
+        if (points.length) since = Math.max(since, points[points.length - 1].t);
+        // CPU comes in percent of one core: shown in cores, against the limit
+        const cores = points.map((p) => ({...p, cores: p.cpu === null ? null : p.cpu / 100}));
+        OmniaLoad.cpu(row.querySelector(".load-cpu"), cores,
+                      {key: "cores", minMax: 0.1, text: (p) => p.cores.toFixed(2) + (limits.cpus ? ` / ${limits.cpus}` : ""),
+                       title: (p) => `${p.cores.toFixed(2)} cores` + (limits.cpus ? ` of ${limits.cpus}` : "")});
+        const p = (data.workspaces || {})[name] || {};
+        row.querySelector(".mem").textContent = (p.mem == null ? "—" : (p.mem / 1024).toFixed(2))
+          + (limits.memory_gb ? ` / ${limits.memory_gb}` : "") + " GB";
+        OmniaLoad.net(row.querySelector(".load-net"), points,
+                      {rx: "in", tx: "out", none: "its projects' networks are not known yet (looked at once a minute)"});
+      }
+    }
+    setTimeout(showLoad, 5000);
+  }
+  // the disks (root helper): once a minute
+  async function showDisks() {
+    const resp = await fetch("{{ prefix }}/api/workspaces/space").catch(() => null);
+    const data = resp ? await resp.json().catch(() => ({})) : {};
+    if (!resp || !resp.ok) data.error = data.error || data.detail || (resp ? "Error " + resp.status : "No answer.");
+    for (const row of rows) {
+      const ws = byName[row.dataset.ws], limit = (ws.limits || {}).disk_gb;
+      const r = data.error ? null : ((data.roots || {})[ws.storage] || {})[ws.name];
+      const cell = row.querySelector(".disk"), free = row.querySelector(".free");
+      if (!r) { OmniaDisk.message(cell, data.error ? "?" : (ws.storage ? "not there" : "no storage"), !!data.error);
+        cell.title = data.error || ""; OmniaDisk.message(free, "—"); continue; }
+      const total = limit ? limit * 1073741824 : r.own_size;
+      if (total) OmniaDisk.render(cell, {label: ws.name, used: r.own_used, total,
+                                         forecast: (data.forecasts || {})[ws.name]}, {compact: true});
+      else OmniaDisk.message(cell, "no disk yet");
+      OmniaDisk.render(free, OmniaDisk.realDisk(data, ws.storage), {compact: true});
+    }
+    setTimeout(showDisks, 60000);
+  }
+  // not while the Workspaces page shows a form instead (?edit=, ?new)
+  const params = new URLSearchParams(location.search);
+  if (!params.has("edit") && !params.has("new")) { showLoad(); showDisks(); }
+})();
+</script>
