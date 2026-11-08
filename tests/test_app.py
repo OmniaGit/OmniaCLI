@@ -428,6 +428,8 @@ async def test_metrics_api(client, env):
     assert top < page.index('<div id="machine-detail" hidden>') < page.index(
         '<section class="panel machine-panel" data-link="">') < page.index('data-fold="servers"')
     assert 'data-fold="machine"' not in page and 'localStorage.getItem(key) === "open"' in page
+    # open, the row's charts hidden: the panel shows the same load
+    assert 'row.querySelector(".machine-row").hidden = open;' in page and '<span class="muted machine-top-close" hidden>Close</span>' in page
 
 
 def test_machine_counters(tmp_path):

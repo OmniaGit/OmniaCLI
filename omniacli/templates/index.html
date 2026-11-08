@@ -10,11 +10,12 @@
 {% include "_load.html" %}
 {% include "_list.html" %}
 {# this machine: its load in one line, at the top (_load.html); a click on it
-   opens its whole load below (the last hour, its disks), again closes it #}
+   opens its whole load below (the last hour, its disks) in its place, the
+   line hidden (the same load twice), again closes it #}
 {% if machine %}
 <div class="panel machine-top">
   <div class="machine-top-row" role="button" tabindex="0" aria-expanded="false" aria-controls="machine-detail"
-       title="Open the load of this machine"><span class="fold-icon" aria-hidden="true">▸</span>{{ machine_row("", "this machine") }}</div>
+       title="Open the load of this machine"><span class="fold-icon" aria-hidden="true">▸</span>{{ machine_row("", "this machine") }}<span class="muted machine-top-close" hidden>Close</span></div>
   <div id="machine-detail" hidden>
 <p class="muted" style="margin: 10px 0 0">The whole machine, last hour: every Odoo instance, PostgreSQL and the rest together.</p>
 <div class="machine-grid">
@@ -399,6 +400,9 @@
     row.setAttribute("aria-expanded", String(open));
     row.title = open ? "Close the load of this machine" : "Open the load of this machine";
     row.querySelector(".fold-icon").textContent = open ? "▾" : "▸";
+    // open: the panel shows the load, the row's own charts would only repeat it
+    row.querySelector(".machine-row").hidden = open;
+    row.querySelector(".machine-top-close").hidden = !open;
     // the charts drawn while hidden had no size: again at their size
     if (open) window.dispatchEvent(new Event("resize"));
   };
