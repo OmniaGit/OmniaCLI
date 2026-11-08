@@ -57,7 +57,9 @@ echo "venv built on $VENV_HOME"
 [ "$VENV_HOME" = "$EXPECT_HOME" ] || fail "venv built on $VENV_HOME, expected $EXPECT_HOME"
 /opt/omniacli/venv/bin/python -c 'import mcp' || fail "mcp not installed"
 if [ "$EXPECT_HOME" = /opt/omniacli/python/bin ]; then
-    grep -q 'downloading Python' /tmp/install.log || fail "bundled Python not downloaded"
+    # preinstalled by the image from the host's cache, with its sha256: postinst takes it as it is
+    grep -q 'downloading Python' /tmp/install.log && fail "the bundled Python downloaded although it was there"
+    [ -x /opt/omniacli/python/bin/python3 ] || fail "no bundled Python"
 else
     [ ! -e /opt/omniacli/python ] || fail "/opt/omniacli/python created with a usable local Python"
 fi
@@ -425,19 +427,20 @@ install -d -o dev -g dev -m 777 /srv/userdisk
 install -d -o dev -g dev -m 755 /srv/userdisk/mine
 install -d -o root -g root -m 755 "$WS_USER"
 echo real > "$WS_USER/marker"
-printf 'workspaces:\n  storage:\n    - %s\n    - %s\n' "$WS_DEFAULT" "$WS_USER" >> /etc/omniacli/omniacli.yaml
+printf 'workspaces:\n  storage:\n    default: %s\n    mine: %s\n' "$WS_DEFAULT" "$WS_USER" >> /etc/omniacli/omniacli.yaml
 echo OMNIACLI_WORKSPACES=1 >> /etc/default/omniacli
 dpkg-reconfigure omniacli > /tmp/reconf.log 2>&1 || { tail -20 /tmp/reconf.log; fail "dpkg-reconfigure with OMNIACLI_WORKSPACES=1"; }
 wait_up || fail "service not up with OMNIACLI_WORKSPACES=1"
 grep 'storage ' /tmp/reconf.log || true
 [ "$(stat -c '%U:%G %a' "$WS_DEFAULT")" = "root:root 755" ] || fail "$WS_DEFAULT is $(stat -c '%U:%G %a' "$WS_DEFAULT")"
-B_DEFAULT=$(bound_of "$WS_DEFAULT"); B_USER=$(bound_of "$WS_USER")
+B_DEFAULT=$(bound_of default); B_USER=$(bound_of mine)
+[ "$B_USER" = /var/lib/omniacli-storage/mine ] || fail "the storage mine is bound on $B_USER, not on its name"
 for b in "$B_DEFAULT" "$B_USER"; do
     findmnt -n "$b" >/dev/null || { tail -20 /tmp/reconf.log; fail "$b not bound by the package"; }
     grep -qx "omniacli ALL=(root) NOPASSWD: /opt/omniacli/venv/bin/omniacli compose-helper $b/\* \*" "$WS_SUDOERS" \
         || { cat "$WS_SUDOERS"; fail "no compose-helper line for $b"; }
-    systemctl is-active --quiet "omniacli-storage-$(basename "$b").service" || fail "the check of $b is not active"
-    systemctl is-enabled --quiet "omniacli-storage-$(basename "$b").service" || fail "the check of $b is not enabled"
+    systemctl is-active --quiet "omniacli-storage-$(basename "$b").service" || fail "the unit of $b is not active"
+    systemctl is-enabled --quiet "omniacli-storage-$(basename "$b").service" || fail "the unit of $b is not enabled"
 done
 [ "$(cat "$B_USER/marker")" = real ] || fail "$B_USER does not show $WS_USER"
 grep -q "compose-helper $WS_USER/" "$WS_SUDOERS" && fail "a compose-helper line names the storage itself, not its root path"
@@ -446,14 +449,15 @@ login admin "$PW"
 curl -s -b /tmp/cookies-admin localhost:8090/api/workspaces/space > /tmp/space.json
 /opt/omniacli/venv/bin/python -c 'import json, sys
 room = json.load(open("/tmp/space.json"))["roots"][sys.argv[1]][""]
-assert room["free"] > 0 and room["physical"] == room["free"] and room["promised"] == 0, room' "$WS_DEFAULT" \
+assert room["free"] > 0 and room["physical"] == room["free"] and room["promised"] == 0, room' default \
     || { cat /tmp/space.json; fail "the room of $WS_DEFAULT"; }
-curl -s -b /tmp/cookies-admin localhost:8090/workspaces | grep -q "<option>$WS_USER</option>" || fail "$WS_USER not offered"
+curl -s -b /tmp/cookies-admin localhost:8090/workspaces | grep -q "<option value=\"mine\">mine ($WS_USER)</option>" \
+    || fail "the storage mine ($WS_USER) not offered"
 # a workspace's disk on the user's disk, through the root path; after the storage's check.
 # A container's /dev is made at its start: loop devices the kernel adds later
 # (several of these tests at once, the host's own) get their nodes here
 for i in $(seq 0 255); do [ -e "/dev/loop$i" ] || mknod "/dev/loop$i" b 7 "$i" 2>/dev/null || true; done
-"$HELPER" workspace-helper disk w1 "$WS_USER" 1 > /tmp/disk.json 2>&1 || { cat /tmp/disk.json
+"$HELPER" workspace-helper disk w1 mine 1 > /tmp/disk.json 2>&1 || { cat /tmp/disk.json
     journalctl -u "$(systemd-escape -p --suffix=mount "$B_USER/w1")" --no-pager -o cat | tail -8
     losetup -a; ls /dev/loop* | tr '\n' ' '; fail "the disk of w1"; }
 findmnt -n "$B_USER/w1" >/dev/null || fail "the disk of w1 not mounted on $B_USER/w1"
@@ -464,24 +468,48 @@ su dev -s /bin/sh -c "mv /srv/userdisk/mine /srv/userdisk/moved && mkdir -p $WS_
 [ "$(cat "$B_USER/marker")" = real ] || fail "the root path followed the rename"
 findmnt -n "$B_USER/w1" >/dev/null || fail "the disk of w1 lost by the rename"
 mv "$B_USER" "$B_USER.x" 2>/dev/null && fail "the root path was moved"
-# a boot: the units again; the path now holds the planted folder, the check unbinds it
+# a boot: the units again; the path now holds the planted folder, the storage's unit refuses it
 W1_UNIT=$(systemd-escape -p --suffix=mount "$B_USER/w1")
-systemctl stop "$W1_UNIT" "omniacli-storage-$(basename "$B_USER").service" "$(systemd-escape -p --suffix=mount "$B_USER")"
+systemctl stop "$W1_UNIT" omniacli-storage-mine.service
+findmnt -n "$B_USER" >/dev/null && fail "the storage's unit stopped leaves $B_USER bound"
 systemctl start "$W1_UNIT" 2>/dev/null && fail "the disk of w1 mounted on a planted storage"
 findmnt -n "$B_USER" >/dev/null && fail "the planted folder stays bound on $B_USER"
 journalctl -u "omniacli-storage-$(basename "$B_USER").service" --no-pager -o cat | grep -qE "not the folder set up|root's alone" \
     || fail "the check did not say why"
 touch "$B_USER/x" 2>/dev/null && fail "something was written beneath $B_USER (not immutable)"
-"$HELPER" workspace-helper disk w1 "$WS_USER" 1 > /tmp/disk.json 2>&1 && fail "an action took the planted storage"
+"$HELPER" workspace-helper disk w1 mine 1 > /tmp/disk.json 2>&1 && fail "an action took the planted storage"
 grep -qE "not the folder set up|root's alone" /tmp/disk.json || { cat /tmp/disk.json; fail "the action did not say why"; }
 # taken again on purpose: the planted folder is the user's, refused
-"$HELPER" workspace-helper storage-reset "$WS_USER" > /tmp/reset.json 2>&1 && fail "storage-reset took a folder of the user's"
+"$HELPER" workspace-helper storage-reset mine > /tmp/reset.json 2>&1 && fail "storage-reset took a folder of the user's"
 grep -q "root's alone" /tmp/reset.json || { cat /tmp/reset.json; fail "storage-reset did not say why"; }
 # the real one back: bound and checked again, the disk mounts
 su dev -s /bin/sh -c "rm -rf /srv/userdisk/mine && mv /srv/userdisk/moved /srv/userdisk/mine"
 systemctl start "$W1_UNIT" || { journalctl -u "omniacli-storage-$(basename "$B_USER").service" --no-pager | tail -5; fail "the real storage back is not taken"; }
 [ "$(cat "$B_USER/marker")" = real ] && findmnt -n "$B_USER/w1" >/dev/null || fail "the real storage and w1 not back"
-echo "storages bound: $B_DEFAULT, $B_USER; a planted folder unbound at a boot"
+# a new disk: the workspaces stopped, the folder copied (the disks kept sparse),
+# only the folder changed in the main configuration, a boot: the storage is
+# bound from its new folder, its name and all that uses it as they were
+WS_NEW=/srv/newdisk/omniacli
+install -d -o root -g root -m 755 /srv/newdisk "$WS_NEW"
+systemctl stop "$W1_UNIT"
+cp -a --sparse=always "$WS_USER/." "$WS_NEW/"
+echo new > "$WS_NEW/marker"
+chattr -i "$WS_NEW/w1" 2>/dev/null; rmdir "$WS_NEW/w1" 2>/dev/null; mkdir -p "$WS_NEW/w1"
+sed -i "s#    mine: $WS_USER#    mine: $WS_NEW#" /etc/omniacli/omniacli.yaml
+grep -q "mine: $WS_NEW" /etc/omniacli/omniacli.yaml || fail "the storage's folder not changed in the configuration"
+systemctl stop omniacli-storage-mine.service
+systemctl start "$W1_UNIT" || { journalctl -u omniacli-storage-mine.service --no-pager | tail -5; fail "the storage on its new disk is not taken"; }
+[ "$(cat "$B_USER/marker")" = new ] || fail "$B_USER does not show the new folder $WS_NEW"
+findmnt -n "$B_USER/w1" >/dev/null || fail "the disk of w1 not mounted from the new disk"
+grep -qx "$WS_NEW" "/var/lib/omniacli-storage/.ids/mine.id" || fail "the new folder of mine not kept"
+# the helper finds it there (space, not disk: a disk mounted again here waits for
+# its loop device, which no udev of a container announces)
+"$HELPER" workspace-helper space > /tmp/space2.json 2>&1 || { cat /tmp/space2.json; fail "the helper on the storage on its new disk"; }
+/opt/omniacli/venv/bin/python -c 'import json, sys
+root = next(r for r in json.loads(open("/tmp/space2.json").read().splitlines()[-1])["roots"] if r["root"] == "mine")
+assert root["folder"] == sys.argv[1] and "w1" in root["images"], root' "$WS_NEW" \
+    || { cat /tmp/space2.json; fail "the storage mine not on its new disk for the helper"; }
+echo "storages bound: $B_DEFAULT, $B_USER; a planted folder refused at a boot; a new disk taken at a boot"
 sed -i '/^OMNIACLI_WORKSPACES=/d' /etc/default/omniacli
 dpkg-reconfigure omniacli > /tmp/reconf.log 2>&1 || { tail -20 /tmp/reconf.log; fail "dpkg-reconfigure without OMNIACLI_WORKSPACES"; }
 wait_up || fail "service not up without OMNIACLI_WORKSPACES"
@@ -516,22 +544,47 @@ EOS
 
 # the Python a local python3.12 is taken from: the package's bundled one
 BUNDLED_URL="$(dpkg-deb --ctrl-tarfile "$DEB" | tar -xO ./postinst | sed -n 's/^BUNDLED_URL=//p')"
+BUNDLED_SHA256="$(dpkg-deb --ctrl-tarfile "$DEB" | tar -xO ./postinst | sed -n 's/^BUNDLED_SHA256=//p')"
+# downloaded once into a cache of this machine, checked against the package's
+# sha256: the images take it from there, never from github.com at each run
+# (debian:11 installs it where the package looks for it, so its postinst
+# finds it and does not download it; the download itself is not run here)
+CACHE="${OMNIACLI_TEST_CACHE:-$HOME/.cache/omniacli-test}"
+mkdir -p "$CACHE"
+PY_TARBALL="$CACHE/python-$BUNDLED_SHA256.tar.gz"
+# (checked when downloaded; a file there is used as it is, also one put there
+# by hand: a tar.gz of the build's python/ folder)
+if [ ! -s "$PY_TARBALL" ]; then
+    for try in 1 2 3 4 5; do
+        curl -sfL --max-time 300 -o "$PY_TARBALL.tmp" "$BUNDLED_URL" \
+            && [ "$(sha256sum "$PY_TARBALL.tmp" | cut -d' ' -f1)" = "$BUNDLED_SHA256" ] \
+            && mv "$PY_TARBALL.tmp" "$PY_TARBALL" && break
+        echo "the bundled Python not downloaded (try $try of 5), again in 20 s" >&2
+        sleep 20
+    done
+    [ -f "$PY_TARBALL" ] || { echo "the bundled Python cannot be downloaded from $BUNDLED_URL" >&2; exit 1; }
+fi
+cp "$PY_TARBALL" "$CACHE/python.tar.gz"
 
 test_one() {
     local image="${1%+localpy}" tag="omniacli-test-${1//[:\/+]/-}" log="$LOGS/${1//[:\/+]/_}.log" cid
     local expect=/usr/bin localpy=true
     if [ "$1" != "$image" ]; then
         expect=/usr/local/bin
-        localpy="curl -sfL '$BUNDLED_URL' | tar -xz -C /usr/local/lib \
+        localpy="tar -xzf /tmp/python.tar.gz -C /usr/local/lib \
  && ln -s /usr/local/lib/python/bin/python3.12 /usr/local/bin/python3.12 \
  && printf '#!/bin/sh\\nexit 1\\n' > /usr/local/bin/python3.13 && chmod 755 /usr/local/bin/python3.13"
     elif [ "$image" = debian:11 ]; then
         expect=/opt/omniacli/python/bin
+        # the bundled Python where the package keeps it, with its sha256: postinst takes it
+        localpy="mkdir -p /opt/omniacli && tar -xzf /tmp/python.tar.gz -C /opt/omniacli \
+ && echo $BUNDLED_SHA256 > /opt/omniacli/python/.sha256"
     fi
     {
-        docker build -q -t "$tag" - >/dev/null <<EOF
+        docker build -q -t "$tag" -f - "$CACHE" >/dev/null <<EOF
 FROM $image
 ENV DEBIAN_FRONTEND=noninteractive
+COPY python.tar.gz /tmp/python.tar.gz
 RUN if grep -q '^11' /etc/debian_version 2>/dev/null; then \
       sed -i 's#http://deb.debian.org/debian-security#http://archive.debian.org/debian-security#' /etc/apt/sources.list; fi \
  && apt-get update -qq && apt-get install -y -qq systemd systemd-sysv sudo curl >/dev/null \
@@ -551,7 +604,7 @@ EOF
         # the immutable folders of the storages' binds and of the workspaces'
         # disks: docker cannot remove a container that keeps them
         docker exec "$cid" sh -c 'for m in $(findmnt -rn -o TARGET | grep "^/var/lib/omniacli-storage/" | sort -r); do umount "$m"; done
-            for d in /var/lib/omniacli-storage/* /srv/*/*/workspaces/* /srv/*/*/workspaces /srv/omniacli/default_workspace/*; do
+            for d in /var/lib/omniacli-storage/* /srv/*/*/workspaces/* /srv/*/*/workspaces /srv/omniacli/default_workspace/* /srv/newdisk/omniacli/*; do
                 [ -d "$d" ] && chattr -i "$d" 2>/dev/null; done; true' >/dev/null 2>&1 || true
         docker rm -f "$cid" >/dev/null
         return $rc

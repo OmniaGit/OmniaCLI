@@ -111,7 +111,7 @@ def root(monkeypatch, tmp_path):
     copy_template(tmp_path)
     monkeypatch.setattr(workspacehelper, "TEMPLATES", tmp_path / "templates")
     monkeypatch.setattr(workspacehelper, "SYSTEMD", systemd)
-    monkeypatch.setattr(workspacehelper, "storage_roots", lambda config=None: (str(storage),))
+    monkeypatch.setattr(workspacehelper, "storage_roots", lambda config=None: {str(storage): str(storage)})
     # files of the test's own: the template's checks see a caller who could
     # not change them (the refusal: test_the_template_is_refused...)
     monkeypatch.setattr(workspacehelper, "caller", lambda: ("omniacli", 0, [0]))
@@ -179,7 +179,7 @@ def test_disk(root):
     with pytest.raises(HelperError, match="not made smaller"):
         workspacehelper.disk("acme", str(root["storage"]), "1")
     for args, message in ((("Acme", str(root["storage"]), "2"), "not a workspace name"),
-                          (("acme", "/elsewhere", "2"), "not one of workspaces.storage"),
+                          (("acme", "/elsewhere", "2"), "not a storage of workspaces.storage"),
                           (("acme", str(root["storage"]), "0"), "size"),
                           (("acme", str(root["storage"]), "2x"), "size")):
         with pytest.raises(HelperError, match=message):
@@ -213,10 +213,11 @@ def test_space(root, monkeypatch):
     (root["storage"] / ".disks" / "notes.txt").write_text("x")
     (root["storage"] / ".disks" / "Bad.img").write_text("x")
     missing = str(root["storage"].parent / "nowhere")
-    monkeypatch.setattr(workspacehelper, "storage_roots", lambda config=None: (str(root["storage"]), missing))
+    monkeypatch.setattr(workspacehelper, "storage_roots",
+                        lambda config=None: {str(root["storage"]): str(root["storage"]), missing: missing})
     found = workspacehelper.space()
     first, second = found["roots"]
-    assert second == {"root": missing, "missing": True}
+    assert second == {"root": missing, "folder": missing, "missing": True}
     assert first["root"] == str(root["storage"]) and first["device"] == root["storage"].stat().st_dev
     assert first["total"] >= first["free"] > 0
     image = root["storage"] / ".disks" / "acme.img"

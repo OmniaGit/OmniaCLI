@@ -362,7 +362,9 @@ class Settings:
     # the git credentials of servers and workspaces (gitcredentials.py)
     credentials_file: Path | None = None
     workspaces: dict[str, Workspace] = field(default_factory=dict)
-    storage_roots: tuple[str, ...] = ()
+    # {name: folder}; storage_error: why there are none usable (a list of before)
+    storage_roots: dict[str, str] = field(default_factory=dict)
+    storage_error: str = ""
     machine: str = MACHINE_SERVER
     token_roles: dict[str, str] = field(default_factory=dict)
     fixed: Access = field(default_factory=Access)
@@ -370,6 +372,8 @@ class Settings:
 
     def storage_problem(self, ws: Workspace) -> str | None:
         """Why ws cannot use its storage, None when it can (or has none yet)."""
+        if ws.storage and self.storage_error:
+            return f"{self.storage_error} (in the main configuration; the machine's admins set it)"
         if ws.storage and ws.storage not in self.storage_roots:
             return (f"the storage {ws.storage} of workspace {ws.name} is not one of workspaces.storage of the "
                     f"main configuration ({', '.join(self.storage_roots) or 'none'}): the machine's admins pick "
@@ -1024,7 +1028,7 @@ class Workspace:
         return data
 
 
-def parse_workspace(name: str, data: dict, storage_roots: tuple[str, ...] = ()) -> Workspace:
+def parse_workspace(name: str, data: dict, storage_roots=()) -> Workspace:
     where = f"workspaces.{name}"
     if not WORKSPACE_NAME.fullmatch(name):
         raise ConfigError(f"{where}: a name is 1-32 lower case letters, digits and -, "
@@ -1094,7 +1098,7 @@ def parse_workspace(name: str, data: dict, storage_roots: tuple[str, ...] = ()) 
     return replace(ws, main=main, subdomains=subdomains, certificate=certificate, parameter_bounds=bounds)
 
 
-def parse_workspaces(data, storage_roots: tuple[str, ...] = ()) -> dict[str, Workspace]:
+def parse_workspaces(data, storage_roots=()) -> dict[str, Workspace]:
     if not isinstance(data, dict):
         raise ConfigError("workspaces must be a mapping {name: workspace}")
     found = {str(name): parse_workspace(str(name), value, storage_roots) for name, value in data.items()}
@@ -1135,7 +1139,7 @@ def web_names(domain: str, instances, main: str = "", subdomains: dict[str, str]
     return found
 
 
-def load_workspaces(path: Path, storage_roots: tuple[str, ...] = ()) -> dict[str, Workspace]:
+def load_workspaces(path: Path, storage_roots=()) -> dict[str, Workspace]:
     """The workspaces file; none yet is no workspaces."""
     if not path.exists():
         return {}
@@ -1171,10 +1175,14 @@ def parse_machine(value, service_user: str | None = None) -> str:
     return MACHINE_DEVELOPMENT if service_user and service_user != "omniacli" else MACHINE_SERVER
 
 
-# the folder the workspaces live in when the main configuration lists none
+# the storage the workspaces live in when the main configuration lists none
 # (workspaces.storage missing): root's, made by the package (postinst) when
 # the workspaces are allowed
 DEFAULT_STORAGE = "/srv/omniacli/default_workspace"
+DEFAULT_STORAGE_NAME = "default"
+# a storage's name: what the workspaces and every path of root's use, so its
+# folder may change (a new disk) and the name stays
+STORAGE_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")
 
 
 # where the root helper binds each folder of workspaces.storage (a systemd
@@ -1184,28 +1192,46 @@ STORAGE_BASE = "/var/lib/omniacli-storage"
 
 
 def bound_root(storage: str) -> str:
-    """The root path storage is bound on: its name made of the path (letters,
-    digits and . _ -, as sudoers and systemd take them) and a hash of it, so
-    two storages never meet."""
-    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", storage.strip("/")).strip("-.")[:80] or "root"
-    return f"{STORAGE_BASE}/{slug}-{hashlib.sha256(storage.encode()).hexdigest()[:8]}"
+    """The root path the storage named storage is bound on: its name, which a
+    new folder of it (another disk) keeps."""
+    return f"{STORAGE_BASE}/{storage}"
 
 
-def parse_storage_roots(data) -> tuple[str, ...]:
-    """workspaces.storage of the main configuration: the folders a workspace
-    may live in (absolute, real paths: no symbolic links). Missing (or
-    null): DEFAULT_STORAGE; an empty list: none."""
+def parse_storage_roots(data) -> dict[str, str]:
+    """workspaces.storage of the main configuration: {name: folder}, the
+    storages a workspace may live in, each a name (a-z 0-9 -) and an
+    absolute, real path (no symbolic links). Missing (or null): the default
+    one, {default: DEFAULT_STORAGE}; empty: none. A list of folders (the
+    format of before, no names) is refused: StorageListError."""
     data = data if isinstance(data, dict) else {}
-    if data.get("storage") is None:
-        return (DEFAULT_STORAGE,)
-    roots = []
-    for value in data.get("storage") or []:
-        root = str(value).strip().rstrip("/")
+    value = data.get("storage")
+    if value is None:
+        return {DEFAULT_STORAGE_NAME: DEFAULT_STORAGE}
+    if isinstance(value, list):
+        raise StorageListError(
+            "workspaces.storage is a list of folders: give each a name (name: folder), as "
+            f"{DEFAULT_STORAGE_NAME}: {DEFAULT_STORAGE}")
+    if not isinstance(value, dict):
+        raise ConfigError("workspaces.storage must be {name: folder}")
+    roots, folders = {}, {}
+    for name, folder in value.items():
+        name = str(name).strip()
+        if not STORAGE_NAME.fullmatch(name):
+            raise ConfigError(f"workspaces.storage: {name!r} is not a storage name (a-z 0-9 -, 32 at most)")
+        root = str(folder or "").strip().rstrip("/")
         # in a sudoers line too (packaging: postinst): no space, no wildcard
         if not re.fullmatch(r"(/[A-Za-z0-9._-]+)+", root) or "/../" in root + "/" or "/./" in root + "/":
-            raise ConfigError(f"workspaces.storage: {value!r} is not an absolute path of letters, digits and . _ -")
-        roots.append(root)
-    return tuple(dict.fromkeys(roots))
+            raise ConfigError(f"workspaces.storage.{name}: {folder!r} is not an absolute path of letters, digits "
+                              "and . _ -")
+        if root in folders:
+            raise ConfigError(f"workspaces.storage: {name} and {folders[root]} are the same folder {root}")
+        roots[name], folders[root] = root, name
+    return roots
+
+
+class StorageListError(ConfigError):
+    """workspaces.storage in the format of before: OmniaCLI still starts, its
+    workspaces unusable until the storages have names."""
 
 
 # the text size of the shell pages, in pixels
@@ -1609,7 +1635,10 @@ def parse_settings(data: dict, base_dir: Path = Path(".")) -> Settings:
     workspaces_file = Path(data.get("workspaces_file") or servers_file.parent / "workspaces.yaml")
     if not workspaces_file.is_absolute():
         workspaces_file = base_dir / workspaces_file
-    storage_roots = parse_storage_roots(data.get("workspaces"))
+    try:
+        storage_roots, storage_error = parse_storage_roots(data.get("workspaces")), ""
+    except StorageListError as exc:
+        storage_roots, storage_error = {}, str(exc)
     jobs_dir = Path(_require(data, "jobs_dir", "root"))
     settings = Settings(
         users={},
@@ -1637,6 +1666,7 @@ def parse_settings(data: dict, base_dir: Path = Path(".")) -> Settings:
         workspaces=load_workspaces(workspaces_file, storage_roots),
         credentials_file=servers_file.parent / "credentials.yaml",
         storage_roots=storage_roots,
+        storage_error=storage_error,
         machine=parse_machine(data.get("machine"), os.environ.get("OMNIACLI_USER")),
         fixed=fixed,
     )

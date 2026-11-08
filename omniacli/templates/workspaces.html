@@ -13,6 +13,7 @@
 {% include "_list.html" %}
 <h1>Workspaces</h1>
 <div id="error" class="banner" hidden></div>
+{% if storage_error %}<div class="banner">No workspace can be used: {{ storage_error }}, in <span class="mono">{{ system_config }}</span> (root's); then, as root, <span class="mono">dpkg-reconfigure omniacli</span>.</div>{% endif %}
 {# the list: one line each, its load and its disk; a click opens its form #}
 <div class="list-only">
   <div class="actions" style="margin: 0 0 8px; align-items: center">
@@ -66,7 +67,7 @@ of the main configuration). Of the two, the higher version is used; the instance
       <input type="text" class="domain mono" placeholder="acme.example.com (test: test.acme.example.com)" aria-label="Domain">
       <label>Storage</label>
       <div>
-      {% if storage_roots %}<select class="storage" aria-label="Storage">{% for r in storage_roots %}<option>{{ r }}</option>{% endfor %}</select>
+      {% if storage_roots %}<select class="storage" aria-label="Storage">{% for r, folder in storage_roots.items() %}<option value="{{ r }}">{{ r }} ({{ folder }})</option>{% endfor %}</select>
       {% else %}<input type="text" class="storage mono" placeholder="no workspaces.storage in the main configuration" disabled aria-label="Storage">{% endif %}
       <details class="muted" style="margin-top: 4px"><summary>Add a storage (another real disk)</summary>
         <ol style="margin: 4px 0; padding-left: 20px">
@@ -75,11 +76,16 @@ of the main configuration). Of the two, the higher version is used; the instance
             binds it on a path of root's and checks at every boot that it is still the same folder:
             <pre class="mono">install -d -o root -g root -m 755 /media/disk2/omniacli</pre></li>
           <li>Add it to <span class="mono">workspaces.storage</span> in <span class="mono">{{ system_config }}</span>
-            (root's). A list replaces the default, so keep the folders already used:
+            (root's) with a name (a-z 0-9 -), which the workspaces use. The storages listed replace the default,
+            so keep those already used:
             <pre class="mono">workspaces:
   storage:
-{% for r in storage_roots %}    - {{ r }}
-{% endfor %}    - /media/disk2/omniacli</pre></li>
+{% for r, folder in storage_roots.items() %}    {{ r }}: {{ folder }}
+{% endfor %}    disk2: /media/disk2/omniacli</pre></li>
+          <li>A new disk for a storage: stop its workspaces, copy its folder on the new disk keeping the
+            sparse disks sparse (<span class="mono">rsync -aHS</span>, or <span class="mono">cp -a --sparse=always</span>),
+            change only its folder in <span class="mono">workspaces.storage</span>, its name as it is, and restart
+            the machine: the storage is bound from its new folder.</li>
           <li>As root, <span class="mono">dpkg-reconfigure omniacli</span>: it writes the sudoers line of the new
             folder (with <span class="mono">OMNIACLI_WORKSPACES=1</span> in <span class="mono">/etc/default/omniacli</span>),
             binds it and restarts OmniaCLI, which then offers it here.</li>

@@ -93,10 +93,10 @@ async def test_the_dashboard_shows_the_links_in_linked(mine):
     # link's error shows there; each link has its row in Linked
     page = (await mine.get("/", headers=as_user("admin"))).text
     assert "cliente › srv" not in page and "data-lazy" not in page and "Link <strong>down</strong>" not in page
-    # This machine is this machine only; each link has its row in Linked, with
-    # the same load widgets as This machine's row (_load.html)
-    assert page.count('class="panel machine-panel"') == 1 and 'class="panel machine-panel" data-link=""' in page
-    assert page.index('data-fold="servers"') < page.index('data-fold="linked"') < page.index('data-fold="machine"')
+    # this machine's row on top; each link has its row in Linked, with the
+    # same load widgets (_load.html)
+    assert page.count('class="machine-row"') == 3 and page.index('data-link=""') < page.index('data-fold="servers"')
+    assert page.index('data-fold="servers"') < page.index('data-fold="linked"') < page.index('data-fold="jobs"')
     for link in ("cliente", "down"):
         assert f'<a href="/links/{link}/"><strong>{link}</strong></a>' in page
         assert f'<span class="machine-row" data-link="{link}">' in page
@@ -202,7 +202,7 @@ async def test_groups_of_the_linked(mine):
     body = {"lists": {"links": [{"name": "Customers", "members": ["cli*"]}]}}
     assert (await mine.post("/api/groups/save", json=body, headers=headers)).json() == {"ok": True}
     page = (await mine.get("/", headers=headers)).text
-    linked = page[page.index('data-fold="linked"'):page.index('data-fold="machine"')]
+    linked = page[page.index('data-fold="linked"'):page.index('data-fold="jobs"')]
     # cliente under Customers, down under Others
     assert linked.index("<h2>Customers") < linked.index('data-link="cliente"') < linked.index("<h2>Others")
     assert linked.index("<h2>Others") < linked.index('data-link="down"')

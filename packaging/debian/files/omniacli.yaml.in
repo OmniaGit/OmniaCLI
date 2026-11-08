@@ -50,10 +50,11 @@ servers_file: /var/lib/omniacli/servers.yaml
 # the customers' workspaces (README, Workspaces), with OMNIACLI_WORKSPACES=1
 # in /etc/default/omniacli
 # workspaces:
-#   # the folders they live in, each root's and on a real disk: a list
-#   # replaces the default, so keep the folders already used
+#   # the storages they live in, name: folder, each folder root's and on a
+#   # real disk. The workspaces use the name: a new disk changes the folder
+#   # only. These replace the default, so keep the storages already used
 #   storage:
-#     - /srv/omniacli/default_workspace
+#     default: /srv/omniacli/default_workspace
 #   # the pool the networks of their containers are /24s of (private IPv4,
 #   # /24 or larger, no network of this machine)
 #   network: 10.213.0.0/16

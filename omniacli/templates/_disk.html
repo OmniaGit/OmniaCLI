@@ -13,8 +13,9 @@
          estimated consumption; none: not recorded yet
        href: its history (the Disks page)
        note: one more line under the bar
-     opts.compact: one line (a table cell, a folded summary): the bar, the
-       percent used and, when near, the day it is full; the rest in its title
+     opts.compact: one line (a table cell, a machine's row): the bar, the
+       percent used and, when near, the day it is full; the rest in its
+       title; with href, a link to it
    OmniaDisk.level(disk): "ok", "warn" or "error", the same thresholds as
    disks.py (free under 15% and 5%), or a full day within 90 and 30 days.
    OmniaDisk.size(bytes): the size as text.
@@ -80,7 +81,9 @@ const OmniaDisk = (function () {
     box.replaceChildren();
     const lvl = level(d), percent = d.total ? d.used / d.total * 100 : 0;
     if (opts.compact) {
-      const item = node("span", "disk-compact");
+      // with its history (href): a click opens it
+      const item = node(d.href ? "a" : "span", "disk-compact");
+      if (d.href) item.href = d.href;
       item.title = (d.label ? d.label + ": " : "") + summaryText(d) + (d.note ? " · " + d.note : "");
       item.append(bar(d), node("span", "mono " + (lvl === "ok" ? "" : lvl), percent.toFixed(0) + "%"));
       if (d.forecast && d.forecast.full && fullLevel(d.forecast) !== "ok") {

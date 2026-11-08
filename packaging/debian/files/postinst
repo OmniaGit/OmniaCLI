@@ -184,25 +184,34 @@ apply_workspaces() {
         fi
         return 0
     fi
-    roots=$("$VENV/bin/python" -c 'import sys, yaml
-from omniacli.config import parse_storage_roots
+    # each storage as "<name> <folder> <root path it is bound on>"; a list of
+    # folders (the format of before, no names) is told, the rest goes on
+    storages=$("$VENV/bin/python" -c 'import sys, yaml
+from omniacli.config import StorageListError, bound_root, parse_storage_roots
 data = yaml.safe_load(open(sys.argv[1], encoding="utf-8")) or {}
-print("\n".join(parse_storage_roots(data.get("workspaces"))))' "$CONFIG") || {
+try:
+    roots = parse_storage_roots(data.get("workspaces"))
+except StorageListError as exc:
+    print(f"omniacli: {exc}, in {sys.argv[1]}: no workspace can be used until then", file=sys.stderr)
+    roots = {}
+print("\n".join(f"{name} {folder} {bound_root(name)}" for name, folder in roots.items()))' "$CONFIG") || {
         echo "omniacli: OMNIACLI_WORKSPACES=1, but workspaces.storage of $CONFIG cannot be read" >&2
         exit 1
     }
     # the folder of the workspaces when the main configuration lists none,
     # root's (the helpers refuse one the service's user could change)
     default=$("$VENV/bin/python" -c 'from omniacli.config import DEFAULT_STORAGE; print(DEFAULT_STORAGE)')
-    for root in $roots; do
-        if [ "$root" = "$default" ] && [ ! -e "$root" ]; then
-            install -d -o root -g root -m 755 "$root"
-            echo "omniacli: $root made, for the workspaces"
+    bounds=""
+    while read -r name folder bound; do
+        [ -n "$name" ] || continue
+        if [ "$folder" = "$default" ] && [ ! -e "$folder" ]; then
+            install -d -o root -g root -m 755 "$folder"
+            echo "omniacli: $folder made, for the workspaces"
         fi
-    done
-    bounds=$("$VENV/bin/python" -c 'import sys
-from omniacli.config import bound_root
-print("\n".join(bound_root(root) for root in sys.argv[1:]))' $roots)
+        bounds="$bounds $bound"
+    done <<EOF_STORAGES
+$storages
+EOF_STORAGES
     tmp="$WORKSPACES_SUDOERS.tmp"
     {
         echo "# Written by the omniacli package from OMNIACLI_WORKSPACES=1 in /etc/default/omniacli"
@@ -221,9 +230,10 @@ print("\n".join(bound_root(root) for root in sys.argv[1:]))' $roots)
     fi
     mv "$tmp" "$WORKSPACES_SUDOERS"
     echo "omniacli: the workspaces' helpers allowed to $user (OMNIACLI_WORKSPACES)"
-    # every storage that exists bound on its root path, checked at every boot
-    # (README, Workspaces); one refused is told and does not stop the install
-    if [ -n "$roots" ] && [ -d /run/systemd/system ]; then
+    # every storage that exists bound on its root path, again at every boot
+    # (README, Workspaces), and the units of storages no longer listed taken
+    # away; one refused is told and does not stop the install
+    if [ -d /run/systemd/system ]; then
         "$VENV/bin/omniacli" workspace-helper storage-setup 2>&1 | "$VENV/bin/python" -c 'import json, sys
 text = sys.stdin.read()
 try:
@@ -231,9 +241,9 @@ try:
 except Exception:
     print("omniacli: the storages were not bound: " + text.strip()); sys.exit(0)
 for root, state in found.items():
-    print("omniacli: storage %s: %s" % (root, state if not state.startswith("/") else "bound on " + state))' || true
+    print("omniacli: storage %s: %s" % (root, state))' || true
     fi
-    [ -n "$roots" ] || echo "omniacli: workspaces.storage of $CONFIG is empty: no workspace can have instances yet"
+    [ -n "$storages" ] || echo "omniacli: workspaces.storage of $CONFIG is empty: no workspace can have instances yet"
 }
 
 case "$1" in

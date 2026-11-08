@@ -93,7 +93,7 @@ def test_space_tells_the_networks_of_a_workspace(tmp_path, monkeypatch):
     for role, subnet in (("production", "10.213.0.0/24"), ("test", "10.213.1.0/24")):
         (storage / "acme" / "main" / role).mkdir(parents=True)
         (storage / "acme" / "main" / role / ".env").write_text(f"PROJECT=acme-main-{role}\nSUBNET={subnet}\n")
-    monkeypatch.setattr(workspacehelper, "storage_roots", lambda config=None: (str(storage),))
+    monkeypatch.setattr(workspacehelper, "storage_roots", lambda config=None: {"main": str(storage)})
     found = workspacehelper.space()["roots"][0]
     assert found["networks"] == {"acme": ["10.213.0.0/24", "10.213.1.0/24"]}
     assert json.dumps(found)
@@ -103,7 +103,7 @@ async def test_a_member_sees_the_load_of_its_workspace(workspaces, client, monke
     from omniacli import workspaceops
 
     settings = workspaces
-    storage = settings.storage_roots[0]
+    storage = next(iter(settings.storage_roots))
     settings.workspaces["acme"].storage = storage
     settings.workspaces["acme"].limits = {"disk_gb": 10, "cpus": 2}
     found = {"roots": [{"root": storage, "device": 1, "total": 100 * 2**30, "free": 50 * 2**30,

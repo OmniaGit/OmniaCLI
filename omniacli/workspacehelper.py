@@ -11,23 +11,27 @@
 
 OmniaCLI runs it with sudo (sudoers: README, Workspaces). It takes no path
 and no command of the caller's: a workspace and an instance are names
-(a-z 0-9 -), the storage one of the folders the main configuration
-(/etc/omniacli/omniacli.yaml, which only root writes) lists in
-workspaces.storage, the template one of TEMPLATES (the package's, root's).
+(a-z 0-9 -), the storage the name of one of the storages the main
+configuration (/etc/omniacli/omniacli.yaml, which only root writes) lists in
+workspaces.storage (name: folder), the template one of TEMPLATES (the
+package's, root's).
 
-disk: the workspace's virtual disk, <storage>/.disks/<workspace>.img, an
-ext4 image that takes room as it is used, mounted on <storage>/<workspace>
+disk: the workspace's virtual disk, .disks/<workspace>.img in the storage, an
+ext4 image that takes room as it is used, mounted on <workspace> there
 by a systemd mount unit (at every boot), docker started after it (a drop-in
 of docker.service); the empty folder beneath is immutable, so nothing is
 written there while the disk is not mounted. Again with a larger size, it
 grows the disk, mounted; a disk is never made smaller. A disk made or grown
 must fit, whole, in the room free on the real disk now.
 
-storage-setup: every folder of workspaces.storage bound by systemd on its root
-path (config.bound_root), its identity kept, a check unit that unbinds it at
-a boot when another folder is there (README, Workspaces); every action takes
-the storage this way. storage-check <storage>: that check. storage-reset
-<storage>: the folder there now taken as the storage, by root by hand only.
+storage-setup: every storage of workspaces.storage bound on the root path of
+its name (config.bound_root) by its unit, omniacli-storage-<name>.service,
+which binds it again at every boot from the folder named then (a new disk:
+only the folder changes), its identity kept, refused when another folder is
+at the same path (README, Workspaces); the units of storages no longer
+listed are taken away. Every action takes the storage this way.
+storage-check <storage>: what that unit runs. storage-reset <storage>: the
+folder now at its path taken as the storage, by root by hand only.
 
 space: the room of each storage root's real disk (total, free) and of the
 workspaces' disks there (size, what each takes), in bytes, and the networks
@@ -179,7 +183,8 @@ def _system(config: Path = SYSTEM_CONFIG) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def storage_roots(config: Path = SYSTEM_CONFIG) -> tuple[str, ...]:
+def storage_roots(config: Path = SYSTEM_CONFIG) -> dict[str, str]:
+    """{name: folder} of workspaces.storage."""
     data = _system(config)
     try:
         return parse_storage_roots(data.get("workspaces"))
@@ -215,12 +220,17 @@ def workspace(name: str, storage: str) -> tuple[Path, Path]:
     return root / ".disks" / f"{name}.img", root / name
 
 
-# The storages' binds (README, Workspaces): each folder of workspaces.storage is
-# bound by systemd on a root path (config.bound_root), so the folders above
-# it may be anyone's: a bind holds the folder, not its path. At every mount
-# (a boot) the path counts again, hence the identity (device, inode) of the
-# folder first bound, kept next to the binds (root's only), which the storage's check unit
-# compares before the workspaces' disks and docker: another folder is unbound.
+# The storages' binds (README, Workspaces): each storage of workspaces.storage,
+# a name and a folder, is bound on a root path of its name (config.bound_root),
+# so the folders above it may be anyone's (a bind holds the folder, not its
+# path) and a new folder (another disk) may take its place with the name kept.
+# Its unit, omniacli-storage-<name>.service, binds it at every boot from the
+# folder the main configuration names then, before the workspaces' disks and
+# docker. The identity (device, inode) of the folder bound, and its path, are
+# kept next to the binds (root's only): at the same path another folder is
+# refused (moved or replaced under it, by anyone who may write above it),
+# while a path changed in the main configuration (root's) is a new folder,
+# taken and kept.
 STORAGE_IDS = Path(config.STORAGE_BASE) / ".ids"
 
 
@@ -251,19 +261,15 @@ def check_unit_name(target: Path) -> str:
     return f"omniacli-storage-{target.name}.service"
 
 
-def bind_text(storage: str, target: Path) -> str:
+def storage_unit_text(storage: str, target: Path) -> str:
     return ("# written by omniacli workspace-helper: a storage of the workspaces, bound on a root path\n"
             f"[Unit]\nDescription=OmniaCLI storage {storage}\nBefore=docker.service\n"
-            f"[Mount]\nWhat={storage}\nWhere={target}\nType=none\nOptions=bind,nosuid,nodev\n"
-            "[Install]\nWantedBy=multi-user.target\n")
-
-
-def check_text(storage: str, target: Path, bind_unit: str) -> str:
-    return ("# written by omniacli workspace-helper: the storage bound is the folder set up, or it is unbound\n"
-            f"[Unit]\nDescription=OmniaCLI storage check {storage}\nRequires={bind_unit}\nAfter={bind_unit}\n"
-            "Before=docker.service\n"
+            "After=local-fs.target remote-fs.target\n"
+            # bound again by every action that finds it unbound: never held back by systemd's start limit
+            "StartLimitIntervalSec=0\n"
             f"[Service]\nType=oneshot\nRemainAfterExit=yes\n"
             f"ExecStart={OMNIACLI_COMMAND} workspace-helper storage-check {storage}\n"
+            f"ExecStop=-/bin/umount {target}\n"
             "[Install]\nWantedBy=multi-user.target\n")
 
 
@@ -276,6 +282,15 @@ def _id_file(target: Path) -> Path:
     return STORAGE_IDS / f"{target.name}.id"
 
 
+def _recorded(target: Path) -> tuple[str, str] | None:
+    """(identity, folder) kept for the storage bound on target, None: none."""
+    try:
+        identity, _, folder = _id_file(target).read_text().strip().partition("\n")
+    except OSError:
+        return None
+    return identity.strip(), folder.strip()
+
+
 def _root_only(path: Path) -> str | None:
     """Why path is not root's alone (nobody else may write it), None when it is."""
     st = os.stat(path)
@@ -284,46 +299,87 @@ def _root_only(path: Path) -> str | None:
     return None
 
 
+def _folder(storage: str) -> Path:
+    """The folder the main configuration names for storage now."""
+    roots = storage_roots()
+    if storage not in roots:
+        raise HelperError(f"{storage} is not a storage of workspaces.storage of {SYSTEM_CONFIG}")
+    return Path(roots[storage])
+
+
 def bound_problem(storage: str, target: Path) -> str | None:
-    """Why what is bound on target is not the storage set up, None when it is."""
-    if storage not in storage_roots():
-        return f"{storage} is not one of workspaces.storage of {SYSTEM_CONFIG}"
+    """Why what is bound on target is not the storage's folder, None when it is."""
+    try:
+        folder = _folder(storage)
+    except HelperError as exc:
+        return str(exc)
     if not _is_mount(target):
         return f"{storage} is not bound on {target}"
     problem = _root_only(target)
     if problem:
         return f"the storage {storage}: {problem}"
-    id_file = _id_file(target)
-    if id_file.exists() and id_file.read_text().strip() != _identity(target):
-        return (f"the storage {storage} is not the folder set up there (it was moved or replaced): "
+    kept = _recorded(target)
+    if kept and kept[1] == str(folder) and kept[0] != _identity(target):
+        return (f"the storage {storage} ({folder}) is not the folder set up there (it was moved or replaced): "
                 f"unbound; if the change is wanted, run as root: omniacli workspace-helper storage-reset {storage}")
+    if folder.is_dir() and _identity(folder) != _identity(target):
+        return f"the storage {storage} bound is not its folder {folder} now (the main configuration changed)"
     return None
+
+
+def _below(target: Path) -> list[str]:
+    """What is mounted under target (the workspaces' disks)."""
+    return [line for line in _run("findmnt", "--noheadings", "--list", "--output", "TARGET", check=False).split()
+            if line.startswith(f"{target}/")]
+
+
+def _bind_now(storage: str, target: Path) -> None:
+    """The storage's folder bound on target (its unit's start)."""
+    folder = _folder(storage)
+    if not folder.is_dir():
+        raise HelperError(f"the storage {storage}: {folder} is not a folder")
+    if Path(os.path.realpath(folder)) != folder:
+        raise HelperError(f"the storage {storage} ({folder}) goes through a symbolic link: name its real path")
+    problem = _root_only(folder)
+    if problem:
+        raise HelperError(f"the storage {storage}: {problem}: make it root's (chown root: …; chmod go-w …)")
+    kept = _recorded(target)
+    if kept and kept[1] == str(folder) and kept[0] != _identity(folder):
+        raise HelperError(f"the storage {storage} ({folder}) is not the folder set up there (it was moved or "
+                          f"replaced): not bound; if the change is wanted, run as root: "
+                          f"omniacli workspace-helper storage-reset {storage}")
+    _run("mount", "--bind", str(folder), str(target))
+    _run("mount", "-o", "remount,bind,nosuid,nodev", str(target))
 
 
 def _unbind(target: Path) -> None:
     """The storage unbound: its unit stopped, so systemd knows it is."""
-    _run("systemctl", "stop", unit_name(target), check=False)
+    _run("systemctl", "stop", check_unit_name(target), check=False)
     if _is_mount(target):
         _run("umount", str(target), check=False)
 
 
 def bind_storage(storage: str) -> Path:
-    """storage bound on its root path and checked, the units written that do
-    it again at every boot; the root path."""
-    if storage not in storage_roots():
-        raise HelperError(f"{storage} is not one of workspaces.storage of {SYSTEM_CONFIG}")
+    """storage bound on its root path and checked, its unit written that does
+    it again at every boot; the root path. A storage whose folder changed in
+    the main configuration is bound again, unless a workspace's disk is in use."""
+    folder = _folder(storage)
     target = bound(storage)
+    unit = check_unit_name(target)
     if _is_mount(target):
         problem = bound_problem(storage, target)
-        if problem:
+        if not problem:
+            _record(target, folder)
+            return target
+        if "main configuration changed" not in problem:
             raise HelperError(problem)
-        _record(target)
-        return target
-    source = Path(storage)
-    if not source.is_dir():
-        raise HelperError(f"{storage} is not a folder")
-    if Path(os.path.realpath(source)) != source:
-        raise HelperError(f"the storage {storage} goes through a symbolic link: list its real path")
+        busy = _below(target)
+        if busy:
+            raise HelperError(f"{problem}; workspace disks are mounted on it ({', '.join(busy)}): "
+                              "stop them, or restart the machine")
+        _unbind(target)
+    if not folder.is_dir():
+        raise HelperError(f"the storage {storage}: {folder} is not a folder")
     target.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
     _safe_folder(target.parent, "the storages' folder")
     if not target.exists():
@@ -331,74 +387,111 @@ def bind_storage(storage: str) -> Path:
     if not _is_mount(target) and not any(target.iterdir()):
         # nothing is written there while the storage is not bound
         _run("chattr", "+i", str(target))
-    bind_unit, check_unit = unit_name(target), check_unit_name(target)
-    _write(SYSTEMD / bind_unit, bind_text(storage, target))
-    _write(SYSTEMD / check_unit, check_text(storage, target, bind_unit))
+    _write(SYSTEMD / unit, storage_unit_text(storage, target))
     _run("systemctl", "daemon-reload")
-    _run("systemctl", "enable", bind_unit, check_unit)
+    _run("systemctl", "enable", unit)
     # stopped first: a unit systemd still takes for active (its folder
-    # unbound by the check, outside it) would not mount again on start
-    _run("systemctl", "stop", bind_unit, check=False)
-    _run("systemctl", "start", bind_unit)
-    if not _is_mount(target):
-        raise HelperError(f"{bind_unit} did not bind {storage} on {target}")
+    # unbound outside it) would not bind again on start
+    _run("systemctl", "stop", unit, check=False)
+    started = _run("systemctl", "start", unit, check=False)
     problem = bound_problem(storage, target)
     if problem:
         _unbind(target)
-        raise HelperError(problem + ("" if "set up" in problem else ": make it root's (chown root: …; chmod go-w …)"))
-    _record(target)
-    _run("systemctl", "start", check_unit)
+        status = _run("systemctl", "status", "--no-pager", "-n", "5", unit, check=False)
+        raise HelperError(problem if _is_mount(target) or "set up" in problem else
+                          f"{unit} did not bind {storage} ({folder}) on {target}: {started or status}".strip())
+    _record(target, folder)
     return target
 
 
-def _record(target: Path) -> None:
-    """The identity of the folder bound on target, kept the first time."""
-    id_file = _id_file(target)
-    if not id_file.exists():
+def _record(target: Path, folder: Path) -> None:
+    """The identity and the folder of the storage bound on target, kept when
+    there is none yet or the folder is another (the main configuration changed)."""
+    kept = _recorded(target)
+    if kept is None or kept[1] != str(folder):
         STORAGE_IDS.mkdir(mode=0o700, parents=True, exist_ok=True)
-        _write(id_file, _identity(target) + "\n", mode=0o600)
+        _write(_id_file(target), f"{_identity(target)}\n{folder}\n", mode=0o600)
 
 
 def storage_check(storage: str) -> dict:
-    """What the check unit runs at every boot: a storage bound that is not the
-    folder set up is unbound (the root path beneath is immutable), so neither
-    the workspaces' disks nor docker's containers use it."""
+    """What the storage's unit runs at every boot: its folder bound on its
+    root path, the folder the main configuration names then; refused (and
+    unbound, the root path beneath is immutable) when it is not the folder
+    set up at that path, so neither the workspaces' disks nor docker's
+    containers use it."""
     target = bound(storage)
+    if not _is_mount(target):
+        _bind_now(storage, target)
     problem = bound_problem(storage, target)
     if problem:
-        # inside the check unit, which requires the bind's: unmounted at once,
-        # not through systemctl (a stop of the bind's unit would wait for this one)
         if _is_mount(target):
             _run("umount", str(target), check=False)
         raise HelperError(problem)
-    return {"storage": storage, "bound": str(target), "identity": _identity(target)}
+    _record(target, _folder(storage))
+    return {"storage": storage, "folder": str(_folder(storage)), "bound": str(target), "identity": _identity(target)}
+
+
+def _stale_units(roots: dict[str, str]) -> list[Path]:
+    """The units of storages this helper wrote that are none of roots now
+    (another name, or the binds of before: a .mount of a storage's root path)."""
+    found = []
+    base = config.STORAGE_BASE
+    for path in sorted(SYSTEMD.glob("omniacli-storage-*.service")):
+        name = path.name[len("omniacli-storage-"):-len(".service")]
+        if name not in roots and path.read_text(errors="replace").startswith("# written by omniacli workspace-helper"):
+            found.append(path)
+    for path in sorted(SYSTEMD.glob("*.mount")):
+        text = path.read_text(errors="replace")
+        where = next((line[6:] for line in text.splitlines() if line.startswith("Where=")), "")
+        if not text.startswith("# written by omniacli workspace-helper") or not where.startswith(base + "/"):
+            continue
+        storage, _, below = where[len(base) + 1:].partition("/")
+        # a storage's bind of before, or a workspace's disk on a storage no longer listed
+        if (text.startswith("# written by omniacli workspace-helper: a storage") and not below) or (
+                below and "/" not in below and storage not in roots):
+            found.append(path)
+    return found
 
 
 def storage_setup() -> dict:
-    """Every folder of workspaces.storage that exists bound and checked (the
-    package runs it); one that fails is told, the others are bound."""
-    found = {}
-    for storage in storage_roots():
-        if not Path(storage).is_dir():
-            found[storage] = "not a folder yet"
+    """Every storage of workspaces.storage whose folder exists bound and
+    checked (the package runs it); one that fails is told, the others are
+    bound. The units of storages no longer there, and the binds of before,
+    are taken away when nothing of theirs is mounted."""
+    found, roots = {}, storage_roots()
+    for path in _stale_units(roots):
+        where = next((line[6:] for line in path.read_text().splitlines() if line.startswith("Where=")), "")
+        target = Path(where) if where else bound(path.name[len("omniacli-storage-"):-len(".service")])
+        if _below(target) or (path.suffix == ".mount" and _is_mount(target) and target.parent != Path(
+                config.STORAGE_BASE)):
+            found[path.name] = f"kept: {target} is in use (stop its workspace's instances, then again)"
+            continue
+        _run("systemctl", "disable", "--now", path.name, check=False)
+        path.unlink(missing_ok=True)
+        if _is_mount(target):
+            _run("umount", str(target), check=False)
+        found[path.name] = "removed"
+    _run("systemctl", "daemon-reload", check=False)
+    for storage, folder in roots.items():
+        if not Path(folder).is_dir():
+            found[storage] = f"{folder}: not a folder yet"
             continue
         try:
-            found[storage] = str(bind_storage(storage))
+            found[storage] = f"{folder} bound on {bind_storage(storage)}"
         except HelperError as exc:
             found[storage] = f"refused: {exc}"
     return {"storages": found}
 
 
 def storage_reset(storage: str) -> dict:
-    """The folder now at storage taken as the storage (an admin moved it on
-    purpose): by root by hand only, never through sudo, with no workspace
-    disk mounted on it."""
+    """The folder now at storage's path taken as the storage (an admin moved
+    it on purpose): by root by hand only, never through sudo, with no
+    workspace disk mounted on it."""
     _, uid, _ = caller()
     if uid != 0:
         raise HelperError("storage-reset is run by root by hand, not through sudo")
     target = bound(storage)
-    below = [line for line in _run("findmnt", "--noheadings", "--list", "--output", "TARGET", check=False).split()
-             if line.startswith(f"{target}/")]
+    below = _below(target)
     if below:
         raise HelperError(f"workspace disks are mounted on {target}: {', '.join(below)}; stop them first")
     _unbind(target)
@@ -560,7 +653,8 @@ def _fits(image: Path, size: int, storage: str) -> None:
     """A disk made or grown to size must fit, whole, in the room free on the
     real disk now; what other workspaces were promised is OmniaCLI's check
     (README, Workspaces: the space of the disks), which an admin may force."""
-    vfs = os.statvfs(storage)
+    # the storage's root path (the image is in its .disks), on its real disk
+    vfs = os.statvfs(image.parent.parent)
     free, needed = vfs.f_bavail * vfs.f_frsize, size - _used(image)
     if needed > free:
         raise HelperError(f"a disk of {size // GB} GB needs {needed / GB:.1f} GB more on the real disk "
@@ -571,11 +665,11 @@ def space() -> dict:
     """The room of each storage root's real disk and of the workspaces' disks
     on it, in bytes: read here, since the images are root's only."""
     roots = []
-    for root in storage_roots():
+    for root, path in storage_roots().items():
         # its root path once bound (the images are there), the folder itself before
-        folder = bound(root) if _is_mount(bound(root)) else Path(root)
+        folder = bound(root) if _is_mount(bound(root)) else Path(path)
         if not folder.is_dir():
-            roots.append({"root": root, "missing": True})
+            roots.append({"root": root, "folder": path, "missing": True})
             continue
         vfs = os.statvfs(folder)
         images = {}
@@ -586,7 +680,7 @@ def space() -> dict:
                     continue
                 st = image.stat()
                 images[image.stem] = {"size": st.st_size, "used": st.st_blocks * 512}
-        roots.append({"root": root, "device": folder.stat().st_dev, "total": vfs.f_blocks * vfs.f_frsize,
+        roots.append({"root": root, "folder": path, "device": folder.stat().st_dev, "total": vfs.f_blocks * vfs.f_frsize,
                       "free": vfs.f_bavail * vfs.f_frsize, "images": images,
                       "networks": {name: _networks_of(folder / name) for name in images}})
     return {"roots": roots}

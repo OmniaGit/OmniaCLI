@@ -53,14 +53,15 @@ The screenshots show demo data.
 
 ![The login page](docs/images/login.jpg)
 
-**Dashboard**: this instance's servers with their workspace, the state of
-their Odoo and their CPU, then (for admins) **Workspaces**, the list of the
-Workspaces page, then **Linked**, one row for each linked instance's machine (its CPU and network of
-the last 15 minutes, its disks; the name opens it), then **This machine**,
-the machine OmniaCLI runs on only (CPU, network, disks), and the last jobs,
-updated as they run. CPU, network and disks are shown by one widget each
-(`templates/_load.html`), the same in every row that shows them: This
-machine folded, Linked, the servers' CPU, the Workspaces list.
+**Dashboard**: on top, one row for the machine OmniaCLI runs on (CPU and
+network of the last 15 minutes, its disks: a disk opens its history), then
+this instance's servers with their workspace, the state of their Odoo and
+their CPU, then (for admins) **Workspaces**, the list of the Workspaces page,
+then **Linked**, one row for each linked instance's machine (the same row;
+the name opens it), and the last jobs, updated as they run. CPU, network and
+disks are shown by one widget each (`templates/_load.html`), the same in
+every row that shows them: this machine, Linked, the servers' CPU, the
+Workspaces list.
 Every disk is recorded once a day (kept three years, in
 `<data>/disk_history.json`): its panel row says when it will be full, from the
 trend of the last 90 days (at least 7 days of data), and **Disks** (`/disks`)
@@ -865,15 +866,27 @@ The machine's admins make the workspaces (**Settings › Workspaces**,
 `/workspaces`): name (`a-z 0-9 -`, it becomes part of URLs and folders),
 label, domain, storage, limits, servers and members. A server is in one
 workspace at most, and so is a domain. Saved in `workspaces.yaml` next to the
-servers file (`workspaces_file` in the main configuration); the folders a
-workspace may live in are listed by root in the main configuration:
+servers file (`workspaces_file` in the main configuration); the storages a
+workspace may live in are listed by root in the main configuration, each a
+name (`a-z 0-9 -`, 32 at most) and its folder:
 
 ```yaml
 workspaces:
   storage:
-    - /srv/omniacli/default_workspace
-    - /media/disk2/omniacli
+    default: /srv/omniacli/default_workspace
+    disk2: /media/disk2/omniacli
 ```
+
+A workspace names its storage, and so does every path of root's (below):
+**a new disk changes the folder only**. Stop the storage's workspaces, copy
+its folder on the new disk keeping the workspaces' disks sparse
+(`rsync -aHS` or `cp -a --sparse=always`), change its folder in
+`workspaces.storage`, its name as it is, and restart the machine (or stop
+and start the storage's unit): it is bound from its new folder, and the
+workspaces, their instances and docker find everything where it was. A list
+of folders without names (the format of before) is refused: OmniaCLI starts,
+says so on Settings › Workspaces, and no workspace with a storage can be
+used until each has a name.
 
 A workspace whose storage is no longer listed there still loads: OmniaCLI
 starts, says so in its log and on both workspace pages, and the workspace
@@ -881,27 +894,32 @@ cannot be used (no instance is created, a save keeping that storage is
 refused) until an admin picks a listed one on Settings › Workspaces or lists
 it again.
 
-Without `workspaces.storage` there is one, `/srv/omniacli/default_workspace`,
-made (root's) by the package when the workspaces are allowed
-(`OMNIACLI_WORKSPACES`, below); `storage: []` is none. A folder holds all the
+Without `workspaces.storage` there is one, `default`, in
+`/srv/omniacli/default_workspace`, made (root's) by the package when the
+workspaces are allowed (`OMNIACLI_WORKSPACES`, below); `storage: {}` is none. A folder holds all the
 workspaces placed there: `.disks/<workspace>.img` and `<workspace>/`.
 
 **The storages are bound on a path of root's.** A storage folder must be
 root's and written by nobody else, but the folders above it may be anyone's
 (a disk of a user, with its other folders). Root acts on a storage only
-through `/var/lib/omniacli-storage/<name>-<hash>` (`config.bound_root`), where
-systemd binds it (a mount unit of the root helper's `storage-setup`, which the
-package runs and every action of the helper does first): a bind holds the
-folder, not its path, so renaming a folder above the storage changes nothing
-for root, and the path of root's cannot be moved. At a boot the path counts
-again, so the identity of the folder first bound (device and inode, in
-`/var/lib/omniacli-storage/.ids/`) is checked before the workspaces' disks and docker
-(unit `omniacli-storage-<name>.service`): another folder there is unbound, the
-path beneath is immutable, and nothing of the workspaces starts on it (tried:
-a container restarted by docker fails to create its mount instead of writing
-there). A storage moved on purpose is taken again by root by hand: `omniacli
-workspace-helper storage-reset <storage>`. The sudoers lines of the compose
-helper name the paths of root's.
+through `/var/lib/omniacli-storage/<name>` (`config.bound_root`), where its
+unit `omniacli-storage-<name>.service` binds it (written by the root helper's
+`storage-setup`, which the package runs and every action of the helper does
+first), at every boot from the folder `workspaces.storage` names then,
+before the workspaces' disks and docker: a bind holds the folder, not its
+path, so renaming a folder above the storage changes nothing for root, and
+the path of root's cannot be moved. At a boot the path counts again, so the
+identity of the folder bound (device and inode) and its path are kept (in
+`/var/lib/omniacli-storage/.ids/`): another folder at the same path is not
+bound, the path beneath is immutable, and nothing of the workspaces starts on
+it (tried: a container restarted by docker fails to create its mount instead
+of writing there); a folder changed in the main configuration (root's) is the
+new disk, taken and kept. A storage moved on purpose at the same path is
+taken again by root by hand: `omniacli workspace-helper storage-reset
+<name>`. The units of storages no longer listed (and the mount units of
+OmniaCLI 2026.1.36 and before) are taken away by `storage-setup` when nothing
+of theirs is mounted. The sudoers lines of the compose helper name the paths
+of root's.
 
 **The space of the disks.** A workspace's disk takes room on the real disk
 only as it is used, so the room free now is not all there is to give. Next to
@@ -1023,11 +1041,11 @@ template the caller could change. The databases go through the compose
 helper (`init`). With `OMNIACLI_WORKSPACES=1` in `/etc/default/omniacli`
 (then `sudo dpkg-reconfigure omniacli`) the package writes their sudoers
 lines in `/etc/sudoers.d/omniacli-workspaces`, one for the workspace helper
-and one for the compose helper per storage root:
+and one for the compose helper per storage:
 
 ```
 omniacli ALL=(root) NOPASSWD: /opt/omniacli/venv/bin/omniacli workspace-helper *
-omniacli ALL=(root) NOPASSWD: /opt/omniacli/venv/bin/omniacli compose-helper /var/lib/omniacli-storage/srv-omniacli-default_workspace-283da566/* *
+omniacli ALL=(root) NOPASSWD: /opt/omniacli/venv/bin/omniacli compose-helper /var/lib/omniacli-storage/default/* *
 ```
 
 Without it, nothing is granted: give it only where workspaces are wanted,

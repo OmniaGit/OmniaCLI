@@ -422,7 +422,10 @@ async def test_metrics_api(client, env):
     only = (await client.get("/api/metrics?machine_only=1", headers={"Authorization": AUTH})).json()
     assert only["instances"] == {} and only["machine"]
     page = (await client.get("/", headers={"Authorization": AUTH})).text
-    assert 'class="panel machine-panel" data-link=""' in page
+    # this machine: one row at the top, before Servers, no section of its own
+    assert page.index('<div class="panel machine-top"><span class="machine-row" data-link="">') < page.index(
+        'data-fold="servers"')
+    assert "machine-panel" not in page and 'data-fold="machine"' not in page
 
 
 def test_machine_counters(tmp_path):
@@ -482,7 +485,7 @@ async def test_disks_api(client, env, monkeypatch):
     assert "backups" in root["holds"] and "srv/test log" in root["holds"]
     assert found[1]["holds"] == ["OmniaCLI jobs"]
     page = await client.get("/", headers={"Authorization": AUTH})
-    assert 'class="disk-list"' in page.text and "/api/disks" in page.text
+    assert 'class="load-disks"' in page.text and "/api/disks" in page.text
 
 
 LOGIN_HEADERS = {"Origin": f"http://{HOST}", "Content-Type": "application/x-www-form-urlencoded"}

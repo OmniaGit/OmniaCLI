@@ -1969,7 +1969,8 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             {"workspaces": workspace_rows(), "workspaces_file": settings.workspaces_file,
              "servers": sorted(settings.servers), "users": sorted(settings.users),
              "user_roles": {n: settings.user_role(n) for n in settings.users},
-             "storage_roots": settings.storage_roots, "system_config": pluginstore.SYSTEM_CONFIG,
+             "storage_roots": settings.storage_roots, "storage_error": settings.storage_error,
+             "system_config": pluginstore.SYSTEM_CONFIG,
              "roles": ACCESS_ROLES, "limits": WORKSPACE_LIMITS,
              "templates": await asyncio.to_thread(template_rows),
              "templates_index": templatestore.index_url(settings.plugin_source)},
@@ -2074,8 +2075,8 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
     async def storage_disks() -> dict[str, dict]:
         points = [m[1] for m in await asyncio.to_thread(disks.mounts)]
         found = {}
-        for root in settings.storage_roots:
-            mount = disks.holder(root, points)
+        for root, folder in settings.storage_roots.items():
+            mount = disks.holder(folder, points)
             if mount:
                 found[root] = {"mount": mount, "forecast": disk_history.forecast_of(mount)}
         return found

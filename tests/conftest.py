@@ -53,8 +53,10 @@ def clone(remote: Path, dest: Path, branch: str) -> Path:
 
 
 # the storages' binds (workspacehelper.bind_storage) need root and systemd: in
-# the tests a storage is used where it is, still one of workspaces.storage;
-# the real ones are tested with these (test_stacktemplates, storage binds)
+# the tests a storage is used where it is, its folder, still one of
+# workspaces.storage (name: folder); a test that uses the folder as the name
+# finds its root path there too. The real ones are tested with these
+# (test_stacktemplates, storage binds)
 REAL_BOUND_ROOT = config.bound_root
 REAL_BIND_STORAGE = workspacehelper.bind_storage
 
@@ -62,9 +64,10 @@ REAL_BIND_STORAGE = workspacehelper.bind_storage
 @pytest.fixture(autouse=True)
 def storage_where_it_is(monkeypatch):
     def bind_storage(storage):
-        if storage not in workspacehelper.storage_roots():
-            raise HelperError(f"{storage} is not one of workspaces.storage of {workspacehelper.SYSTEM_CONFIG}")
-        return Path(storage)
+        roots = workspacehelper.storage_roots()
+        if storage not in roots:
+            raise HelperError(f"{storage} is not a storage of workspaces.storage of {workspacehelper.SYSTEM_CONFIG}")
+        return Path(roots[storage])
     monkeypatch.setattr(config, "bound_root", lambda storage: storage)
     monkeypatch.setattr(workspacehelper, "bind_storage", bind_storage)
 

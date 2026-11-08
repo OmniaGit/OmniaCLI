@@ -21,6 +21,7 @@ from omniacli.config import (
     Workspace,
     load_workspaces,
     parse_auth,
+    StorageListError,
     parse_storage_roots,
     parse_workspaces,
     save_workspaces,
@@ -80,15 +81,23 @@ def test_parse_workspaces(tmp_path):
             ({"a": {"domain": "x.example.com"}, "b": {"domain": "x.example.com"}}, "in two workspaces")):
         with pytest.raises(ConfigError, match=message):
             parse_workspaces(bad, ("/srv/omniacli",))
-    assert parse_storage_roots({"storage": ["/srv/omniacli/", "/data"]}) == ("/srv/omniacli", "/data")
+    # storages: a name and a folder; the workspaces use the name
+    assert parse_storage_roots({"storage": {"main": "/srv/omniacli/", "disk2": "/data"}}) == {
+        "main": "/srv/omniacli", "disk2": "/data"}
     # a storage taken out of the main configuration is kept: the workspace is unusable, OmniaCLI starts
-    assert parse_workspaces({"a": {"storage": "/elsewhere"}}, ("/srv/omniacli",))["a"].storage == "/elsewhere"
-    # none listed: the default folder; an empty list: none
+    assert parse_workspaces({"a": {"storage": "elsewhere"}}, {"main": "/srv/omniacli"})["a"].storage == "elsewhere"
+    # none listed: the default storage; empty: none
     for data in (None, {}, {"storage": None}):
-        assert parse_storage_roots(data) == (DEFAULT_STORAGE,) == ("/srv/omniacli/default_workspace",)
-    assert parse_storage_roots({"storage": []}) == ()
-    with pytest.raises(ConfigError, match="absolute"):
-        parse_storage_roots({"storage": ["srv"]})
+        assert parse_storage_roots(data) == {"default": DEFAULT_STORAGE} == {"default": "/srv/omniacli/default_workspace"}
+    assert parse_storage_roots({"storage": {}}) == {}
+    for bad, message in (({"main": "srv"}, "absolute"), ({"Main": "/srv"}, "not a storage name"),
+                         ({"a" * 33: "/srv"}, "not a storage name"), ({"a": "/srv", "b": "/srv/"}, "same folder"),
+                         ("/srv", "must be")):
+        with pytest.raises(ConfigError, match=message):
+            parse_storage_roots({"storage": bad})
+    # the list of folders of before: refused with what to write instead (OmniaCLI starts: Settings)
+    with pytest.raises(StorageListError, match="give each a name.*default: /srv/omniacli/default_workspace"):
+        parse_storage_roots({"storage": ["/srv/omniacli/default_workspace"]})
     # a user of workspaces only; never a link or a token
     access = parse_auth({"users": {"mario": {"password": "x", "role": "workspace"}}}, need_user=False)
     assert access.roles == {"mario": "workspace"}
@@ -306,17 +315,17 @@ async def test_save_checks_the_room_of_the_disk(workspaces, client, env, monkeyp
     from omniacli import workspaceops
 
     settings = env["settings"]
-    settings.storage_roots = ("/s",)
+    settings.storage_roots = {"main": "/s"}
     answers = []
 
     async def space():
         answers.append(1)
-        return space_of(160, {"acme": (100, 20), "beta": (100, 20)})
+        return space_of(160, {"acme": (100, 20), "beta": (100, 20)}, root="main")
     monkeypatch.setattr(workspaceops, "space", space)
-    settings.workspaces["acme"].storage = settings.workspaces["beta"].storage = "/s"
+    settings.workspaces["acme"].storage = settings.workspaces["beta"].storage = "main"
     settings.workspaces["acme"].limits = {"disk_gb": 100}
     settings.workspaces["beta"].limits = {"disk_gb": 100}
-    body = {"name": "gamma", "new": True, "storage": "/s", "limits": {"disk_gb": "100"}}
+    body = {"name": "gamma", "new": True, "storage": "main", "limits": {"disk_gb": "100"}}
     resp = await client.post("/api/workspaces/save", headers=POST, json=body)
     assert resp.status_code == 400 and "force it" in resp.json()["error"]
     resp = await client.post("/api/workspaces/save", headers=POST, json={**body, "limits": {"disk_gb": "170"},
@@ -329,7 +338,7 @@ async def test_save_checks_the_room_of_the_disk(workspaces, client, env, monkeyp
     resp = await client.post("/api/workspaces/save", headers=POST, json={**body, "new": False, "label": "G"})
     assert resp.status_code == 200 and len(answers) == count
     resp = await client.get("/api/workspaces/space", headers={"Authorization": AUTH})
-    rows = resp.json()["roots"]["/s"]
+    rows = resp.json()["roots"]["main"]
     assert rows[""]["physical"] == 160 * GB and rows["acme"]["own_used"] == 20 * GB
     assert (await client.get("/api/workspaces/space", headers=basic("mario"))).status_code == 403
     # sudo refuses the helper: the admin is told how to allow it; the helper's own error is told as it is
@@ -346,12 +355,12 @@ async def test_a_storage_taken_out_of_the_configuration(workspaces, client, env,
     """OmniaCLI starts; the workspace says it cannot be used, creates no
     instance, and is fixed by picking a storage that is listed."""
     settings = env["settings"]
-    settings.storage_roots = ("/srv/omniacli/default_workspace",)
+    settings.storage_roots = {"default": "/srv/omniacli/default_workspace"}
     acme = settings.workspaces["acme"]
-    acme.storage, acme.limits = "/media/gone", {"disk_gb": 10}
-    assert "/media/gone" in settings.storage_problem(acme) and settings.storage_problem(settings.workspaces["beta"]) is None
+    acme.storage, acme.limits = "gone", {"disk_gb": 10}
+    assert "gone" in settings.storage_problem(acme) and settings.storage_problem(settings.workspaces["beta"]) is None
     page = (await client.get("/workspaces/acme", headers=basic("mario"))).text
-    assert "This workspace cannot be used" in page and "/media/gone" in page
+    assert "This workspace cannot be used" in page and "storage gone" in page
     resp = await client.post("/api/workspaces/acme/instances/create", headers=post_as("mario"),
                              json={"instance": "main", "template": "odooplm-20"})
     assert resp.status_code == 400 and "cannot be used" in resp.json()["error"], resp.text
@@ -362,17 +371,22 @@ async def test_a_storage_taken_out_of_the_configuration(workspaces, client, env,
     assert "cannot be used" in (await client.get("/workspaces", headers={"Authorization": AUTH})).text
     body = {"name": "acme", "label": "ACME", "domain": "acme.example.com", "servers": ["srv"],
             "members": {"mario": "admin", "luca": "user"}, "limits": {"disk_gb": "10"}}
-    resp = await client.post("/api/workspaces/save", headers=POST, json={**body, "storage": "/media/gone"})
+    resp = await client.post("/api/workspaces/save", headers=POST, json={**body, "storage": "gone"})
     assert resp.status_code == 400 and "pick one of them" in resp.json()["error"]
     from omniacli import workspaceops
 
     async def space():
-        return {"roots": [{"root": "/srv/omniacli/default_workspace", "device": 1, "total": 100 * GB,
+        return {"roots": [{"root": "default", "folder": "/srv/omniacli/default_workspace", "device": 1, "total": 100 * GB,
                            "free": 50 * GB, "images": {}}]}
     monkeypatch.setattr(workspaceops, "space", space)
-    resp = await client.post("/api/workspaces/save", headers=POST, json={**body, "storage": "/srv/omniacli/default_workspace"})
+    resp = await client.post("/api/workspaces/save", headers=POST, json={**body, "storage": "default"})
     assert resp.status_code == 200, resp.text
     assert settings.storage_problem(settings.workspaces["acme"]) is None
+    # the storages of before (a list of folders): OmniaCLI starts, no workspace with a storage can be used
+    settings.storage_roots, settings.storage_error = {}, "workspaces.storage is a list of folders: give each a name"
+    assert "give each a name" in settings.storage_problem(settings.workspaces["acme"])
+    page = (await client.get("/workspaces", headers={"Authorization": AUTH})).text
+    assert "No workspace can be used: workspaces.storage is a list of folders" in page
 
 
 async def test_cpu_and_memory_applied_when_changed(workspaces, client, env, monkeypatch):
