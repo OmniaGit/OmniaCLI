@@ -235,6 +235,16 @@ prepared before Test & activate. The job's log opens in a new tab.
   **A−** and **A+** change the text size for that page, **Full screen**
   fills the screen with the terminal (Esc leaves it); the size it opens
   with is on the Options page.
+  **Files dropped on the terminal** (shell, Claude, psql; up to 100 MiB
+  each) are uploaded into `~/.omniacli-drops/<server>/<role>/` in the home
+  of that system user, and their paths are typed in the terminal, quoted,
+  as a local terminal does: Claude reads a mail (`.eml`) or a spreadsheet
+  from there. A file keeps its name (`name-1.ext` when it is taken), the
+  files older than 7 days go at the next upload, every upload is in the
+  access log. The upload follows the shell's rules: who may open it, where
+  it opens, through a link to the linked server. A mail dragged straight
+  from a mail program may reach the browser as a link, not as a file: save
+  it as `.eml`, then drop that.
 - **Options** (admins, `/options`): the options of the whole instance, in
   `options.yaml` next to the servers file (`options_file` in the main
   configuration): the text size every console opens with (8-40 pixels,

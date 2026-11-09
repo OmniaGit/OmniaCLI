@@ -3019,7 +3019,9 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         command, _, stay = run(instance)
         return _TEMPLATES.TemplateResponse(request, "shell.html", {
             "instance": instance, "folder": folder(instance), "kind": kind, "command": command, "stay": stay,
-            "system_user": pwd.getpwuid(os.getuid()).pw_name, "shell": shell.login_shell()[0]})
+            "system_user": pwd.getpwuid(os.getuid()).pw_name, "shell": shell.login_shell()[0],
+            "drops": shell.drops_folder(instance.server, instance.role), "drop_days": shell.DROP_DAYS,
+            "drop_max": shell.DROP_MAX})
 
     async def shell_socket(websocket: WebSocket, server: str, role: str, kind: str, me: Principal):
         """A login shell of the user running OmniaCLI, in the instance's first
@@ -3059,6 +3061,32 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             minutes = round((time.monotonic() - opened) / 60)
             access_log.record("shell", me.kind, me.name, ip, f"{what} closed after {minutes} min{who}")
 
+    async def shell_upload(request: Request, server: str, role: str, kind: str, name: str, me: Principal):
+        """A file dropped on the terminal of a shell (the raw body), into the
+        instance's drops folder: the page types the path it answers. Allowed
+        where that shell opens, for whom may open it (a link too)."""
+        instance = shell_instance(server, role, kind)
+        name = shell.drop_name(name)
+        length = request.headers.get("content-length", "")
+        if length.isdigit() and int(length) > shell.DROP_MAX:
+            return refuse(f"{name}: more than {shell.DROP_MAX >> 20} MiB", 413)
+        folder = shell.drops_folder(instance.server, instance.role)
+        shell.prune_drops(folder)
+        probe = folder if folder.is_dir() else Path(shell.login_shell()[1])
+        free = shutil.disk_usage(probe).free
+        if free - (int(length) if length.isdigit() else 0) < puller.MIN_FREE:
+            return refuse(f"{name}: {free >> 20} MiB free here, not enough", status.HTTP_507_INSUFFICIENT_STORAGE)
+        try:
+            dest = await shell.save_drop(folder, name, request.stream())
+        except shell.DropRefused as exc:
+            return refuse(str(exc), 413)
+        except ClientDisconnect:
+            return refuse(f"{name}: the upload was interrupted")
+        who = f", acting for {me.on_behalf}" if me.on_behalf else ""
+        access_log.record("shell", me.kind, me.name, request.client.host if request.client else "",
+                          f"{instance.key} {kind}: {dest.name} dropped ({dest.stat().st_size} bytes){who}")
+        return {"path": str(dest)}
+
     async def link_shell_socket(websocket: WebSocket, name: str, server: str, role: str, kind: str,
                                 me: Principal):
         """The shell of a linked instance's server, as the link, with at most our role."""
@@ -3080,6 +3108,11 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         @app.get(f"/servers/{{server}}/{{role}}/{kind}", name=f"{kind}_page")
         async def page(request: Request, server: str, role: str, me: Principal = Depends(developer)):
             return await shell_page(request, server, role, kind)
+
+        @app.post(f"/servers/{{server}}/{{role}}/{kind}/upload", name=f"{kind}_upload")
+        async def upload(request: Request, server: str, role: str, name: str = "",
+                         me: Principal = Depends(developer)):
+            return await shell_upload(request, server, role, kind, name, me)
 
         @app.websocket(f"/servers/{{server}}/{{role}}/{kind}/ws", name=f"{kind}_socket")
         async def socket(websocket: WebSocket, server: str, role: str, me: Principal = Depends(current_user)):

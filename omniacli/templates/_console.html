@@ -12,7 +12,9 @@
    viewer chooses is kept in this browser for each key. The page then
    starts each widget: OmniaConsole.log(box, classify) gives add(lines),
    OmniaLog.attach(widget, url) follows a log file, OmniaConsole.terminal
-   (box, url) connects a terminal. -#}
+   (box, url, drop) connects a terminal; with drop ({upload, max}) a file
+   dropped on it is uploaded to drop.upload (the upload widget) and its path
+   typed in it. -#}
 
 {# the levels of an Odoo (or OmniaCLI) log record #}
 {% set LOG_TAGS = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] %}
@@ -60,6 +62,7 @@ data-font-min="{{ console_font_sizes[0] }}" data-font-max="{{ console_font_sizes
 </div>
 <script src="{{ prefix }}/static/xterm.js"></script>
 <script src="{{ prefix }}/static/addon-fit.js"></script>
+{% include "_upload.html" %}
 {%- endmacro %}
 
 {% macro console_script() -%}
@@ -176,9 +179,62 @@ const OmniaConsole = (function () {
     };
   }
 
+  // a path as a shell reads it: in single quotes
+  const quoted = (path) => "'" + path.replace(/'/g, "'\\''") + "'";
+  const hasFiles = (ev) => ev.dataTransfer && [...ev.dataTransfer.types].includes("Files");
+
+  // files dropped on a terminal: uploaded one after the other (the upload
+  // widget), then their paths typed, as a terminal does with dropped files
+  function drops(box, term, drop, state, type) {
+    const area = box.querySelector(".console-term");
+    // a file dropped beside the terminal would make the browser open it,
+    // leaving the page and ending the shell
+    for (const name of ["dragover", "drop"]) {
+      window.addEventListener(name, (ev) => { if (hasFiles(ev)) ev.preventDefault(); });
+    }
+    area.addEventListener("dragover", (ev) => {
+      if (!hasFiles(ev)) return;
+      ev.preventDefault();
+      ev.dataTransfer.dropEffect = "copy";
+      box.classList.add("console-drop");
+    }, true);
+    area.addEventListener("dragleave", (ev) => {
+      if (!area.contains(ev.relatedTarget)) box.classList.remove("console-drop");
+    }, true);
+    area.addEventListener("drop", async (ev) => {
+      box.classList.remove("console-drop");
+      if (!hasFiles(ev)) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      const files = [...ev.dataTransfer.files];
+      const before = state.textContent;
+      if (!files.length) {
+        state.textContent = "Nothing to upload: drop files (a mail: save it as .eml, then drop that)";
+        return;
+      }
+      const paths = [], errors = [];
+      for (const file of files) {
+        if (file.size > drop.max) {
+          errors.push(`${file.name}: more than ${drop.max >> 20} MiB, not uploaded`);
+          continue;
+        }
+        try {
+          const data = await OmniaUpload.send(drop.upload, file, {
+            progress: (p) => { state.textContent = `Uploading ${file.name}: ${Math.round(p)}%`; }});
+          paths.push(data.path);
+        } catch (e) {
+          errors.push(`${file.name}: ${e.message}`);
+        }
+      }
+      state.textContent = errors.length ? errors.join("; ") : before;
+      if (paths.length) type(paths.map(quoted).join(" ") + " ");
+      term.focus();
+    }, true);
+  }
+
   // a terminal on the WebSocket url: what it receives is drawn, what is
   // typed is sent, with its size
-  function terminal(box, url) {
+  function terminal(box, url, drop) {
     const state = box.querySelector(".console-state");
     const again = box.querySelector(".console-again");
     const term = new Terminal({cursorBlink: true, fontSize: Number(box.dataset.font), scrollback: 5000,
@@ -212,6 +268,7 @@ const OmniaConsole = (function () {
       };
     }
     again.onclick = () => { term.reset(); connect(); };
+    if (drop) drops(box, term, drop, state, (data) => send({type: "input", data}));
     connect();
     return term;
   }

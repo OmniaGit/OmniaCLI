@@ -5,6 +5,7 @@ WebSocket, here and through a link."""
 
 import asyncio
 import json
+import os
 import socket
 import threading
 import time
@@ -310,3 +311,98 @@ def test_psql_on_the_instance_database(env, monkeypatch):
         assert c.get("/servers/srv/test/psql", headers=browser(app, "dev")).status_code == 404
         with c.websocket_connect("/servers/srv/test/psql/ws", headers=browser(app, "dev")) as ws:
             assert closed(ws) == (1008, "srv/test has no database shell")
+
+
+@pytest.fixture
+def drops(tmp_path, monkeypatch):
+    """The drops folder of the terminals, in the test's folder (not the home)."""
+    from omniacli import shell as shell_module
+    folder = tmp_path / "drops"
+    monkeypatch.setattr(shell_module, "drops_folder", lambda server, role: folder / server / role)
+    return folder
+
+
+def test_drop_names():
+    from omniacli.shell import drop_name
+    assert drop_name("../a b/Offerta (2).xlsx") == "Offerta_2_.xlsx"
+    assert drop_name("C:\\Users\\x\\Mail è.eml") == "Mail_è.eml"
+    assert drop_name(".bashrc") == "bashrc"
+    assert drop_name("") == drop_name("..") == "file"
+    assert drop_name("it's;rm -rf $HOME.txt") == "it_s_rm_-rf_HOME.txt"
+
+
+def test_a_file_dropped_on_the_terminal(env, drops, monkeypatch):
+    """The page offers the upload; the file goes into the instance's drops
+    folder, whole, with a name of its own; the path is answered and logged."""
+    from omniacli import shell as shell_module
+    app = create_app(env["settings"])
+    with TestClient(app) as c:
+        page = c.get("/servers/srv/test/shell", headers=browser(app, "dev")).text
+        assert 'upload: "/servers/srv/test/shell/upload"' in page and "window.OmniaUpload" in page
+        url = "/servers/srv/test/shell/upload?name=Mail%20cliente.eml"
+        resp = c.post(url, content=b"From: a\n\nbody", headers=browser(app, "dev"))
+        assert resp.status_code == 200, resp.text
+        first = drops / "srv" / "test" / "Mail_cliente.eml"
+        assert resp.json() == {"path": str(first)} and first.read_bytes() == b"From: a\n\nbody"
+        # the same name again: a file of its own, the first kept
+        again = c.post(url, content=b"two", headers=browser(app, "dev")).json()["path"]
+        assert again == str(drops / "srv" / "test" / "Mail_cliente-1.eml") and first.read_bytes().endswith(b"body")
+        # Claude's and psql's terminals too, where they open
+        assert c.post("/servers/srv/test/psql/upload?name=q.sql", content=b"select 1;",
+                      headers=browser(app, "dev")).status_code == 200
+        # a user who may not open the shell, another site's page, no instance
+        assert c.post(url, content=b"x", headers=browser(app, "viewer")).status_code == 403
+        assert c.post(url, content=b"x", headers=browser(app, "dev", origin="http://evil.test")).status_code == 403
+        assert c.post("/servers/srv/nope/shell/upload?name=a", content=b"x",
+                      headers=browser(app, "dev")).status_code == 404
+        # too big: refused, nothing left behind
+        monkeypatch.setattr(shell_module, "DROP_MAX", 4)
+        resp = c.post("/servers/srv/test/shell/upload?name=big.xlsx", content=b"12345", headers=browser(app, "dev"))
+        assert resp.status_code == 413 and "MiB" in resp.json()["error"]
+        assert sorted(p.name for p in (drops / "srv" / "test").iterdir()) == ["Mail_cliente-1.eml", "Mail_cliente.eml",
+                                                                             "q.sql"]
+    events = [e["detail"] for e in app.state.access_log.recent() if e["event"] == "shell"]
+    assert "srv/test shell: Mail_cliente.eml dropped (13 bytes)" in events
+
+
+async def test_save_drop_refuses_too_much_and_prunes(tmp_path):
+    from omniacli.shell import DropRefused, prune_drops, save_drop
+
+    async def chunks(*parts):
+        for part in parts:
+            yield part
+
+    folder = tmp_path / "d"
+    with pytest.raises(DropRefused):
+        await save_drop(folder, "a.bin", chunks(b"123", b"456"), limit=5)
+    assert list(folder.iterdir()) == []
+    kept = await save_drop(folder, "a.bin", chunks(b"123"), limit=5)
+    old = await save_drop(folder, "old.bin", chunks(b"1"))
+    week_ago = time.time() - 8 * 86400
+    os.utime(old, (week_ago, week_ago))
+    prune_drops(folder)
+    assert [p.name for p in folder.iterdir()] == [kept.name]
+
+
+def test_a_file_dropped_through_a_link(env, tmp_path, drops, customer_server):
+    """Dropped on the terminal of a linked instance: it goes to that server."""
+    customer, url = customer_server
+    conf = tmp_path / "mine"
+    conf.mkdir()
+    (conf / "links.yaml").write_text(yaml.safe_dump({"links": {"cliente": {"url": url, "token": LINK_TOKEN}}}))
+    settings = parse_settings({
+        "auth": {"users": {"admin": USER_HASH, "viewer": {"password": USER_HASH, "role": "user"}}},
+        "backup_dir": str(tmp_path / "my-backups"), "jobs_dir": str(tmp_path / "my-jobs"),
+        "servers_file": "servers.yaml",
+    }, base_dir=conf)
+    mine = create_app(settings)
+    with TestClient(mine) as c:
+        page = c.get("/links/cliente/servers/srv/test/shell", headers=browser(mine, "admin")).text
+        assert 'upload: "/links/cliente/servers/srv/test/shell/upload"' in page
+        resp = c.post("/links/cliente/servers/srv/test/shell/upload?name=list.xlsx", content=b"PK-there",
+                      headers=browser(mine, "admin"))
+        assert resp.status_code == 200, resp.text
+        assert (drops / "srv" / "test" / "list.xlsx").read_bytes() == b"PK-there"
+        # our user's role caps the link's
+        assert c.post("/links/cliente/servers/srv/test/shell/upload?name=x", content=b"x",
+                      headers=browser(mine, "viewer")).status_code == 403

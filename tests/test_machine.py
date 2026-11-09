@@ -77,7 +77,11 @@ def test_a_server_opens_no_shell_of_its_own_user(server, tmp_path, user):
             assert resp.status_code == 403 and REFUSED.format(kind) in resp.text
             with c.websocket_connect(f"/servers/srv/test/{kind}/ws", headers=browser(app, user)) as ws:
                 assert closed(ws) == (1008, REFUSED.format(kind))
+            # no file dropped on a terminal that does not open
+            resp = c.post(f"/servers/srv/test/{kind}/upload?name=a.txt", content=b"x", headers=browser(app, user))
+            assert resp.status_code == 403 and REFUSED.format(kind) in resp.text
     assert not [e for e in app.state.access_log.recent() if e["event"] == "shell"]
+    assert not (tmp_path / "drops").exists()
 
 
 def test_a_server_keeps_psql_as_another_user(server, monkeypatch):

@@ -1,0 +1,35 @@
+{# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C · SPDX-License-Identifier: AGPL-3.0-or-later -#}
+{# The upload widget: every file the browser sends to OmniaCLI (a backup zip
+   to restore, a file dropped on a terminal) goes the same way, as the raw
+   body of a POST to url?name=<the file's name>, with its percentage.
+
+   {% include "_upload.html" %}   (more than once on a page is fine)
+   const sending = OmniaUpload.send(url, file, {type, progress});
+     progress(percent) while it goes; sending is a Promise of the JSON the
+     server answers (an error status: rejected with its error), and
+     sending.abort() cancels it. -#}
+<script>
+window.OmniaUpload = window.OmniaUpload || {
+  send(url, file, options) {
+    const {type = "application/octet-stream", progress = null} = options || {};
+    const xhr = new XMLHttpRequest();
+    const sending = new Promise((resolve, reject) => {
+      xhr.open("POST", `${url}?name=${encodeURIComponent(file.name)}`);
+      xhr.setRequestHeader("Content-Type", type);
+      // a fetch tells no percentage of what it sends
+      if (progress) xhr.upload.onprogress = (ev) => { if (ev.lengthComputable) progress(100 * ev.loaded / ev.total); };
+      xhr.onload = () => {
+        let data = {};
+        try { data = JSON.parse(xhr.responseText); } catch (e) { /* the status tells */ }
+        if (xhr.status < 300) resolve(data);
+        else reject(new Error(data.error || data.detail || "Error " + xhr.status));
+      };
+      xhr.onerror = () => reject(new Error("The upload failed: OmniaCLI cannot be reached"));
+      xhr.onabort = () => reject(new Error("The upload was cancelled"));
+      xhr.send(file);
+    });
+    sending.abort = () => xhr.abort();
+    return sending;
+  },
+};
+</script>

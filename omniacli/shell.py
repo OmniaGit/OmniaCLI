@@ -8,6 +8,12 @@ what is typed, {"type": "resize", "cols": n, "rows": n} when the terminal
 changes size. The shell's output goes to the browser as binary frames. The
 shell ends when the WebSocket closes, and the WebSocket closes when the
 shell exits.
+
+A file dropped on the terminal is uploaded into the drops folder of the
+instance, in the home of the user running OmniaCLI (DROPS_DIR/<server>/
+<role>), and the terminal types its path, as a terminal does with a file
+dropped on it: Claude reads it from there. Files older than DROP_DAYS go at
+the next upload.
 """
 
 from __future__ import annotations
@@ -21,8 +27,12 @@ import os
 import pwd
 import shlex
 import signal
+import re
 import struct
+import tempfile
 import termios
+import time
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 from starlette.websockets import WebSocket, WebSocketDisconnect
@@ -39,6 +49,64 @@ _KEPT_ENV = ("PATH", "LANG", "LC_ALL", "TZ")
 # what the Claude button runs, found by the login shell's PATH (Claude
 # Code's installer puts it in ~/.local/bin)
 CLAUDE_COMMAND = "claude"
+# the files dropped on a terminal: where, how long they are kept, how big
+DROPS_DIR = ".omniacli-drops"
+DROP_DAYS = 7
+DROP_MAX = 100 << 20
+
+
+class DropRefused(ValueError):
+    """A dropped file that is not saved (too big, no name), said to the page."""
+
+
+def drops_folder(server: str, role: str) -> Path:
+    """The folder of the files dropped on the terminals of an instance."""
+    return Path(login_shell()[1]) / DROPS_DIR / server / role
+
+
+def drop_name(name: str) -> str:
+    """The name a dropped file is saved with: its own, without folders,
+    leading dots and characters a shell would need quoted twice."""
+    name = re.sub(r"[^\w.+-]+", "_", Path(name.replace("\\", "/")).name).lstrip(".")
+    return name[:200] or "file"
+
+
+def prune_drops(folder: Path, days: int = DROP_DAYS) -> None:
+    """Remove the files of folder older than days."""
+    limit = time.time() - days * 86400
+    for path in folder.iterdir() if folder.is_dir() else ():
+        with contextlib.suppress(OSError):
+            if path.is_file() and path.stat().st_mtime < limit:
+                path.unlink()
+
+
+async def save_drop(folder: Path, name: str, chunks: AsyncIterator[bytes], limit: int = DROP_MAX) -> Path:
+    """Write a dropped file into folder, whole or not at all (a .part file
+    first), with a name of its own there (name-1.ext, name-2.ext... when
+    taken); more than limit bytes is refused."""
+    folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+    handle, part_name = tempfile.mkstemp(dir=folder, prefix=".", suffix=".part")
+    part = Path(part_name)
+    try:
+        size = 0
+        with os.fdopen(handle, "wb") as out:
+            async for chunk in chunks:
+                size += len(chunk)
+                if size > limit:
+                    raise DropRefused(f"{name}: more than {limit >> 20} MiB")
+                out.write(chunk)
+        stem, suffix = Path(name).stem, Path(name).suffix
+        for n in range(1000):
+            dest = folder / (name if not n else f"{stem}-{n}{suffix}")
+            try:
+                # a hard link never replaces a file there: taken, the next name
+                os.link(part, dest)
+                return dest
+            except FileExistsError:
+                continue
+        raise DropRefused(f"{name}: too many files with this name")
+    finally:
+        part.unlink(missing_ok=True)
 
 
 def login_shell() -> tuple[str, str]:
