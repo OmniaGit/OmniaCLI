@@ -1783,6 +1783,11 @@ server {
         proxy_buffering off;
         proxy_read_timeout 3600s;
         proxy_send_timeout 3600s;
+
+        # uploads (restore from a file, files dropped on a terminal): nginx's
+        # default stops a body over 1 MiB with 413
+        client_max_body_size 0;
+        proxy_request_buffering off;
     }
 }
 ```
@@ -1793,7 +1798,8 @@ same `location` ("directive is duplicate"). And `Host` once: two
 400.
 
 The networks in `allow` are those of the clients, not the server's: a PC
-outside them gets 403.
+outside them gets 403. A client on a VPN arrives with the VPN's address, not
+its LAN one: the 403 lines of `/var/log/nginx/access.log` show which.
 
 #### The certificate
 
