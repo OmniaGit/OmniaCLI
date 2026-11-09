@@ -214,7 +214,9 @@ class _Run:
     async def report(self, pub: Publication, instance: Instance):
         """The report, and what to note once the relay took it."""
         sampler, history = self.p.sampler, self.p.disk_history
-        machine = sampler.machine_series(self.machine_t)
+        # the machine's total only: its shares name the other instances here
+        machine = [{k: v for k, v in p.items() if k not in ("pg", "instances")}
+                   for p in sampler.machine_series(self.machine_t)]
         points = sampler.series(instance.key, self.instance_t)
         found = await _disks.disks(self.p.settings)
         for disk in found:

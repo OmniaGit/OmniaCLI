@@ -20,6 +20,10 @@ try { const t = localStorage.getItem("omniacli.theme"); if (t) document.document
   --border: #E5E5E5; --accent: #DC2626; --ok: #15803D; --err: #991B1B;
   --warn: #B45309; --code-bg: #0A0A0A; --code-text: #E5E5E5;
   --series-1: #161616; --series-2: #DC2626; --test: #161616; --prod: #DC2626;
+  /* the shares on a chart (OmniaCharts lines c2..c8): categorical slots 2-8,
+     checked with the dataviz validator on #FFFFFF; the legend shows each value */
+  --cat-2: #eb6834; --cat-3: #1baf7a; --cat-4: #eda100; --cat-5: #e87ba4;
+  --cat-6: #008300; --cat-7: #6250d6; --cat-8: #e34948;
   --start: #15803D; --stop: #DC2626; --restart: #1D4ED8; --light-green: #16A34A; --purple: #7E22CE;
   --r: 0; --r-lg: 0;
   --font: "Helvetica Neue", Helvetica, Arial, "Nimbus Sans", "Liberation Sans", sans-serif;
@@ -32,6 +36,8 @@ try { const t = localStorage.getItem("omniacli.theme"); if (t) document.document
     --border: #2d3442; --accent: #6d9bff; --ok: #4cc283; --err: #ff6b6b;
     --warn: #f0a443; --code-bg: #0b0e14; --code-text: #d6dbe4;
     --series-1: #3987e5; --series-2: #f08a3c; --test: var(--accent); --prod: var(--err);
+    --cat-2: #d95926; --cat-3: #199e70; --cat-4: #c98500; --cat-5: #d55181;
+    --cat-6: #008300; --cat-7: #9085e9; --cat-8: #e66767;
     --start: var(--ok); --stop: var(--err); --restart: #6d9bff; --light-green: #86efac; --purple: #c084fc;
     --r: 6px; --r-lg: 8px; --font: system-ui, -apple-system, "Segoe UI", sans-serif;
     --mono: ui-monospace, "DejaVu Sans Mono", monospace; --head-bg: var(--panel);
@@ -43,6 +49,8 @@ try { const t = localStorage.getItem("omniacli.theme"); if (t) document.document
     --border: #2d3442; --accent: #6d9bff; --ok: #4cc283; --err: #ff6b6b;
     --warn: #f0a443; --code-bg: #0b0e14; --code-text: #d6dbe4;
     --series-1: #3987e5; --series-2: #f08a3c; --test: var(--accent); --prod: var(--err);
+    --cat-2: #d95926; --cat-3: #199e70; --cat-4: #c98500; --cat-5: #d55181;
+    --cat-6: #008300; --cat-7: #9085e9; --cat-8: #e66767;
     --start: var(--ok); --stop: var(--err); --restart: #6d9bff; --light-green: #86efac; --purple: #c084fc;
     --r: 6px; --r-lg: 8px; --font: system-ui, -apple-system, "Segoe UI", sans-serif;
     --mono: ui-monospace, "DejaVu Sans Mono", monospace; --head-bg: var(--panel);
@@ -310,6 +318,15 @@ button.icon-btn .icon { margin: 0; }
 .run-buttons form { margin: 0; }
 .key { display: inline-block; width: 10px; height: 3px; border-radius: 2px; vertical-align: middle; margin: 0 4px 0 8px; }
 .key.s1 { background: var(--series-1); } .key.s2 { background: var(--series-2); }
+.chart-line.c2 { stroke: var(--cat-2); } .chart-line.c3 { stroke: var(--cat-3); } .chart-line.c4 { stroke: var(--cat-4); }
+.chart-line.c5 { stroke: var(--cat-5); } .chart-line.c6 { stroke: var(--cat-6); } .chart-line.c7 { stroke: var(--cat-7); }
+.chart-line.c8 { stroke: var(--cat-8); }
+.key.c2 { background: var(--cat-2); } .key.c3 { background: var(--cat-3); } .key.c4 { background: var(--cat-4); }
+.key.c5 { background: var(--cat-5); } .key.c6 { background: var(--cat-6); } .key.c7 { background: var(--cat-7); }
+.key.c8 { background: var(--cat-8); }
+.chart-legend { display: flex; flex-wrap: wrap; gap: 2px 14px; font-size: 12px; margin: 2px 0 0; }
+.chart-legend .key { margin-left: 0; }
+.chart-legend .mono { color: var(--muted); margin-left: 4px; }
 .machine-grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr)); }
 .disk { margin: 0 0 10px; }
 .disk-head { display: flex; justify-content: space-between; gap: 12px; font-size: 13px; margin-bottom: 4px; }

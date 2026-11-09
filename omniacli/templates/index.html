@@ -17,7 +17,7 @@
   <div class="machine-top-row" role="button" tabindex="0" aria-expanded="false" aria-controls="machine-detail"
        title="Open the load of this machine"><span class="fold-icon" aria-hidden="true">▸</span>{{ machine_row("", "this machine") }}<span class="muted machine-top-close" hidden>Close</span></div>
   <div id="machine-detail" hidden>
-<p class="muted" style="margin: 10px 0 0">The whole machine, last hour: every Odoo instance, PostgreSQL and the rest together.</p>
+<p class="muted" style="margin: 10px 0 0">The whole machine, last hour: every Odoo instance, PostgreSQL and the rest together. On the CPU chart, over the total, the share of PostgreSQL (every cluster) and of each instance of the active servers, in percent of the whole machine; an instance whose processes OmniaCLI cannot find (Docker: see its workspace) has no line.</p>
 <div class="machine-grid">
   <section class="panel machine-panel" data-link="">
     <div class="tiles">
@@ -28,6 +28,7 @@
     <p class="muted machine-state" style="margin: 6px 0 0"></p>
     <h3 class="chart-title">CPU, % of all <span class="cores">?</span></h3>
     <div class="chart-box"><svg class="chart" data-chart="cpu" role="img" aria-label="CPU of this machine over the last hour"></svg><div class="chart-tip" hidden></div></div>
+    <div class="chart-legend" data-legend="cpu"></div>
     <h3 class="chart-title">Network, per second <span class="muted" style="font-weight: 400"><span class="key s1"></span>received<span class="key s2"></span>sent</span></h3>
     <div class="chart-box"><svg class="chart" data-chart="net" role="img" aria-label="Network traffic of this machine over the last hour"></svg><div class="chart-tip" hidden></div></div>
     <h3 class="chart-title">Disks, free space</h3>
@@ -343,8 +344,23 @@
     series.set(panel, points);
     if (points.length) since.set(panel, points[points.length - 1].t);
     panel.querySelector(".cores").textContent = data.cores + (data.cores === 1 ? " core" : " cores");
+    // over the total: PostgreSQL and each instance, in percent of the whole
+    // machine too; more than six instances: five, and the others together
+    const keys = [...new Set(points.flatMap((p) => Object.keys(p.instances || {})))].sort();
+    const own = keys.length > 6 ? keys.slice(0, 5) : keys, others = keys.slice(own.length);
+    const share = (p, k) => (p.instances && k in p.instances ? p.instances[k] : null);
+    const lines = [];
+    if (points.some((p) => p.pg !== null && p.pg !== undefined)) lines.push({label: "PostgreSQL", cls: "c2", value: (p) => p.pg});
+    own.forEach((k, i) => lines.push({label: k, cls: "c" + (3 + i), value: (p) => share(p, k)}));
+    if (others.length) lines.push({label: `${others.length} other instances`, cls: "c8",
+      value: (p) => (p.instances ? others.reduce((sum, k) => sum + (p.instances[k] || 0), 0) : null)});
+    const pct = (v) => (v === null || v === undefined ? "–" : v.toFixed(1) + "%");
     OmniaCharts.draw(panel.querySelector('[data-chart="cpu"]'), points, "cpu",
-      {unit: "%", minMax: 10, format: (v) => v.toFixed(0), tip: (p) => `${p.cpu}% CPU`});
+      {unit: "%", minMax: 10, format: (v) => v.toFixed(0), lines,
+       tip: (p) => [`total ${pct(p.cpu)}`, ...lines.map((l) => `${l.label} ${pct(l.value(p))}`)].join(" · ")});
+    const now = points[points.length - 1];
+    OmniaCharts.legend(panel.querySelector('[data-legend="cpu"]'), now ? [{label: "Total", cls: "s1", value: pct(now.cpu)},
+      ...lines.map((l) => ({label: l.label, cls: l.cls, value: pct(l.value(now))}))] : []);
     OmniaCharts.draw(panel.querySelector('[data-chart="net"]'), points, "rx",
       {also: "tx", minMax: 1024, format: rate, padLeft: 70, tip: (p) => `received ${rate(p.rx)} · sent ${rate(p.tx)}`});
     const last = points[points.length - 1];

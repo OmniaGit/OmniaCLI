@@ -418,7 +418,8 @@ async def test_metrics_api(client, env):
     point = data["instances"]["srv/test"]["points"][-1]
     assert set(point) == {"t", "cpu", "mem", "procs"}
     machine = data["machine"][-1]
-    assert set(machine) == {"t", "cpu", "rx", "tx"} and 0 <= machine["cpu"] <= 100
+    # the shares: PostgreSQL's (None where there is none), the instances measured
+    assert set(machine) - {"instances"} == {"t", "cpu", "pg", "rx", "tx"} and 0 <= machine["cpu"] <= 100
     only = (await client.get("/api/metrics?machine_only=1", headers={"Authorization": AUTH})).json()
     assert only["instances"] == {} and only["machine"]
     page = (await client.get("/", headers={"Authorization": AUTH})).text
@@ -1396,3 +1397,60 @@ async def test_package_update_is_confirmed_with_its_scripts_named(client, env):
     page = (await client.get("/servers/srv?view=test", headers={"Authorization": AUTH})).text
     # without a package the pull asks nothing, as before
     assert "its own scripts" not in page and 'confirm("Git pull srv/test?' not in page
+
+
+def test_postgres_cpu(tmp_path):
+    from omniacli.metrics import postgres_cpu
+
+    # Debian: the slice of every cluster
+    slice_ = tmp_path / "system.slice" / "system-postgresql.slice"
+    slice_.mkdir(parents=True)
+    (slice_ / "cpu.stat").write_text("usage_usec 7500000\nuser_usec 5000000\n")
+    assert postgres_cpu(tmp_path) == 7.5
+    # other systems: the postgresql*.service units, together
+    (slice_ / "cpu.stat").unlink()
+    for unit, usec in (("postgresql.service", 1_000_000), ("postgresql-16.service", 2_000_000)):
+        (tmp_path / "system.slice" / unit).mkdir()
+        (tmp_path / "system.slice" / unit / "cpu.stat").write_text(f"usage_usec {usec}\n")
+    assert postgres_cpu(tmp_path) == 3.0
+    assert postgres_cpu(tmp_path / "none") is None
+
+
+async def test_the_shares_of_the_machine(env, tmp_path, monkeypatch):
+    """The machine's point carries PostgreSQL's and each instance's share,
+    in percent of the whole machine (4 cores here)."""
+    from omniacli import metrics
+
+    cg = tmp_path / "cg"
+    for role in ("production", "test"):
+        (cg / f"odoo-{role}.service").mkdir(parents=True)
+        (cg / f"odoo-{role}.service" / "cgroup.procs").write_text("")
+    monkeypatch.setattr(metrics, "CGROUP_ROOT", cg)
+
+    async def unit_cgroup(self, instance):
+        return f"/{instance.restart.service}.service"
+    monkeypatch.setattr(metrics.Sampler, "_unit_cgroup", unit_cgroup)
+    clock, counters, pg = [100.0], [(0, 0, 0, 0)], [1.0]
+    monkeypatch.setattr(metrics.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(metrics, "machine_counters", lambda: counters[0])
+    monkeypatch.setattr(metrics, "postgres_cpu", lambda: pg[0])
+
+    def used(role, seconds):
+        (cg / f"odoo-{role}.service" / "cpu.stat").write_text(f"usage_usec {int(seconds * 1e6)}\n")
+    sampler = metrics.Sampler(env["settings"])
+    sampler.cores = 4
+    used("production", 0); used("test", 0)
+    await sampler.sample()
+    assert list(sampler.machine) == []
+    clock[0], counters[0], pg[0] = 110.0, (400, 1000, 0, 0), 3.0
+    used("production", 0); used("test", 4)
+    await sampler.sample()
+    point = sampler.machine[-1]
+    # 40% of the machine; PostgreSQL 2 s in 10 s = 20% of a core = 5% of 4 cores;
+    # the test instance 4 s in 10 s = 40% of a core = 10% of the machine
+    assert point["cpu"] == 40.0 and point["pg"] == 5.0
+    assert point["instances"] == {"srv/production": 0.0, "srv/test": 10.0}
+    # no PostgreSQL here: no share, the rest is the same
+    clock[0], pg[0] = 120.0, None
+    await sampler.sample()
+    assert sampler.machine[-1]["pg"] is None and set(sampler.machine[-1]["instances"]) == {"srv/production", "srv/test"}
