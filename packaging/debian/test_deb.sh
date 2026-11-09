@@ -24,6 +24,10 @@ read -r -d '' CHECKS <<'EOS' || true
 set -euo pipefail
 step() { echo "--- $*"; }
 fail() { echo "CHECK FAILED: $*"; exit 1; }
+# a command's output has the pattern: read to its end, as grep -q does not
+# (it stops at the first match; with pipefail, a curl still writing a long
+# page then fails on the broken pipe, and the check with it)
+has() { grep "$@" >/dev/null; }
 # the login form, as a browser fills it: the session cookie in /tmp/cookies-<user>
 login() {
     [ "$(curl -s -o /dev/null -w '%{http_code}' -c "/tmp/cookies-$1" -H "Origin: http://localhost:8090" \
@@ -37,7 +41,7 @@ apt-get install -y -qq /opt/omniacli-test/omniacli.deb > /tmp/install.log 2>&1 |
 # the links through SSH: ssh, ssh-keygen and ssh-keyscan come with the package
 for tool in ssh ssh-keygen ssh-keyscan; do command -v "$tool" >/dev/null || fail "$tool not installed with the package"; done
 grep -E '^omniacli:' /tmp/install.log || true
-dpkg -s omniacli | grep -q '^Status: install ok installed' || fail "package not installed"
+dpkg -s omniacli | has '^Status: install ok installed' || fail "package not installed"
 for i in $(seq 30); do curl -s -o /dev/null localhost:8090 && break; sleep 1; done
 systemctl is-active --quiet omniacli || { journalctl -u omniacli --no-pager | tail -20; fail "service not active"; }
 systemctl is-enabled --quiet omniacli || fail "service not enabled"
@@ -88,14 +92,14 @@ API=(-s -b /tmp/cookies-admin -H "Origin: http://localhost:8090" -H "Content-Typ
 curl "${API[@]}" localhost:8090/api/servers/save -d '{"original": null, "name": "demo", "server": {"production": {
   "database": "DEMO", "odoo_config": "/srv/odoo.conf", "log_file": "/srv/odoo.log", "venv_bin": "/srv/venv/bin",
   "restart": {"type": "systemd", "service": "odoo-dummy", "sudo": true},
-  "repositories": [{"name": "odoo", "path": "/srv/odoo", "branch": "main"}]}}}' | grep -q '"ok":true' \
+  "repositories": [{"name": "odoo", "path": "/srv/odoo", "branch": "main"}]}}}' | has '"ok":true' \
   || fail "server not saved"
 [ "$(stat -c %U /var/lib/omniacli/servers.yaml)" = omniacli ] || fail "servers.yaml owner"
 grep -q "status: draft" /var/lib/omniacli/servers.yaml || fail "a new server is not a draft"
 
 step "a user created from the Users page, as user omniacli"
 curl "${API[@]}" localhost:8090/api/access/users/save \
-  -d '{"name": "anna", "role": "developer", "password": "anna-pass-1", "new": true}' | grep -q '"ok":true' \
+  -d '{"name": "anna", "role": "developer", "password": "anna-pass-1", "new": true}' | has '"ok":true' \
   || fail "user not saved"
 [ "$(stat -c '%U %a' /var/lib/omniacli/users.yaml)" = "omniacli 600" ] || fail "users.yaml owner or mode"
 login anna anna-pass-1
@@ -105,11 +109,11 @@ step "a link to itself: token from the Users page, link from the Links page, pag
 LINK_TOKEN="$(curl "${API[@]}" localhost:8090/api/access/links/save -d '{"name": "self", "role": "developer", "new": true}' \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')"
 curl "${API[@]}" localhost:8090/api/links/save \
-  -d "{\"name\": \"me\", \"url\": \"http://127.0.0.1:8090\", \"token\": \"$LINK_TOKEN\", \"new\": true}" | grep -q '"ok":true' \
+  -d "{\"name\": \"me\", \"url\": \"http://127.0.0.1:8090\", \"token\": \"$LINK_TOKEN\", \"new\": true}" | has '"ok":true' \
   || fail "link not saved"
 [ "$(stat -c '%U %a' /var/lib/omniacli/links.yaml)" = "omniacli 600" ] || fail "links.yaml owner or mode"
-curl "${API[@]}" -X POST localhost:8090/api/links/me/test | grep -q '"role":"developer"' || fail "Test link"
-curl -s -b /tmp/cookies-admin -H "Accept: text/html" localhost:8090/links/me/ | grep -q "Linked instance <strong>me</strong>" \
+curl "${API[@]}" -X POST localhost:8090/api/links/me/test | has '"role":"developer"' || fail "Test link"
+curl -s -b /tmp/cookies-admin -H "Accept: text/html" localhost:8090/links/me/ | has "Linked instance <strong>me</strong>" \
   || fail "page through the link"
 
 step "Test & activate: the checks that can pass here"
@@ -132,8 +136,8 @@ systemctl restart omniacli
 for i in $(seq 30); do curl -s -o /dev/null localhost:8090 && break; sleep 1; done
 # links.yaml read again at startup: the link has its row in Linked, and its
 # servers come through it (they are on its own Dashboard, not in Servers)
-curl -s -b /tmp/cookies-admin localhost:8090/ | grep -q '<span class="machine-row" data-link="me">' || fail "linked row"
-curl -s -b /tmp/cookies-admin localhost:8090/links/me/api/servers | grep -q '"demo"' || fail "linked servers"
+curl -s -b /tmp/cookies-admin localhost:8090/ | has '<span class="machine-row" data-link="me">' || fail "linked row"
+curl -s -b /tmp/cookies-admin localhost:8090/links/me/api/servers | has '"demo"' || fail "linked servers"
 
 step "git pull + restart through the web service"
 git -C /srv/dev commit -q --allow-empty -m two && git -C /srv/dev push -q origin main
@@ -159,10 +163,10 @@ echo "omniacli ALL=(root) NOPASSWD: $SYSTEMCTL --no-ask-password start odoo-dumm
 echo "omniacli ALL=(root) NOPASSWD: $SYSTEMCTL --no-ask-password stop odoo-dummy" >> /etc/sudoers.d/omniacli
 visudo -cf /etc/sudoers.d/omniacli >/dev/null || fail "sudoers invalid with start and stop"
 curl "${API[@]}" localhost:8090/api/access/users/save \
-  -d '{"name": "luca", "role": "user", "password": "luca-pass-1", "new": true}' | grep -q '"ok":true' || fail "user luca not saved"
+  -d '{"name": "luca", "role": "user", "password": "luca-pass-1", "new": true}' | has '"ok":true' || fail "user luca not saved"
 login luca luca-pass-1
 LUCA=(-s -b /tmp/cookies-luca -H "Origin: http://localhost:8090")
-curl -s -b /tmp/cookies-luca localhost:8090/servers/demo | grep -q "service active" || fail "service state not shown"
+curl -s -b /tmp/cookies-luca localhost:8090/servers/demo | has "service active" || fail "service state not shown"
 for action in stop start restart; do
     PID_BEFORE="$(systemctl show -p MainPID --value odoo-dummy)"
     LOCATION="$(curl "${LUCA[@]}" -o /dev/null -w '%{redirect_url}' -X POST localhost:8090/servers/demo/production/$action)"
@@ -178,7 +182,7 @@ for action in stop start restart; do
     echo "$action by luca: odoo-dummy $STATE (pid $PID_BEFORE -> $(systemctl show -p MainPID --value odoo-dummy))"
     case "$action" in
         stop) [ "$STATE" = inactive ] || fail "not stopped"
-              curl -s -b /tmp/cookies-luca localhost:8090/servers/demo | grep -q "/servers/demo/production/start" || fail "no Start button when stopped" ;;
+              curl -s -b /tmp/cookies-luca localhost:8090/servers/demo | has "/servers/demo/production/start" || fail "no Start button when stopped" ;;
         start) [ "$STATE" = active ] || fail "not started" ;;
         restart) [ "$STATE" = active ] && [ "$(systemctl show -p MainPID --value odoo-dummy)" != "$PID_BEFORE" ] || fail "not restarted" ;;
     esac
@@ -231,7 +235,7 @@ curl "${API[@]}" localhost:8090/api/servers/save -d '{"original": null, "name": 
   "database": "DEMO_RUNAS", "odoo_config": "/srv/runas.conf", "log_file": "/srv/odoo.log", "venv_bin": "/srv/runas-venv/bin",
   "odoo_bin": "/srv/odoo-src/odoo-bin", "run_as": "odoo",
   "restart": {"type": "systemd", "service": "odoo-dummy", "sudo": true},
-  "repositories": [{"name": "odoo", "path": "/srv/odoo", "branch": "main"}]}}}' | grep -q '"ok":true' \
+  "repositories": [{"name": "odoo", "path": "/srv/odoo", "branch": "main"}]}}}' | has '"ok":true' \
   || fail "run_as server not saved"
 runas_checks() {
     curl "${API[@]}" -X POST localhost:8090/api/servers/runas/test > /tmp/runas.json
@@ -277,7 +281,7 @@ wait_job "${LOCATION##*/}" || fail "backup as odoo"
 grep -o 'backup as .*' /tmp/job.log
 BACKUP="$(ls /var/lib/omniacli/backups/runas/test/)"
 [ "$(cat "/var/lib/omniacli/backups/runas/test/$BACKUP")" = dump ] || fail "backup file"
-ls /var/tmp | grep -q omniacli-backup && fail "backup staging folder left in /var/tmp"
+ls /var/tmp | has omniacli-backup && fail "backup staging folder left in /var/tmp"
 [ "$(curl -s -b /tmp/cookies-admin "localhost:8090/backups/runas/test/$BACKUP")" = dump ] || fail "backup made as odoo not downloadable"
 LOCATION="$(curl "${API[@]}" -o /dev/null -w '%{redirect_url}' -X POST localhost:8090/servers/runas/test/x/odoo/pip-requirements)"
 wait_job "${LOCATION##*/}" || fail "pip requirements as odoo"
@@ -302,7 +306,7 @@ export OMNIACLI_KEY_PASSPHRASE=test-passphrase
 PUB="$(/opt/omniacli/venv/bin/omniacli package-key /srv/sign/key 2>/dev/null)" || fail "package-key"
 /opt/omniacli/venv/bin/omniacli package-sign --key /srv/sign/key /srv/www/demo-server.deb >/dev/null || fail "package-sign"
 (cd /srv/www && sha256sum -c demo-server.deb.sha256 >/dev/null) || fail "the .sha256 is not what sha256sum checks"
-/opt/omniacli/venv/bin/omniacli package-verify --public-key "$PUB" /srv/www/demo-server.deb | grep -q "version 2.0" \
+/opt/omniacli/venv/bin/omniacli package-verify --public-key "$PUB" /srv/www/demo-server.deb | has "version 2.0" \
   || fail "package-verify"
 (cd /srv/www && exec python3 -m http.server 8099 --bind 127.0.0.1 >/tmp/www.log 2>&1) &
 WWW_PID=$!
@@ -313,7 +317,7 @@ echo "omniacli ALL=(root) NOPASSWD: $SYSTEMCTL --no-ask-password restart demo-pk
 curl "${API[@]}" localhost:8090/api/servers/save -d "{\"original\": null, \"name\": \"pkg\", \"server\": {\"type\": \"generic\",
   \"production\": {\"log_file\": \"/srv/odoo.log\", \"restart\": {\"type\": \"systemd\", \"service\": \"demo-pkg\", \"sudo\": true},
   \"repositories\": [], \"package\": {\"url\": \"http://127.0.0.1:8099/demo-server.deb\", \"name\": \"demo-server\",
-  \"public_key\": \"$PUB\"}}}}" | grep -q '"ok":true' || fail "package server not saved"
+  \"public_key\": \"$PUB\"}}}}" | has '"ok":true' || fail "package server not saved"
 # without its sudoers line the Test says which one: added as it says
 curl "${API[@]}" -X POST localhost:8090/api/servers/pkg/test > /tmp/checks.json
 python3 - <<'PY' > /tmp/sudoers-line || fail "package checks"
@@ -328,7 +332,7 @@ print(perm["detail"].split("/etc/sudoers.d/omniacli: ", 1)[1])
 PY
 cat /tmp/sudoers-line >> /etc/sudoers.d/omniacli
 visudo -cf /etc/sudoers.d/omniacli >/dev/null || fail "sudoers invalid with the line the Test printed"
-curl "${API[@]}" -X POST localhost:8090/api/servers/pkg/test | grep -q '"status":"active"' || fail "package server not activated"
+curl "${API[@]}" -X POST localhost:8090/api/servers/pkg/test | has '"status":"active"' || fail "package server not activated"
 PID_BEFORE="$(systemctl show -p MainPID --value demo-pkg)"
 LOCATION="$(curl "${API[@]}" -o /dev/null -w '%{redirect_url}' -X POST localhost:8090/servers/pkg/production/pull-restart)"
 wait_job "${LOCATION##*/}" || fail "package update job"
@@ -367,7 +371,7 @@ install -d -o dev -g dev -m 744 /home/dev/workspace
 printf '[options]\ndb_name = DEV\n' > /home/dev/workspace/odoo.conf
 chown dev:dev /home/dev/workspace/odoo.conf
 FORM='{"values": {"odoo_config": "/home/dev/workspace/odoo.conf"}}'
-curl "${API[@]}" localhost:8090/x/odoo/form/config -d "$FORM" | grep -q "Permission denied" \
+curl "${API[@]}" localhost:8090/x/odoo/form/config -d "$FORM" | has "Permission denied" \
   || fail "the workspace of dev readable by omniacli: the test proves nothing"
 echo "OMNIACLI_USER=nobody-here" >> /etc/default/omniacli
 dpkg-reconfigure omniacli > /tmp/reconf.log 2>&1 && fail "an unknown OMNIACLI_USER accepted"
@@ -378,7 +382,7 @@ wait_up || fail "service not up as dev"
 [ "$(service_user)" = dev ] || fail "service runs as $(service_user), not dev"
 [ "$(owners)" = dev:omniacli ] || fail "data owned by $(owners), not dev:omniacli"
 login admin "$PW"
-curl "${API[@]}" localhost:8090/x/odoo/form/config -d "$FORM" | grep -q '"database":"DEV"' || fail "config of dev not read as dev"
+curl "${API[@]}" localhost:8090/x/odoo/form/config -d "$FORM" | has '"database":"DEV"' || fail "config of dev not read as dev"
 # git and the restart as dev: the repository is the developer's, sudoers names dev
 chown -R dev:dev /srv/odoo /srv/remote.git
 echo "dev ALL=(root) NOPASSWD: $SYSTEMCTL --no-ask-password restart odoo-dummy" >> /etc/sudoers.d/omniacli
@@ -394,10 +398,10 @@ wait_up || fail "service not up after the upgrade"
 [ "$(owners)" = dev:omniacli ] || fail "the upgrade gave the data back to $(owners)"
 login admin "$PW"
 curl "${API[@]}" localhost:8090/api/access/users/save \
-  -d '{"name": "marta", "role": "user", "password": "marta-pass-1", "new": true}' | grep -q '"ok":true' \
+  -d '{"name": "marta", "role": "user", "password": "marta-pass-1", "new": true}' | has '"ok":true' \
   || fail "users.yaml not written as dev after the upgrade"
 # OMNIACLI_USER reaches the running service: a development machine, the shell page opens
-curl -s -b /tmp/cookies-admin localhost:8090/options | grep -q 'id="machine">development<' || fail "OMNIACLI_USER=dev is not a development machine"
+curl -s -b /tmp/cookies-admin localhost:8090/options | has 'id="machine">development<' || fail "OMNIACLI_USER=dev is not a development machine"
 [ "$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/cookies-admin localhost:8090/servers/demo/production/shell)" = 200 ] \
     || fail "no shell page on a development machine"
 echo "as dev: config read, pulled and restarted, upgrade kept it"
@@ -409,7 +413,7 @@ wait_up || fail "service not up as omniacli again"
 [ ! -e "$DROPIN" ] || fail "drop-in left without OMNIACLI_USER"
 # without it, a server: the shell page refused, also to an admin
 login admin "$PW"
-curl -s -b /tmp/cookies-admin localhost:8090/options | grep -q 'id="machine">server<' || fail "without OMNIACLI_USER not a server"
+curl -s -b /tmp/cookies-admin localhost:8090/options | has 'id="machine">server<' || fail "without OMNIACLI_USER not a server"
 [ "$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/cookies-admin localhost:8090/servers/demo/production/shell)" = 403 ] \
     || fail "the shell page opens on a server"
 chown -R omniacli:omniacli /srv/odoo /srv/remote.git
@@ -451,7 +455,7 @@ curl -s -b /tmp/cookies-admin localhost:8090/api/workspaces/space > /tmp/space.j
 room = json.load(open("/tmp/space.json"))["roots"][sys.argv[1]][""]
 assert room["free"] > 0 and room["physical"] == room["free"] and room["promised"] == 0, room' default \
     || { cat /tmp/space.json; fail "the room of $WS_DEFAULT"; }
-curl -s -b /tmp/cookies-admin localhost:8090/workspaces | grep -q "<option value=\"mine\">mine ($WS_USER)</option>" \
+curl -s -b /tmp/cookies-admin localhost:8090/workspaces | has "<option value=\"mine\">mine ($WS_USER)</option>" \
     || fail "the storage mine ($WS_USER) not offered"
 # a workspace's disk on the user's disk, through the root path; after the storage's check.
 # A container's /dev is made at its start: loop devices the kernel adds later
@@ -474,7 +478,7 @@ systemctl stop "$W1_UNIT" omniacli-storage-mine.service
 findmnt -n "$B_USER" >/dev/null && fail "the storage's unit stopped leaves $B_USER bound"
 systemctl start "$W1_UNIT" 2>/dev/null && fail "the disk of w1 mounted on a planted storage"
 findmnt -n "$B_USER" >/dev/null && fail "the planted folder stays bound on $B_USER"
-journalctl -u "omniacli-storage-$(basename "$B_USER").service" --no-pager -o cat | grep -qE "not the folder set up|root's alone" \
+journalctl -u "omniacli-storage-$(basename "$B_USER").service" --no-pager -o cat | has -E "not the folder set up|root's alone" \
     || fail "the check did not say why"
 touch "$B_USER/x" 2>/dev/null && fail "something was written beneath $B_USER (not immutable)"
 "$HELPER" workspace-helper disk w1 mine 1 > /tmp/disk.json 2>&1 && fail "an action took the planted storage"
@@ -524,7 +528,7 @@ grep -q 'downloading Python' /tmp/reinstall.log && fail "bundled Python download
 for i in $(seq 30); do curl -s -o /dev/null localhost:8090 && break; sleep 1; done
 systemctl is-active --quiet omniacli || fail "service not active after reinstall"
 [ "$(sha256sum /etc/omniacli/omniacli.yaml)" = "$HASH_BEFORE" ] || fail "config changed by reinstall"
-curl -s -b /tmp/cookies-admin localhost:8090/ | grep -q demo || fail "server lost after reinstall (or its session)"
+curl -s -b /tmp/cookies-admin localhost:8090/ | has demo || fail "server lost after reinstall (or its session)"
 
 step "remove and purge"
 apt-get remove -y -qq omniacli >/dev/null 2>&1 || fail "remove"
