@@ -16,7 +16,8 @@
    The list itself is any element with data-list="<id>" holding the items.
    Script (include this file once): OmniaList.attach(root) searches the
    list (every word, any case, as config.matches) and hides the groups left
-   with no item; it keeps each viewer's folded groups in this browser.
+   with no item; it keeps each viewer's folded groups in this browser, and
+   the search of each list in this tab (back on the page, the same filter).
    OmniaList.apply(root): again, after the list was drawn again. #}
 {% macro list_search(id, placeholder, q="") -%}
 <div class="list-search">
@@ -95,7 +96,18 @@ const OmniaList = (function () {
     const input = document.querySelector(`[data-list-search="${root.dataset.list}"]`);
     if (input && !input.dataset.attached) {
       input.dataset.attached = "1";
-      input.addEventListener("input", () => apply(document.querySelector(`[data-list="${root.dataset.list}"]`)));
+      // the search is kept in this tab: back on the page (Cancel or Save of
+      // a form, the crumbs, the menu) the list shows the same filter; a ?q=
+      // of the page fills the field first and wins
+      const key = `omniacli.search.${location.pathname}.${root.dataset.list}`;
+      try {
+        if (input.value) sessionStorage.setItem(key, input.value);
+        else input.value = sessionStorage.getItem(key) || "";
+      } catch (e) { /* no storage */ }
+      input.addEventListener("input", () => {
+        try { sessionStorage.setItem(key, input.value); } catch (e) { /* no storage */ }
+        apply(document.querySelector(`[data-list="${root.dataset.list}"]`));
+      });
     }
     folds(root);
     apply(root);
