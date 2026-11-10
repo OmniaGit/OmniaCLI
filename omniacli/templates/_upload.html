@@ -21,6 +21,8 @@ window.OmniaUpload = window.OmniaUpload || {
       xhr.onload = () => {
         let data = {};
         try { data = JSON.parse(xhr.responseText); } catch (e) { /* the status tells */ }
+        if (window.OmniaLogin && OmniaLogin.isExpired(xhr.status, xhr.getResponseHeader("X-OmniaCLI-Login")))
+          OmniaLogin.expired("POST");
         if (xhr.status < 300) resolve(data);
         else reject(new Error(data.error || data.detail || "Error " + xhr.status));
       };

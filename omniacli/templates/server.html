@@ -246,8 +246,11 @@
   let since = 0;
   async function refresh() {
     let data;
-    try { data = await (await fetch(`{{ prefix }}/api/metrics?server={{ server.name | urlencode }}&since=${since}`)).json(); }
-    catch (e) { return; }
+    try {
+      const resp = await fetch(`{{ prefix }}/api/metrics?server={{ server.name | urlencode }}&since=${since}`);
+      if (!resp.ok) return;  // a refusal (an expired login: OmniaLogin leaves the page)
+      data = await resp.json();
+    } catch (e) { return; }
     for (const panel of panels) {
       const info = data.instances[panel.dataset.key];
       if (!info) continue;

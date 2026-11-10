@@ -10,6 +10,30 @@
 <script>
 // the theme chosen with the header button, before the page paints; none: the system's
 try { const t = localStorage.getItem("omniacli.theme"); if (t) document.documentElement.dataset.theme = t; } catch (e) {}
+// the login expired: every request of the page's scripts (fetch here, the
+// upload widget and the terminals through OmniaLogin) goes to the login form,
+// which comes back to this page. A read goes at once; an action asks first,
+// since what the page holds unsaved is lost (the action is not sent again)
+window.OmniaLogin = window.OmniaLogin || (function () {
+  let leaving = false;
+  function expired(method) {
+    if (leaving) return;
+    const read = !method || ["GET", "HEAD"].includes(method.toUpperCase());
+    if (!read && !confirm("Your login has expired: log in again?\n\nWhat is not saved on this page is lost.")) return;
+    leaving = true;
+    location.assign("/login?next=" + encodeURIComponent(location.pathname + location.search));
+  }
+  // the 401 of a missing login only: a link's or a token's stays the page's
+  const isExpired = (status, header) => status === 401 && header === "required";
+  const plain = window.fetch.bind(window);
+  window.fetch = async function (input, init) {
+    const resp = await plain(input, init);
+    if (isExpired(resp.status, resp.headers.get("X-OmniaCLI-Login")))
+      expired((init && init.method) || (input instanceof Request ? input.method : "GET"));
+    return resp;
+  };
+  return {expired, isExpired};
+})();
 </script>
 <style>
 /* light: the OmniaSolutions colours (www.omniasolutions.website), with

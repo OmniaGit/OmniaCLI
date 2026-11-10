@@ -638,6 +638,29 @@ async def test_login_form_session_and_logout(client, env):
     assert [e["event"] for e in client.app.state.access_log.recent()][:2] == ["logout", "login"]
 
 
+async def test_an_expired_login_goes_to_the_form(client):
+    """The login expired with a page open: its button goes to the form and
+    back to that page, not sent again; its scripts get a marked 401."""
+    client.cookies.clear()
+    origin = {"Origin": f"http://{HOST}", "Accept": "text/html,application/xhtml+xml"}
+    resp = await client.post("/servers/srv/test/stop", headers={
+        **origin, "Referer": f"http://{HOST}/links/other/servers/srv?view=both"})
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/login?next=/links/other/servers/srv%3Fview%3Dboth"
+    # a page of another site, or none: home after the login
+    for referer in ({"Referer": "http://evil.example/x"}, {}):
+        resp = await client.post("/servers/srv/test/stop", headers={**origin, **referer})
+        assert resp.status_code == 303 and resp.headers["location"] == "/login?next=/"
+    # a script's request: JSON, marked as a missing login
+    for resp in (await client.get("/api/jobs?limit=1"),
+                 await client.post("/api/access/users/delete", headers={"Origin": f"http://{HOST}"}, json={}),
+                 await client.get("/servers/srv/test/shell", headers={"Accept": "application/json"})):
+        assert resp.status_code == 401 and resp.headers["x-omniacli-login"] == "required"
+    # a wrong token is no missing login: not marked, no form
+    resp = await client.get("/api/jobs", headers={"Authorization": "Bearer nope", "Accept": "text/html"})
+    assert resp.status_code == 401 and "x-omniacli-login" not in resp.headers
+
+
 async def test_failed_logins_wait(client, monkeypatch):
     for _ in range(5):
         assert (await form_login(client, "dev", "wrong")).status_code == 401

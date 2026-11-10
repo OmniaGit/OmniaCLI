@@ -265,6 +265,9 @@ const OmniaConsole = (function () {
           : ev.code === 1006 ? "Closed: refused or connection lost (login expired? a proxy without WebSocket?)"
           : `Closed (${ev.code})`;
         again.hidden = false;
+        // refused at the handshake: the page itself tells whether the login expired
+        // (as JSON: an expired login answers 401, not the login form)
+        if (ev.code === 1006) fetch(location.href, {headers: {Accept: "application/json"}}).catch(() => null);
       };
     }
     again.onclick = () => { term.reset(); connect(); };

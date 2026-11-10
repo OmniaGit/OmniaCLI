@@ -276,6 +276,18 @@ async def _audit_target(request: Request) -> str:
     return "".join(f" {key}={body[key]}" for key in _AUDIT_FIELDS if isinstance(body.get(key), (str, int)))
 
 
+# on the 401 of a browser without a session (not on a link's or a token's)
+_LOGIN_HEADER = "X-OmniaCLI-Login"
+
+
+def _referer_path(request: Request) -> str:
+    """The page of this site a request was sent from, "/" otherwise."""
+    referer = urlsplit(request.headers.get("referer", ""))
+    if referer.netloc != request.headers.get("host"):
+        return "/"
+    return _next_path(referer.path + (f"?{referer.query}" if referer.query else ""))
+
+
 def _next_path(value: str) -> str:
     """Where to go after the login: a path of this site only, never another site."""
     value = value or "/"
@@ -389,7 +401,8 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         # a browser: the session of the login form
         name = sessions.user(request.cookies.get(COOKIE), settings.users)
         if name is None:
-            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Login required")
+            # marked, so the pages' scripts tell it from a link's or a token's 401
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Login required", headers={_LOGIN_HEADER: "required"})
         if method not in ("GET", "HEAD") and not _same_origin(request):
             raise HTTPException(status.HTTP_403_FORBIDDEN, "Cross-site request refused")
         role = settings.user_role(name)
@@ -585,11 +598,16 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
 
     @app.exception_handler(StarletteHTTPException)
     async def to_login(request: Request, exc: StarletteHTTPException):
-        """A browser without a session opening a page goes to the login form."""
-        if (exc.status_code == 401 and request.method == "GET"
+        """A browser without a session goes to the login form: a page it opens
+        comes back after it; a form it sends (a button: Stop, Start, ...) is not
+        sent again, the login goes back to the page the form was on."""
+        if (exc.status_code == 401 and (exc.headers or {}).get(_LOGIN_HEADER)
                 and "text/html" in request.headers.get("accept", "")
                 and not request.headers.get("authorization")):
-            target = request.url.path + (f"?{request.url.query}" if request.url.query else "")
+            if request.method == "GET":
+                target = request.url.path + (f"?{request.url.query}" if request.url.query else "")
+            else:
+                target = _referer_path(request)
             return RedirectResponse(f"/login?next={quote(target)}", status.HTTP_303_SEE_OTHER)
         return await http_exception_handler(request, exc)
 
