@@ -1,0 +1,109 @@
+{# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C · SPDX-License-Identifier: AGPL-3.0-or-later -#}
+{# Git pull: drawn once on the server page, it opens for the buttons
+   data-pull (url, title, key, rows of {name, label}, preview, note) and
+   lists the instance's repositories (and its package) with the commits not
+   yet pulled, from a git fetch (the preview). "Pull selected" posts the
+   ticked ones (repo fields, chosen=1); "Pull all" posts without chosen:
+   every repository and the package, as before the dialog. -#}
+{% from "_icons.html" import icon %}
+<dialog id="pull-dialog">
+  <form method="post" id="pull-form">
+    <h2 id="pull-title" style="margin-bottom: 4px"></h2>
+    <p class="muted" id="pull-sub" style="margin-top: 0">Ticked: the repositories with new commits.</p>
+    <label style="display: block; margin-bottom: 4px"><input type="checkbox" id="pull-all-box"> <strong>Select all</strong></label>
+    <div id="pull-rows" style="max-height: 45vh; overflow-y: auto"></div>
+    <p class="muted" id="pull-note" hidden style="white-space: pre-line"></p>
+    <p class="error" id="pull-error"></p>
+    <div class="actions">
+      <button type="submit" name="chosen" value="1" id="pull-selected">{{ icon("github") }}Pull selected</button>
+      <button type="submit" id="pull-every">{{ icon("github") }}Pull all</button>
+      <button type="button" id="pull-cancel">Cancel</button>
+    </div>
+  </form>
+</dialog>
+<script>
+(function () {
+  const dialog = document.getElementById("pull-dialog");
+  const form = document.getElementById("pull-form");
+  const rowsBox = document.getElementById("pull-rows");
+  const allBox = document.getElementById("pull-all-box");
+  const selected = document.getElementById("pull-selected");
+  const errorBox = document.getElementById("pull-error");
+  let opened = 0;  // a preview that answers after the dialog was opened again is dropped
+
+  const boxes = () => [...rowsBox.querySelectorAll("input[name=repo]")];
+  function sync() {
+    const all = boxes(), ticked = all.filter((b) => b.checked).length;
+    allBox.checked = all.length > 0 && ticked === all.length;
+    allBox.indeterminate = ticked > 0 && ticked < all.length;
+    selected.disabled = ticked === 0;
+  }
+  allBox.onchange = () => { for (const b of boxes()) b.checked = allBox.checked; sync(); };
+  rowsBox.onchange = sync;
+  document.getElementById("pull-cancel").onclick = () => dialog.close();
+  form.addEventListener("submit", (event) => {
+    const every = event.submitter && event.submitter.id === "pull-every";
+    if (!every && !boxes().some((b) => b.checked)) { event.preventDefault(); return; }
+    selected.disabled = true;
+    document.getElementById("pull-every").disabled = true;
+  });
+
+  function drawRow(row) {
+    const label = document.createElement("label");
+    label.style.display = "block";
+    const box = document.createElement("input");
+    box.type = "checkbox"; box.name = "repo"; box.value = row.name;
+    const name = document.createElement("span");
+    name.className = "mono"; name.textContent = " " + row.label;
+    const state = document.createElement("span");
+    state.className = "muted"; state.dataset.state = row.name; state.textContent = " · checking…";
+    label.append(box, name, state);
+    rowsBox.append(label);
+  }
+
+  function showPreview(rows) {
+    for (const row of rows) {
+      const state = rowsBox.querySelector(`[data-state="${CSS.escape(row.name)}"]`);
+      const box = boxes().find((b) => b.value === row.name);
+      if (!state || !box) continue;
+      const where = row.branch ? ` ${row.remote}/${row.branch}` : "";
+      if (row.error) {
+        state.className = "error"; state.textContent = `${where} · ${row.error}`;
+      } else if (row.pending) {
+        state.className = ""; box.checked = true;
+        state.textContent = row.name.startsWith(":")
+          ? " · a new version is published" : `${where} · ${row.pending} new commit${row.pending === 1 ? "" : "s"}`;
+      } else {
+        state.className = "muted"; state.textContent = `${where} · up to date`;
+      }
+    }
+    sync();
+  }
+
+  for (const button of document.querySelectorAll("[data-pull]")) {
+    button.onclick = async () => {
+      const target = JSON.parse(button.dataset.pull);
+      const mine = ++opened;
+      form.action = target.url;
+      document.getElementById("pull-title").textContent = target.title;
+      const note = document.getElementById("pull-note");
+      note.textContent = target.note || ""; note.hidden = !target.note;
+      errorBox.textContent = "";
+      rowsBox.replaceChildren();
+      for (const row of target.rows) drawRow(row);
+      document.getElementById("pull-every").disabled = false;
+      sync();
+      dialog.showModal();
+      const resp = await fetch(target.preview, {headers: {Accept: "application/json"}}).catch(() => null);
+      if (mine !== opened) return;
+      const data = resp && resp.ok ? await resp.json().catch(() => null) : null;
+      if (!data) {
+        errorBox.textContent = "The remotes could not be checked: tick the repositories by hand, or Pull all.";
+        for (const s of rowsBox.querySelectorAll("[data-state]")) s.textContent = "";
+        return;
+      }
+      showPreview(data.rows);
+    };
+  }
+})();
+</script>

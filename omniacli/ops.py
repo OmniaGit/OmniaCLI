@@ -262,12 +262,24 @@ async def update_submodules(job: Job, repo: Repository, check: bool = True) -> N
                         "it records") from exc
 
 
-async def pull(job: Job, instance: Instance) -> bool:
+# the choice of the package among the repositories (a repository named so would be taken for it)
+PACKAGE_CHOICE = ":package"
+
+
+async def pull(job: Job, instance: Instance, only: set[str] | None = None) -> bool:
     """Fast-forward every repository of the instance and its submodules,
     then install its package if a new one is published (packages.py).
+    only: the names of the repositories to pull (PACKAGE_CHOICE among them:
+    the package too); None: all of them and the package.
     Return True if any repository moved or the package was installed."""
     changed = False
+    if only is not None:
+        skipped = [r.name for r in instance.repositories if r.name not in only]
+        if skipped:
+            job.log(f"not pulled (not chosen): {', '.join(skipped)}")
     for repo in instance.repositories:
+        if only is not None and repo.name not in only:
+            continue
         job.log(f"--- [{repo.name}] pull {repo.remote}/{repo.branch}")
         await ensure_ready(job, repo, keep_changes=instance.keeps_local_changes)
         before = await git(repo, "rev-parse", "HEAD")
@@ -279,9 +291,42 @@ async def pull(job: Job, instance: Instance) -> bool:
             job.log(await git(repo, "log", "--oneline", f"{before}..{after}"))
         else:
             job.log(f"[{repo.name}] already up to date")
-    if instance.package is not None and await packages.update(job, instance):
+    if instance.package is not None and (only is None or PACKAGE_CHOICE in only) \
+            and await packages.update(job, instance):
         changed = True
     return changed
+
+
+async def pull_preview(instance: Instance, timeout: float = 60) -> list[dict]:
+    """What a pull would bring, for the choice before it: per repository its
+    branch and the commits not yet pulled (a fetch, in parallel), or the
+    error; then the package, when the instance has one."""
+    async def one(repo: Repository) -> dict:
+        row = {"name": repo.name, "label": repo.name, "branch": repo.branch, "remote": repo.remote,
+               "pending": None, "error": None}
+        if not repo.path.is_dir():
+            row["error"] = f"{repo.path} does not exist"
+            return row
+        code, out = await capture(repo.git("fetch", repo.remote, repo.branch), cwd=repo.path, timeout=timeout)
+        if code:
+            row["error"] = f"git fetch failed: {out.splitlines()[-1] if out else code}"
+            return row
+        code, out = await capture(["git", "rev-list", "--count", "HEAD..FETCH_HEAD"], cwd=repo.path)
+        if code:
+            row["error"] = f"git rev-list failed: {out}"
+        else:
+            row["pending"] = int(out)
+        return row
+
+    rows = list(await asyncio.gather(*(one(r) for r in instance.repositories)))
+    if instance.package is not None:
+        row = {"name": PACKAGE_CHOICE, "label": f"package {instance.package.name}", "pending": None, "error": None}
+        try:
+            row["pending"] = len(await packages.pending(instance))
+        except Exception as exc:  # a download site that cannot be reached: said, not fatal
+            row["error"] = str(exc) or type(exc).__name__
+        rows.append(row)
+    return rows
 
 
 async def pending_updates(instance: Instance) -> dict[str, int]:
@@ -591,8 +636,9 @@ async def backup(job: Job, instance: Instance, backup_dir: Path, options: dict |
     return await instance.plugin.backup(job, instance, dest_dir, options)
 
 
-async def pull_restart(job: Job, instance: Instance, only_if_changed: bool = False) -> None:
-    changed = await pull(job, instance)
+async def pull_restart(job: Job, instance: Instance, only_if_changed: bool = False,
+                       only: set[str] | None = None) -> None:
+    changed = await pull(job, instance, only)
     if only_if_changed and not changed:
         job.log("Nothing new to deploy")
         return

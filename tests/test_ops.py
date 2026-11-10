@@ -436,7 +436,7 @@ async def test_process_stop(tmp_path, monkeypatch):
     assert ops.managed_pid(instance) is None and not group_alive(instance, pid)
 
     # the auto update leaves a stopped Odoo stopped, a manual pull + restart starts it
-    async def pulled(job, instance):
+    async def pulled(job, instance, only=None):
         return True
 
     async def no_update(job, instance, force=False):
@@ -601,3 +601,30 @@ async def test_crons_not_switched_off_fail_the_update(env):
         '#!/bin/sh\ncase "$*" in *" before") echo OMNIACLI_ACTIVE_CRONS=1; exit 0;; esac\necho locked; exit 1\n')
     with pytest.raises(JobFailed, match="could not be switched off"):
         await odoo_ops.update_modules(job(), test)
+
+
+async def test_pull_only_the_chosen_repositories(env):
+    """The pull dialog's choice: only the ticked repositories move; the
+    preview counts what each would bring."""
+    test = env["settings"].instance("srv", "test")
+    odoo_sha = push_change(env, "odoo", "test", "only_a.txt")
+    addons_before = head(test.repository("addons").path)
+    push_change(env, "addons", "test", "only_b.txt")
+    rows = {r["name"]: r for r in await ops.pull_preview(test)}
+    assert rows["odoo"]["pending"] == 1 and rows["addons"]["pending"] == 1
+    assert rows["odoo"]["branch"] == "test" and rows["odoo"]["error"] is None
+    j = job()
+    assert await ops.pull(j, test, only={"odoo"})
+    assert head(test.repository("odoo").path) == odoo_sha
+    assert head(test.repository("addons").path) == addons_before
+    assert "not pulled (not chosen): addons" in "\n".join(j.lines)
+    rows = {r["name"]: r for r in await ops.pull_preview(test)}
+    assert rows["odoo"]["pending"] == 0 and rows["addons"]["pending"] == 1
+
+
+async def test_pull_preview_says_a_missing_copy(env):
+    test = env["settings"].instance("srv", "test")
+    sh("rm", "-rf", str(test.repository("addons").path))
+    rows = {r["name"]: r for r in await ops.pull_preview(test)}
+    assert rows["addons"]["pending"] is None and "does not exist" in rows["addons"]["error"]
+    assert rows["odoo"]["pending"] == 0

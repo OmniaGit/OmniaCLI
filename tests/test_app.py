@@ -1059,7 +1059,8 @@ async def test_link_serves_prefixed_pages_and_acts(client, env):
     link = {"Authorization": f"Bearer {LINK_TOKEN}", "X-OmniaCLI-Prefix": "/links/cliente",
             "X-OmniaCLI-User": "devuser"}
     page = (await client.get("/servers/srv?view=both", headers=link)).text
-    assert 'action="/links/cliente/servers/srv/test/pull"' in page
+    # two repositories: the pull dialog's button carries the prefixed URL
+    assert '"url": "/links/cliente/servers/srv/test/pull"' in page
     assert 'href="/links/cliente/jobs?server=srv"' in page and 'data-log="/links/cliente/api/' in page
     assert 'href="/servers/' not in page and 'action="/servers/' not in page
     # no Origin: no browser sends the link token by itself
@@ -1082,7 +1083,7 @@ async def test_link_serves_prefixed_pages_and_acts(client, env):
     # a prefix or user that is not a plain path or name is ignored
     bad = {**link, "X-OmniaCLI-Prefix": "//evil.example/x\"onload=\"", "X-OmniaCLI-User": "a b<c>"}
     page = (await client.get("/servers/srv?view=both", headers=bad)).text
-    assert 'action="/servers/srv/test/pull"' in page and "evil" not in page
+    assert '"url": "/servers/srv/test/pull"' in page and "evil" not in page
     resp = await client.post("/servers/srv/test/pull", headers=bad)
     data = await wait_job(client, resp.headers["location"].rsplit("/", 1)[1])
     assert data["source"] == "manual: link omnia"
@@ -1408,9 +1409,9 @@ async def test_package_update_is_confirmed_with_its_scripts_named(client, env):
     page = (await client.get("/servers/srv?view=test", headers={"Authorization": AUTH})).text
     warning = ("A new api-server is installed with its own scripts: they may stop and start "
                "the service odoo-test by themselves, also if it is stopped now.")
-    # in both confirms, as JSON in the onsubmit attribute
+    # two repositories and the package: in both buttons of the pull dialog, as its note
     assert page.count(warning) == 2
-    assert 'return confirm("Git pull srv/test?\\n\\n' + warning in page
+    assert '"note": "' + warning in page and '"label": "package api-server"' in page
     assert "its own scripts may stop and start odoo-test during an update, also a stopped one" in page
     # the Dashboard and the Servers page with such an instance
     for path in ("/", "/dashboard/servers", "/config"):
@@ -1477,3 +1478,38 @@ async def test_the_shares_of_the_machine(env, tmp_path, monkeypatch):
     clock[0], pg[0] = 120.0, None
     await sampler.sample()
     assert sampler.machine[-1]["pg"] is None and set(sampler.machine[-1]["instances"]) == {"srv/production", "srv/test"}
+
+
+async def test_pull_dialog_chooses_the_repositories(client, env):
+    """Two repositories: the buttons open the pull dialog; Pull selected
+    posts the ticked ones, Pull all (or no body) pulls every one."""
+    page = (await client.get("/servers/srv?view=test", headers={"Authorization": AUTH})).text
+    assert 'id="pull-dialog"' in page and '"url": "/servers/srv/test/pull-restart"' in page
+    assert 'action="/servers/srv/test/pull"' not in page
+    test = env["settings"].instance("srv", "test")
+    work = clone(env["remotes"]["addons"], env["tmp"] / "dev_addons_dialog", "test")
+    commit(work, "dialog.txt", "x\n", "change dialog.txt")
+    sh("git", "push", "-q", "origin", "HEAD:test", cwd=work)
+    resp = await client.get("/api/servers/srv/test/pull-preview", headers={"Authorization": AUTH})
+    rows = {r["name"]: r["pending"] for r in resp.json()["rows"]}
+    assert rows == {"odoo": 0, "addons": 1}
+    # nothing ticked, or a repository it has not: refused
+    form = {**POST, "Content-Type": "application/x-www-form-urlencoded"}
+    assert (await client.post("/servers/srv/test/pull", headers=form, content="chosen=1")).status_code == 400
+    assert (await client.post("/servers/srv/test/pull", headers=form,
+                              content="chosen=1&repo=nope")).status_code == 400
+    resp = await client.post("/servers/srv/test/pull", headers=form, content="chosen=1&repo=odoo")
+    data = await wait_job(client, resp.headers["location"].rsplit("/", 1)[1])
+    assert data["status"] == "success" and data["title"] == "Git pull srv/test (odoo)"
+    resp = await client.get("/api/servers/srv/test/pull-preview", headers={"Authorization": AUTH})
+    assert {r["name"]: r["pending"] for r in resp.json()["rows"]} == {"odoo": 0, "addons": 1}
+    # Pull all: the repo fields without chosen
+    resp = await client.post("/servers/srv/test/pull", headers=form, content="repo=odoo")
+    data = await wait_job(client, resp.headers["location"].rsplit("/", 1)[1])
+    assert data["status"] == "success" and data["title"] == "Git pull srv/test"
+    resp = await client.get("/api/servers/srv/test/pull-preview", headers={"Authorization": AUTH})
+    assert {r["name"]: r["pending"] for r in resp.json()["rows"]} == {"odoo": 0, "addons": 0}
+    # a viewer may not
+    viewer = "Basic " + base64.b64encode(f"viewer:{PASSWORD}".encode()).decode()
+    assert (await client.get("/api/servers/srv/test/pull-preview",
+                             headers={"Authorization": viewer})).status_code == 403

@@ -88,12 +88,20 @@
       {% set package_note = ("\n\nA new " ~ inst.package.name ~ " is installed with its own scripts: they may stop and "
                              "start the service " ~ inst.restart.service ~ " by themselves, also if it is stopped now.")
                             if inst.package else "" %}
+      {% if pull_choices[inst.key] %}
+      {# more than one thing to pull: the pull dialog chooses which (_pull_dialog.html) #}
+      <button type="button" {{ off }} data-pull='{{ dict(pull_choices[inst.key], url=base ~ "/pull", title=pull_label ~ " " ~ inst.key, note=package_note | trim) | tojson }}'
+              title="Choose the repositories to pull">{{ icon("github") }}{{ pull_label }}</button>
+      <button type="button" {{ off }} data-pull='{{ dict(pull_choices[inst.key], url=base ~ "/pull-restart", title="Pull, deploy and restart " ~ inst.key, note=package_note | trim) | tojson }}'
+              title="Choose the repositories to pull, then deploy and restart">{{ icon("github") }}{{ pull_label }} + restart</button>
+      {% else %}
       <form method="post" action="{{ base }}/pull"
             {% if inst.package %}onsubmit='return confirm({{ (pull_label ~ " " ~ inst.key ~ "?" ~ package_note) | tojson }})'{% endif %}>
         <button {{ off }}{% if inst.package %} title="Also installs the package {{ inst.package.name }} when a newer signed version is published"{% endif %}>{{ icon("github") }}{{ pull_label }}</button></form>
       <form method="post" action="{{ base }}/pull-restart"
             onsubmit='return confirm({{ ("Pull, deploy and restart " ~ inst.key ~ "?" ~ package_note) | tojson }})'>
         <button {{ off }}>{{ icon("github") }}{{ pull_label }} + restart</button></form>
+      {% endif %}
       {% endif %}
       {% for b in buttons[inst.key].git %}{{ action_button(b, off) }}{% endfor %}
       </div>
@@ -235,7 +243,7 @@
 
 {% for dialog in dialogs %}{% include dialog %}{% endfor %}
 {% if from_link %}{% include "_from_link_dialog.html" %}{% endif %}
-{% if can_act %}{% include "_backup_dialog.html" %}{% endif %}
+{% if can_act %}{% include "_backup_dialog.html" %}{% include "_pull_dialog.html" %}{% endif %}
 {% if restore_file %}{% include "_restore_dialog.html" %}{% endif %}
 {% include "_charts.html" %}
 {{ console_script() }}

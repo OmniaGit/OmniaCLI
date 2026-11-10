@@ -182,6 +182,7 @@ WORKSPACE_ROUTES = frozenset({
     "/jobs", "/jobs/{job_id}", "/jobs/{job_id}/stop", "/api/jobs", "/api/jobs/{job_id}",
     "/servers/{server}", "/servers/{server}/merge", "/servers/{server}/x/{plugin}/{action}",
     "/servers/{server}/{role}/pull", "/servers/{server}/{role}/pull-restart",
+    "/api/servers/{server}/{role}/pull-preview",
     "/servers/{server}/{role}/restart", "/servers/{server}/{role}/start", "/servers/{server}/{role}/stop",
     "/servers/{server}/{role}/backup", "/api/servers/{server}/{role}/backups",
     "/backups/{server}/{role}/{name}", "/servers/{server}/{role}/x/{plugin}/{action}",
@@ -872,11 +873,22 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
                     "upload": f"{prefix_of(request)}/api/servers/{srv.name}/{i.role}/backups/upload",
                     "backups": f"{prefix_of(request)}/api/servers/{srv.name}/{i.role}/backups",
                     "database": str(i.plugin.describe(i).get("database") or i.key) if i.role == "production" else ""}
+        # Git pull: with more than one thing to pull, the dialog chooses which
+        pull_choices = {}
+        for i in shown:
+            rows = [{"name": r.name, "label": r.name} for r in i.repositories]
+            if i.package is not None:
+                rows.append({"name": ops.PACKAGE_CHOICE, "label": f"package {i.package.name}"})
+            if len(rows) > 1:
+                pull_choices[i.key] = {
+                    "key": i.key, "rows": rows,
+                    "preview": f"{prefix_of(request)}/api/servers/{srv.name}/{i.role}/pull-preview"}
         return _TEMPLATES.TemplateResponse(
             request,
             "server.html",
             {
                 "from_link": from_link,
+                "pull_choices": pull_choices,
                 "restore_file": restore_file,
                 "restore_fields": [_field_dict(f) for f in plugin.restore_fields()] if plugin else [],
                 "backup_fields": [_field_dict(f) for f in plugin.backup_fields()] if plugin else [],
@@ -979,29 +991,63 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         """The history of this machine's disks, and when each will be full."""
         return _TEMPLATES.TemplateResponse(request, "disks.html", {})
 
+    async def pull_choice(request: Request, instance: Instance) -> set[str] | None:
+        """The repositories chosen in the pull dialog (fields repo, with
+        chosen=1); None: all of them and the package (Pull all, a post with
+        no body)."""
+        form = parse_qs((await request.body()).decode("utf-8", "replace"))
+        if (form.get("chosen") or [""])[-1] != "1":
+            return None
+        known = {r.name for r in instance.repositories} | (
+            {ops.PACKAGE_CHOICE} if instance.package is not None else set())
+        only = set(form.get("repo") or [])
+        unknown = sorted(only - known)
+        if unknown:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                                f"{instance.key} has no repository {', '.join(unknown)}")
+        if not only:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Choose at least one repository")
+        return only
+
+    def pull_title(what: str, instance: Instance, only: set[str] | None) -> str:
+        if only is None:
+            return f"{what} {instance.key}"
+        names = [r.name for r in instance.repositories if r.name in only]
+        if ops.PACKAGE_CHOICE in only:
+            names.append(f"package {instance.package.name}")
+        return f"{what} {instance.key} ({', '.join(names)})"
+
+    @app.get("/api/servers/{server}/{role}/pull-preview")
+    async def pull_preview(server: str, role: str, user: Principal = Depends(developer)):
+        """The pull dialog's list: each repository with the commits not yet
+        pulled (a git fetch), and the package."""
+        return {"rows": await ops.pull_preview(get_instance(server, role))}
+
     @app.post("/servers/{server}/{role}/pull")
     async def action_pull(request: Request, server: str, role: str, user: Principal = Depends(developer)):
         instance = get_instance(server, role)
+        only = await pull_choice(request, instance)
         return started(
             request,
             jobs.submit(
-                f"Git pull {instance.key}",
+                pull_title("Git pull", instance, only),
                 [instance.key],
                 f"manual: {user}",
-                lambda job: ops.pull(job, instance),
+                lambda job: ops.pull(job, instance, only),
             )
         )
 
     @app.post("/servers/{server}/{role}/pull-restart")
     async def action_pull_restart(request: Request, server: str, role: str, user: Principal = Depends(developer)):
         instance = get_instance(server, role)
+        only = await pull_choice(request, instance)
         return started(
             request,
             jobs.submit(
-                f"Git pull and restart {instance.key}",
+                pull_title("Git pull and restart", instance, only),
                 [instance.key],
                 f"manual: {user}",
-                lambda job: ops.pull_restart(job, instance),
+                lambda job: ops.pull_restart(job, instance, only=only),
             )
         )
 

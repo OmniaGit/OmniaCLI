@@ -115,7 +115,8 @@ async def test_proxied_pages_and_actions(mine):
     assert resp.status_code == 307 and resp.headers["location"] == "/links/cliente/"
     page = (await mine.get("/links/cliente/servers/srv?view=both", headers=as_user("admin"))).text
     assert "Linked instance <strong>cliente</strong>" in page
-    assert 'action="/links/cliente/servers/srv/test/pull"' in page
+    # two repositories: the pull dialog's button carries the prefixed URL
+    assert '"url": "/links/cliente/servers/srv/test/pull"' in page
     # the link is a developer there: no merge even for an admin here
     assert "Merge test to production" not in page
 

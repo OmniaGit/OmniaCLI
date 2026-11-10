@@ -278,6 +278,10 @@ fields.</p>
     <span class="mono">git pull --ff-only &lt;remote&gt; &lt;branch&gt;</span>, and it is refused when the working copy is
     on another branch.</td></tr>
 </table>
+<p>With more than one repository (or a package), <strong>Git pull</strong> and <strong>Git pull + restart</strong> open a
+dialog that lists them with the commits each would bring (a <span class="mono">git fetch</span>), ticked when there are
+some: <strong>Pull selected</strong> pulls the ticked ones, <strong>Pull all</strong> every one. The auto update, the
+schedules and <span class="mono">update_test</span> always pull every repository.</p>
 <p>A working copy with uncommitted changes is refused by a pull, except on a <strong>test instance without auto
 update</strong>: there someone may be working, so the changes are kept (and git refuses to overwrite them).</p>
 
