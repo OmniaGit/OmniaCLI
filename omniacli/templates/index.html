@@ -38,13 +38,17 @@
   </div>
 </div>
 {% endif %}
+{# one search for Servers and Linked, under this machine's row: what you
+   come to the Dashboard for is a server or a link to work on; it opens a
+   folded section, or group, that holds a match (_list.html) #}
+{% set searched = "servers linked" if machine and machine_links else "servers" %}
+{% if total + (machine_links | length if machine else 0) > 1 or q %}{{ list_search(searched, "Search server, linked instance, workspace, group, database, branch…", q) }}{% endif %}
 <section class="fold" data-fold="servers">
 <div class="fold-head">
   <h1><button type="button" class="fold-toggle" aria-expanded="true"><span class="fold-icon" aria-hidden="true">▾</span>Servers</button></h1>
   {% if is_admin and not prefix %}<a class="button" href="/groups">Edit groups</a>{% endif %}
 </div>
 <div class="fold-body"><div class="fold-inner">
-{% if total > 1 or q %}{{ list_search("servers", "Search server, workspace, group, database, repository, branch…", q) }}{% endif %}
 <div id="server-sections" data-list="servers">
 {% include "_servers_part.html" %}
 </div>
@@ -81,7 +85,6 @@
 </table>
 </div></div>
 {% endmacro %}
-{% if machine_links | length > 1 %}{{ list_search("linked", "Search linked instance, address, group…") }}{% endif %}
 <div id="linked" data-list="linked">{{ grouped(linked_sections, linked_table, "linked") }}</div>
 </div></div>
 </section>
@@ -139,12 +142,20 @@
       body.inert = !open;
     };
     try { if (localStorage.getItem(key) === "closed") set(false); } catch (e) { /* no storage */ }
+    // the Dashboard's search opens a folded section that holds a match while
+    // it lasts (data-revealed), and folds it again after; not kept
+    fold.addEventListener("omnialist:shown", (event) => {
+      const {searching, shown} = event.detail;
+      if (searching && shown && fold.classList.contains("closed")) { fold.dataset.revealed = "1"; set(true); }
+      else if ((!searching || !shown) && fold.dataset.revealed) { delete fold.dataset.revealed; set(false); }
+    });
     const summary = fold.querySelector(".fold-summary");
     if (summary) summary.addEventListener("click", () => button.click());
     // no animation on load, only on a click
     requestAnimationFrame(() => fold.classList.add("animated"));
     button.addEventListener("click", () => {
       const open = fold.classList.contains("closed");
+      delete fold.dataset.revealed;
       set(open);
       try { localStorage.setItem(key, open ? "open" : "closed"); } catch (e) { /* no storage */ }
     });

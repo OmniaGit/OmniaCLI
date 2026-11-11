@@ -102,7 +102,10 @@ async def test_the_dashboard_shows_the_links_in_linked(mine):
         assert f'<span class="machine-row" data-link="{link}">' in page
     assert page.count('class="load-cpu"') >= 3 and page.count('class="load-net"') == 3
     # the linked rows are searched as every list (_list.html)
-    assert 'data-list-search="linked"' in page and 'id="linked" data-list="linked"' in page
+    # one search, under this machine's row, for Servers and Linked together
+    assert 'data-list-search="servers linked"' in page and 'id="linked" data-list="linked"' in page
+    assert page.index('data-link=""') < page.index('data-list-search="servers linked"') < page.index('data-fold="servers"')
+    assert 'data-list-search="servers"' not in page and 'data-list-search="linked"' not in page
     page = (await mine.get("/dashboard/servers", headers=as_user("admin"))).text
     assert "cliente" not in page and "down" not in page
     # tokens do not see the links
