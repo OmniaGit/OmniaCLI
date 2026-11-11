@@ -762,7 +762,9 @@ async def test_dashboard_follows_jobs(client, env):
     assert set(job) == {"id", "title", "status", "instances", "servers", "source", "created", "finished", "duration", "error"}
     assert data["busy"] == []
     page = (await client.get("/", headers={"Authorization": AUTH})).text
-    assert f'<tr data-job="{job_id}">' in page
+    # each job row names its servers, each server row its server: the
+    # Dashboard's search shows the jobs of the servers it finds
+    assert f'<tr data-job="{job_id}" data-servers="srv">' in page and 'data-server="srv"' in page
 
 
 async def test_start_stop_go_back_to_the_page(client, env):

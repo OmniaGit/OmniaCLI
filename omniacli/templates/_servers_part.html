@@ -11,7 +11,7 @@
   <table class="server-rows">
     <tr><th>Server</th><th>Workspace</th><th>Odoo, CPU of the last 15 minutes</th></tr>
     {% for row in rows %}
-    <tr {{ item(row.text) }}>
+    <tr {{ item(row.text) }} data-server="{{ row.name }}">
       <td><div class="server-name"><a href="{{ row.base }}/servers/{{ row.name }}"><strong>{{ row.label }}</strong></a>
         <span class="view-buttons">
           {# the instance itself, at its domain or on localhost, in a new tab;

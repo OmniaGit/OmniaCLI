@@ -225,12 +225,41 @@
       } catch (e) { /* the next change tries again */ }
     }, 300);
   }
+  // The Dashboard's search filters Last jobs by their Server column: only
+  // the jobs of the servers it leaves in Servers (none found: no job); the
+  // jobs section opens while it shows some, as Servers and Linked do
+  function filterJobs() {
+    const table = document.querySelector("#last-jobs table");
+    const input = document.querySelector('[data-list-search~="servers"]');
+    if (!table) return;
+    const searching = !!input && input.value.trim() !== "";
+    const found = new Set([...document.querySelectorAll("#server-sections tr[data-server]:not([hidden])")].map((tr) => tr.dataset.server));
+    let shown = 0;
+    for (const tr of table.querySelectorAll("tr[data-job]")) {
+      tr.hidden = searching && !tr.dataset.servers.split(" ").some((name) => found.has(name));
+      if (!tr.hidden) shown++;
+    }
+    let none = document.getElementById("last-jobs-none");
+    if (searching && !shown) {
+      if (!none) {
+        none = text("p", "muted list-empty", "No job of these servers among the last ones.");
+        none.id = "last-jobs-none";
+        table.closest("#last-jobs").after(none);
+      }
+    } else if (none) none.remove();
+    table.closest("#last-jobs").dispatchEvent(new CustomEvent("omnialist:shown", {bubbles: true, detail: {searching, shown}}));
+  }
+  document.addEventListener("omnialist:shown", (event) => {
+    if (event.target.id === "server-sections") filterJobs();
+  });
   const polled = new Set();  // the sources polled once: their first answer only sets seen
   for (const tr of document.querySelectorAll("#last-jobs tr[data-job]")) {
     seen["|" + tr.dataset.job] = tr.querySelector(".job-status").textContent.trim();
   }
   polled.add("");
   const text = (tag, cls, value) => { const el = document.createElement(tag); if (cls) el.className = cls; el.textContent = value || ""; return el; };
+  // the search the page came back with (kept in this tab) filters the jobs too
+  filterJobs();
 
   function statusCell(td, status) {
     td.className = "status " + status + " job-status";
@@ -241,6 +270,7 @@
   function tableRow(job) {
     const tr = document.createElement("tr");
     tr.dataset.job = job.id;
+    tr.dataset.servers = job.servers.join(" ");
     const a = text("a", "", job.title); a.href = "{{ prefix }}/jobs/" + job.id;
     tr.insertCell().appendChild(a);
     const servers = tr.insertCell();
@@ -270,6 +300,7 @@
         tr = tableRow(job);
         table.rows[0].after(tr);
         if (table.querySelectorAll("tr[data-job]").length > 10) table.querySelector("tr[data-job]:last-of-type").remove();
+        filterJobs();
       }
       const st = tr.querySelector(".job-status");
       if (st.textContent.trim() !== job.status) statusCell(st, job.status);
