@@ -153,9 +153,7 @@ async def _instance_checks(instance: Instance, machine: str = MACHINE_SERVER) ->
         own = ops.managed_pid(instance)
         others = ops.foreign_pids(instance, own)
         if others:
-            add(f"{label} process", False,
-                f"running with {config} but not started by OmniaCLI "
-                f"(pid {', '.join(map(str, others))}): Restart refuses to start a second one")
+            add(f"{label} process", False, ops.foreign_problem(instance, others))
         elif own is not None:
             add(f"{label} process", True, f"started by OmniaCLI, pid {own}")
         else:

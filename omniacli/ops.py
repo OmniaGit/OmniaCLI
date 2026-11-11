@@ -536,6 +536,60 @@ def foreign_pids(instance: Instance, own: int | None) -> list[int]:
     return [p for p in _config_pids(instance) if own is None or _pgid(p) != own]
 
 
+def _process_facts(pid: int) -> dict:
+    """What /proc tells of a process: its user, when it started and what
+    started it (None where it cannot be read)."""
+    facts = {"pid": pid, "user": None, "since": None, "parent": None, "detached": False}
+    try:
+        import pwd
+
+        facts["user"] = pwd.getpwuid(os.stat(f"/proc/{pid}").st_uid).pw_name
+    except (OSError, KeyError, ImportError):
+        pass
+    try:
+        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+        ppid, ticks = int(fields[1]), int(fields[19])
+        boot = next(int(line.split()[1]) for line in Path("/proc/stat").read_text().splitlines()
+                    if line.startswith("btime "))
+        facts["since"] = datetime.datetime.fromtimestamp(boot + ticks / os.sysconf("SC_CLK_TCK"))
+        if ppid == 1:
+            facts["detached"] = True
+        else:
+            parent = Path(f"/proc/{ppid}/comm").read_text().strip()
+            # a user's systemd takes the processes whose starter ended
+            facts["detached"] = parent == "systemd"
+            facts["parent"] = None if facts["detached"] else f"{parent} (pid {ppid})"
+    except (OSError, ValueError, IndexError, StopIteration):
+        pass
+    return facts
+
+
+def foreign_problem(instance: Instance, pids: list[int]) -> str:
+    """Why OmniaCLI does not start the instance while processes it did not
+    start run with its config, which they are, and what to do to go on."""
+    described = []
+    users = set()
+    for pid in pids:
+        f = _process_facts(pid)
+        parts = []
+        if f["user"]:
+            parts.append(f"user {f['user']}")
+            users.add(f["user"])
+        if f["since"]:
+            parts.append(f"since {f['since']:%Y-%m-%d %H:%M}")
+        if f["detached"]:
+            parts.append("left running after what started it ended (nohup, setsid or a closed terminal)")
+        elif f["parent"]:
+            parts.append(f"started by {f['parent']}")
+        described.append(", ".join([f"pid {pid}", *parts]))
+    kill = f"kill {' '.join(map(str, pids))}"
+    who = f" as {' or '.join(sorted(users))}" if users else ""
+    return (f"{_label(instance)} is already running with {_config(instance)}, but OmniaCLI did not start "
+            f"it: {'; '.join(described)}. OmniaCLI starts one {_label(instance)} per config and never stops "
+            f"one it did not start. To go on: stop it where it was started (its terminal, the Stop button "
+            f"of the IDE) or with \"{kill}\"{who}, then Restart: OmniaCLI starts its own")
+
+
 async def stop_process(job: Job, instance: Instance, pid: int) -> None:
     """SIGTERM to the process group (Odoo and its workers), SIGKILL after
     STOP_TIMEOUT seconds."""
@@ -606,9 +660,8 @@ async def stop(job: Job, instance: Instance) -> None:
     own = managed_pid(instance)
     if own is None:
         others = foreign_pids(instance, None)
-        job.log("not running" + (
-            f"; pid {', '.join(map(str, others))} run with this config but OmniaCLI did "
-            "not start them: not touched" if others else ""))
+        job.log("not running as OmniaCLI's" + (f", not touched. {foreign_problem(instance, others)}"
+                                                if others else ""))
         return
     await stop_process(job, instance, own)
 
@@ -618,9 +671,7 @@ async def restart_process(job: Job, instance: Instance) -> None:
     own = managed_pid(instance)
     others = foreign_pids(instance, own)
     if others:
-        raise JobFailed(
-            f"{_label(instance)} is already running with {_config(instance)} but OmniaCLI did not start "
-            f"it (pid {', '.join(map(str, others))}): stop it first, OmniaCLI stops only its own")
+        raise JobFailed(foreign_problem(instance, others))
     if own is not None:
         await stop_process(job, instance, own)
     await start_process(job, instance)

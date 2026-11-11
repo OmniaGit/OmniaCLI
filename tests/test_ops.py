@@ -362,7 +362,8 @@ async def test_process_start_restart_stop(tmp_path):
                               "-c", str(instance.options.odoo_config)])
     try:
         await asyncio.sleep(0.2)
-        with pytest.raises(JobFailed, match=f"did not start it \\(pid {other.pid}\\)"):
+        with pytest.raises(JobFailed, match=f"did not start it: pid {other.pid}, user .*, since .*, started by "
+                                            f".*\\. .*To go on: .*\"kill {other.pid}\" as .*then Restart"):
             await ops.restart(job(), instance)
         assert other.poll() is None and ops.managed_pid(instance) == second
     finally:
