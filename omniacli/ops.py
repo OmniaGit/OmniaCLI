@@ -18,7 +18,7 @@ import signal
 import subprocess
 from pathlib import Path
 
-from . import packages
+from . import backupchoices, packages
 from .config import Instance, Repository, Server
 from .jobs import Job, JobFailed
 
@@ -629,10 +629,35 @@ async def restart_process(job: Job, instance: Instance) -> None:
 async def backup(job: Job, instance: Instance, backup_dir: Path, options: dict | None = None) -> Path:
     """The plugin's backup, into <backup_dir>/<server>/<role>; options: the
     values of its backup_fields (none: its defaults)."""
+    return await backup_into(job, instance, backup_dir / instance.server / instance.role, options)
+
+
+async def backup_into(job: Job, instance: Instance, dest_dir: Path, options: dict | None = None) -> Path:
+    """The plugin's backup into dest_dir, the instance's backup folder. A
+    checklist the caller does not give (None) while its checkbox is ticked
+    takes the ticks of the instance's last backup dialog (backupchoices),
+    when it chose one; without, the plugin's own default."""
     if not instance.plugin.has_backup:
         raise JobFailed(f"{_label(instance)} has no backup")
-    dest_dir = backup_dir / instance.server / instance.role
     dest_dir.mkdir(parents=True, exist_ok=True)
+    options = dict(options or {})
+    remembered = backupchoices.load(dest_dir)
+    fields = instance.plugin.backup_fields()
+    for f in fields:
+        if f.kind != "checklist" or options.get(f.key) is not None:
+            continue
+        if f.shown_with and not options.get(f.shown_with):
+            continue
+        if not isinstance((remembered.get("values") or {}).get(f.key), list):
+            continue
+        threshold = next((g for g in fields if g.key == f.threshold), None)
+        megabytes = (remembered["values"].get(f.threshold) if threshold else None)
+        if megabytes in (None, "") and threshold is not None:
+            megabytes = threshold.default
+        rows = (await instance.plugin.backup_choices(instance, f.key))["rows"]
+        options[f.key] = backupchoices.ticked(rows, remembered, f.key, megabytes)
+        job.log(f"--- {f.label}: the choice of the backup dialog of {remembered.get('saved', '?')} "
+                f"({remembered.get('user') or '?'}): {', '.join(options[f.key]) or 'none'}")
     return await instance.plugin.backup(job, instance, dest_dir, options)
 
 

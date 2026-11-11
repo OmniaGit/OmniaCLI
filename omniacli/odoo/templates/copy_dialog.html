@@ -15,6 +15,8 @@
         <input type="radio" name="filestore" value="none"> without filestore (test without attachments)</label>
       <label style="display: block" title="The backup without filestore; test's filestore is made of hard links to production's files: no extra disk space, test reads every attachment, its new and deleted files do not touch production's. Production and test filestores on the same filesystem">
         <input type="radio" name="filestore" value="share" checked> filestore shared with production (hard links, no extra disk space)</label>
+      <label style="display: block; margin-top: 4px" title="The binary columns ticked in the last Backup dialog of production (without one: those of at least 10 MB) are left empty in the backup">
+        <input type="checkbox" name="no_binaries"> without binary columns (as chosen in production's last Backup)</label>
     </div>
     <div id="copy-backups" class="scroll" style="max-height: 40vh; margin: 6px 0"><span class="muted">Loading the backups…</span></div>
     <p id="copy-error" class="error"></p>
@@ -67,7 +69,7 @@
       target = {server: button.dataset.key, url: button.dataset.url};
       document.getElementById("copy-title").textContent = `Copy production to test ${target.server}`;
       dialog.querySelector('input[name=backup][value=""]').checked = true;
-      for (const c of filestoreChoices) { c.checked = c.value === "share"; c.disabled = false; }
+      for (const c of filestoreChoices) { c.checked = c.type === "radio" && c.value === "share"; c.disabled = false; }
       errorBox.textContent = "";
       dialog.showModal(); load();
     };
@@ -78,11 +80,13 @@
     const filestore = dialog.querySelector("input[name=filestore]:checked").value;
     const no_filestore = !backup && filestore === "none";
     const share_filestore = !backup && filestore === "share";
+    const no_binaries = !backup && dialog.querySelector("input[name=no_binaries]").checked;
     const what = backup ? `the backup ${backup}` : "a new backup of production"
-      + (no_filestore ? " without filestore" : share_filestore ? ", sharing production's filestore through hard links," : "");
+      + (no_filestore ? " without filestore" : share_filestore ? ", sharing production's filestore through hard links," : "")
+      + (no_binaries ? " without binary columns" : "");
     if (!confirm(`Drop the test database of ${target.server} and load ${what} into it?`)) return;
     const resp = await fetch(target.url, {
-      method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({backup, no_filestore, share_filestore}),
+      method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({backup, no_filestore, share_filestore, no_binaries}),
     });
     const data = await resp.json().catch(() => ({}));
     if (resp.ok) { location.href = "{{ prefix }}/jobs/" + data.job; return; }

@@ -33,6 +33,46 @@ PASSWORDS_SCRIPT = Path(__file__).with_name("reset_passwords.py")
 # its crons off
 CRON_GUARD_SCRIPT = Path(__file__).with_name("cron_guard.py")
 CRON_GUARD_MARK = "OMNIACLI_ACTIVE_CRONS="
+# what the venv's python runs to find the binary columns of the database
+# and to back it up with some of them emptied
+BINARY_SCRIPT = Path(__file__).with_name("binary_dump.py")
+BINARY_MARK = "OMNIACLI_BINARY_COLUMNS="
+
+
+@contextlib.contextmanager
+def _staged_script(script: Path, prefix: str):
+    """A copy of script any user may read, in a folder only OmniaCLI writes to."""
+    staging = Path(tempfile.mkdtemp(prefix=prefix, dir=BACKUP_STAGING))
+    try:
+        staging.chmod(0o755)
+        copy = staging / script.name
+        shutil.copyfile(script, copy)
+        copy.chmod(0o644)
+        yield copy
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
+async def binary_columns(instance: Instance) -> dict:
+    """The size on disk of the instance's database and every bytea column
+    of it with the bytes it holds (binary_dump.py scan, as the user the
+    instance runs as): {size, columns: [{schema, table, column, bytes,
+    rows, not_null}]}."""
+    opts = instance.options
+    env = odoo_env(instance)
+    with _staged_script(BINARY_SCRIPT, "omniacli-binaries-") as script:
+        cmd = [opts.venv_bin / "python", script, "scan", opts.odoo_config, opts.database]
+        code, out = await capture(as_user(instance.run_as, cmd, env), env=env, timeout=600)
+    found = [line for line in out.splitlines() if line.startswith(BINARY_MARK)]
+    if code or not found:
+        raise JobFailed(f"the binary columns of {opts.database} cannot be read: {out[-2000:]}")
+    try:
+        data = json.loads(found[-1][len(BINARY_MARK):])
+        if not isinstance(data, dict) or not isinstance(data.get("columns"), list):
+            raise ValueError("not {size, columns}")
+        return data
+    except ValueError as exc:
+        raise JobFailed(f"the binary columns of {opts.database}: {exc}") from None
 
 
 async def _cron_guard(instance: Instance, *args: str) -> tuple[int, str]:
@@ -293,6 +333,8 @@ async def install_cli(job: Job, venv_bin: Path, run_as: str | None = None) -> No
 
 # the name of a backup made without the filestore ends so
 NO_FILESTORE = "_nofilestore"
+# and of one made with binary columns emptied
+NO_BINARIES = "_nobinaries"
 
 # What the venv's python runs as run_as to carry a backup in and out of its
 # private folder: the file holds a whole database, so no other user of the
@@ -328,24 +370,43 @@ async def _private_folder(instance: Instance, prefix: str):
         await capture(_python_as(instance, _REMOVE_FOLDER, folder))
 
 
-async def backup(job: Job, instance: Instance, dest_dir: Path, filestore: bool = True) -> Path:
+async def backup(job: Job, instance: Instance, dest_dir: Path, filestore: bool = True,
+                 emptied: list[dict] | None = None) -> Path:
     """click-odoo-backupdb of the database, and of its filestore unless
-    filestore is false, into a zip of dest_dir."""
+    filestore is false, into a zip of dest_dir. With emptied (columns of
+    binary_columns), binary_dump.py makes the same zip with those columns
+    left empty."""
     opts = instance.options
     stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    dest = dest_dir / f"{opts.database}_{stamp}{'' if filestore else NO_FILESTORE}.zip"
+    dest = dest_dir / (f"{opts.database}_{stamp}{'' if filestore else NO_FILESTORE}"
+                       f"{NO_BINARIES if emptied else ''}.zip")
     job.log(f"--- backup database {opts.database}" + ("" if filestore else " without its filestore")
-            + f" to {dest}")
+            + (f", {len(emptied)} binary columns emptied" if emptied else "") + f" to {dest}")
     env = odoo_env(instance)
-    cmd = [opts.venv_bin / "click-odoo-backupdb", "-c", opts.odoo_config]
-    if not filestore:
-        cmd.append("--no-filestore")
+    with contextlib.ExitStack() as stack:
+        if emptied:
+            script = stack.enter_context(_staged_script(BINARY_SCRIPT, "omniacli-binaries-"))
+            columns = json.dumps([[c["schema"], c["table"], c["column"]] for c in emptied])
+
+            def command(target):
+                return [opts.venv_bin / "python", script, "dump", opts.odoo_config, opts.database, target,
+                        columns, "1" if filestore else "0"]
+        else:
+            def command(target):
+                return [opts.venv_bin / "click-odoo-backupdb", "-c", opts.odoo_config,
+                        *([] if filestore else ["--no-filestore"]), opts.database, target]
+        return await _backup_to(job, instance, dest, command, env)
+
+
+async def _backup_to(job: Job, instance: Instance, dest: Path, command, env: dict) -> Path:
+    """command(target) writes the backup at target: dest itself, or with
+    run_as a file of its private folder carried to dest."""
     if instance.run_as is None:
-        await run(job, [*cmd, opts.database, dest], env=env)
+        await run(job, command(dest), env=env)
         return dest
     async with _private_folder(instance, "omniacli-backup-") as folder:
         staged = folder / dest.name
-        await run(job, as_user(instance.run_as, [*cmd, opts.database, staged], env), env=env)
+        await run(job, as_user(instance.run_as, command(staged), env), env=env)
         # through <file>.part: a cut copy leaves nothing
         part = dest.with_name(dest.name + ".part")
         try:

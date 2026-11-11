@@ -187,7 +187,10 @@ Saved in <span class="mono">{{ schedules_file }}</span>.</p>
     $("f-link").value = LINKS.includes(sourceOf(src)) ? sourceOf(src) : (LINKS[0] || "");
     offerServers($("f-link").value === sourceOf(src) ? src : {});
     $("f-keep").value = copy ? copy.keep_backups : 3;
-    optionBoxes($("f-backup-options"), target.backup_fields || [], copy && copy.backup_options);
+    // only the checkboxes: the other fields of a backup (the binary columns
+    // of Odoo) come from the last backup dialog there
+    optionBoxes($("f-backup-options"), (target.backup_fields || []).filter((f) => f.kind === "checkbox"),
+                copy && copy.backup_options);
     optionBoxes($("f-restore-options"), target.restore_fields || [], copy && copy.restore_options);
   }
 

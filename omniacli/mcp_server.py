@@ -278,16 +278,25 @@ def create_mcp(settings: Settings, jobs: JobManager, updater: AutoUpdater, sampl
 
     def backup_options(inst: Instance, options: dict | None) -> dict:
         """options checked against the plugin's backup_fields: a checkbox
-        true or false, a text a string."""
+        true or false, a number a number, a checklist a list of strings
+        (left out: the ticks of the instance's last backup dialog), a text a
+        string."""
         fields = {f.key: f for f in inst.plugin.backup_fields()}
         unknown = sorted(set(options or {}) - set(fields))
         if unknown:
             raise ToolError(f"unknown backup options {', '.join(unknown)}; "
                             f"{inst.plugin.label} has: {', '.join(fields) or 'none'}")
+        out = {}
         for k, v in (options or {}).items():
-            if fields[k].kind == "checkbox" and not isinstance(v, bool):
+            kind = fields[k].kind
+            if kind == "checkbox" and not isinstance(v, bool):
                 raise ToolError(f"backup option {k}: true or false")
-        return {k: (v if fields[k].kind == "checkbox" else str(v)) for k, v in (options or {}).items()}
+            if kind == "number" and (isinstance(v, bool) or not isinstance(v, (int, float))):
+                raise ToolError(f"backup option {k}: a number")
+            if kind == "checklist" and not (isinstance(v, list) and all(isinstance(x, str) for x in v)):
+                raise ToolError(f"backup option {k}: a list of strings")
+            out[k] = v if kind in ("checkbox", "number", "checklist") else str(v)
+        return out
 
     async def backup_job(inst: Instance, ctx: Context, wait_seconds: int, options: dict | None) -> dict:
         chosen = backup_options(inst, options)
@@ -316,7 +325,9 @@ def create_mcp(settings: Settings, jobs: JobManager, updater: AutoUpdater, sampl
         """Back up the database and filestore of a test instance; the result
         gives the path to download the zip (GET with the same bearer token).
         options: the plugin's backup choices, Odoo {"no_filestore": true}
-        for the database only."""
+        for the database only, {"no_binaries": true} with the binary
+        columns emptied (those ticked in the instance's last backup dialog,
+        or "binary_columns": ["table.column", ...])."""
         need(ctx, "backup_test")
         return await backup_job(instance(server_name, "test"), ctx, wait_seconds, options)
 
@@ -328,7 +339,9 @@ def create_mcp(settings: Settings, jobs: JobManager, updater: AutoUpdater, sampl
         job's result gives the path to download the zip: an HTTP GET to the
         server's base URL + that path, with the same Authorization: Bearer
         header. options: the plugin's backup choices, Odoo
-        {"no_filestore": true} for the database only."""
+        {"no_filestore": true} for the database only, {"no_binaries": true}
+        with the binary columns emptied (those ticked in the instance's last
+        backup dialog, or "binary_columns": ["table.column", ...])."""
         need(ctx, "backup")
         return await backup_job(instance(server_name, role, ctx), ctx, wait_seconds, options)
 

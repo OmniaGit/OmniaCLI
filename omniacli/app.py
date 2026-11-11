@@ -34,7 +34,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.background import BackgroundTask
 from starlette.requests import ClientDisconnect, HTTPConnection
 
-from . import (checks, consumer, disks, gitcredentials, linkcopy, listgroups, ops, packages, plugins, pluginstore, puller, publisher,
+from . import (backupchoices, checks, consumer, disks, gitcredentials, linkcopy, listgroups, ops, packages, plugins, pluginstore, puller, publisher,
                schedules, selflog, sshlinks, shell, stacktemplates, templatestore, tunnel, workspacehelper, workspaceops)
 from .accesslog import AccessLog
 from .diskhistory import DiskHistory, DiskRecorder
@@ -148,6 +148,8 @@ _TEMPLATES = Jinja2Templates(
 # centred on a transparent square); served without login, like any favicon.
 _STATIC = Path(__file__).parent / "static"
 _BACKUP_NAME = re.compile(r"[A-Za-z0-9._-]+\.zip")
+# a value of a checklist field (backup_fields): a name, schema.table.column
+_CHECKLIST_VALUE = re.compile(r"[A-Za-z0-9_.$:-]{1,200}")
 # the terminal of the shell page: xterm.js 6.0.0 and its fit addon 0.11.0
 # (npm @xterm/xterm and @xterm/addon-fit, MIT), served after the login
 _STATIC_FILES = {"xterm.js": "text/javascript", "xterm.css": "text/css", "addon-fit.js": "text/javascript"}
@@ -205,6 +207,17 @@ def _field_value(field, raw):
     a dialog's script JSON); ActionRefused when it cannot be one."""
     if field.kind == "checkbox":
         return raw not in (None, False, "", "0", "false", "off")
+    if field.kind == "checklist":
+        # the values ticked: a list (JSON), or one text of them separated by
+        # commas (a form); not posted: None, nobody chose
+        if raw is None:
+            return None
+        items = raw if isinstance(raw, list) else str(raw).split(",")
+        values = [str(v).strip() for v in items if str(v).strip()]
+        bad = [v for v in values if not _CHECKLIST_VALUE.fullmatch(v)]
+        if bad:
+            raise ActionRefused(f"{field.label}: {', '.join(bad)} is not a value of the list")
+        return values
     if raw is None:
         # not posted (a script that leaves it out): its default
         raw = field.default
@@ -231,6 +244,7 @@ def _field_dict(field) -> dict:
             "required": field.required, "placeholder": field.placeholder, "help": field.help,
             "choices": [list(c) for c in field.choices], "restart_types": list(field.restart_types),
             "disabled_placeholder": field.disabled_placeholder,
+            "shown_with": field.shown_with, "threshold": field.threshold,
             "buttons": [{"label": b.label, "route": b.route, "title": b.title, "confirm": b.confirm,
                          "only_with_value": b.only_with_value} for b in field.buttons]}
 
@@ -1098,6 +1112,25 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             )
         )
 
+    @app.get("/api/servers/{server}/{role}/backup/choices")
+    async def backup_choices(server: str, role: str, key: str = "", user: Principal = Depends(developer)):
+        """What the backup dialog opens with: the instance's last choice
+        (remembered) and, for key, the rows of that checklist field."""
+        instance = get_instance(server, role)
+        remembered = backupchoices.load(backup_folder(instance))
+        out = {"remembered": {"values": remembered.get("values") or {}, "shown": remembered.get("shown") or {},
+                              "user": remembered.get("user"), "saved": remembered.get("saved")}}
+        if key:
+            field = next((f for f in instance.plugin.backup_fields() if f.key == key and f.kind == "checklist"), None)
+            if field is None:
+                return refuse(f"{instance.plugin.label} has no list {key} in its backup")
+            try:
+                found = await instance.plugin.backup_choices(instance, key)
+                out.update(rows=found["rows"], total=found.get("total"), total_label=found.get("total_label"))
+            except JobFailed as exc:
+                return refuse(str(exc))
+        return out
+
     @app.post("/servers/{server}/{role}/backup")
     async def action_backup(
         request: Request, server: str, role: str, download: bool = False,
@@ -1110,6 +1143,21 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         except ActionRefused as exc:
             return refuse(str(exc))
         chosen = [f.label for f in instance.plugin.backup_fields() if f.kind == "checkbox" and options[f.key]]
+        if raw.get("remember"):
+            # the dialog's choice: it opens with it next time, and the backups
+            # without a dialog take its ticks (backupchoices)
+            # a list not posted (its checkbox off) keeps its last ticks
+            before = backupchoices.load(backup_folder(instance))
+            values, shown = dict(options), {}
+            for f in instance.plugin.backup_fields():
+                if f.kind != "checklist":
+                    continue
+                if values[f.key] is None:
+                    values[f.key] = (before.get("values") or {}).get(f.key)
+                    shown[f.key] = (before.get("shown") or {}).get(f.key) or []
+                else:
+                    shown[f.key] = [v for v in str(raw.get(f"{f.key}__shown") or "").split(",") if v]
+            backupchoices.save(backup_folder(instance), values, shown, user.name)
 
         async def action(job):
             dest = await ops.backup(job, instance, settings.backup_dir, options)
@@ -1201,8 +1249,11 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             options = {f.key: _field_value(f, raw.get(f.key)) for f in instance.plugin.restore_fields()}
             # the choices of a new backup there, asked as this instance's
             # plugin asks them (an OmniaCLI there without them backs up as usual)
+            # (the checkboxes: the other fields come from the last backup
+            # dialog of the instance there)
             backup_options = {} if backup else {
-                f.key: _field_value(f, raw.get(f.key)) for f in instance.plugin.backup_fields()}
+                f.key: _field_value(f, raw.get(f.key)) for f in instance.plugin.backup_fields()
+                if f.kind == "checkbox"}
         except ActionRefused as exc:
             return refuse(str(exc))
         chosen = [f.label.lower() for f in instance.plugin.backup_fields()
@@ -3760,8 +3811,10 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
                     return refuse(f"{instance.plugin.label} cannot restore a database: no copy from link")
                 # the choices as the instance's plugin asks them
                 try:
+                    # the checkboxes: the other fields come from the last
+                    # backup dialog of the instance there
                     copy["backup_options"] = {f.key: _field_value(f, (copy.get("backup_options") or {}).get(f.key))
-                                              for f in instance.plugin.backup_fields()}
+                                              for f in instance.plugin.backup_fields() if f.kind == "checkbox"}
                     copy["restore_options"] = {
                         f.key: _field_value(f, (copy.get("restore_options") or {}).get(f.key))
                         for f in instance.plugin.restore_fields()}

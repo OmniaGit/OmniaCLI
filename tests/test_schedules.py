@@ -120,7 +120,7 @@ async def test_page_save_run_delete(here, env):
               "backup_options": {"no_filestore": True}, "restore_options": {"neutralize": True}}))
     assert resp.status_code == 200, resp.text
     saved = yaml.safe_load(here.settings.schedules_file.read_text())["schedules"]["nightly"]
-    assert saved["copy"]["backup_options"] == {"no_filestore": True} and saved["enabled"] is False
+    assert saved["copy"]["backup_options"] == {"no_filestore": True, "no_binaries": False} and saved["enabled"] is False
     assert (await save(here, "nightly", a_schedule(pull=True))).json()["error"].startswith("A schedule named")
     assert "No instance" in (await save(here, "x", a_schedule(pull=True, instance="nope/test"))).json()["error"]
 

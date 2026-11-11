@@ -57,6 +57,9 @@ as_user = _ops.as_user
 # restart, start and stop an instance as the core does (its service, or the
 # process it starts; start and stop: systemd or process only)
 restart = _ops.restart
+# a backup into the instance's backup folder, with what the last backup
+# dialog chose for the fields a caller does not give (backup_into)
+backup_into = _ops.backup_into
 start = _ops.start
 stop = _ops.stop
 service_state = _ops.service_state
@@ -64,7 +67,7 @@ service_state = _ops.service_state
 __all__ = [
     "PLUGIN_API", "ENTRY_POINT_GROUP", "ServicePlugin", "Check", "ERROR", "WARNING",
     "ConfigError", "Instance", "Repository", "Server", "Job", "JobFailed",
-    "run", "capture", "as_user", "restart", "start", "stop", "service_state", "base_env", "system_user",
+    "run", "capture", "as_user", "backup_into", "restart", "start", "stop", "service_state", "base_env", "system_user",
     "ROLES", "SERVER_NAME", "USER_NAME", "Field", "FormButton", "Action", "ActionRefused", "Host",
     "Discovered", "COMPOSE_TOOLS",
 ]
@@ -131,7 +134,7 @@ class Discovered:
 
 # --- the server form ------------------------------------------------------
 
-FIELD_KINDS = ("text", "path", "number", "checkbox", "select")
+FIELD_KINDS = ("text", "path", "number", "checkbox", "select", "checklist")
 # the keys of an instance's mapping that the core reads: no field may take them
 CORE_KEYS = ("repositories", "restart", "log_file", "run_as", "from_link", "auto_update", "status",
              "type", "claude_dir")
@@ -177,6 +180,11 @@ class Field:
     # placeholder while it is disabled
     disabled_placeholder: str = ""
     buttons: tuple = ()  # FormButton
+    # backup_fields only: shown while the checkbox of this key is ticked
+    shown_with: str = ""
+    # checklist only: the number field (megabytes) under which a row is not
+    # ticked by default (backup_choices gives each row its size)
+    threshold: str = ""
 
 
 # --- the buttons of the server page ------------------------------------------
@@ -324,14 +332,29 @@ class ServicePlugin(ABC):
     async def backup(self, job: Job, instance: Instance, dest_dir: Path, options: dict | None = None) -> Path:
         """Back up the instance into dest_dir (it exists), return the file.
         options: the values of backup_fields; None or a key left out: its
-        default (the backup before a merge passes none)."""
+        default (the backup before a merge passes none). A checklist's value
+        is the list of the values ticked, None when nobody chose (the
+        plugin's own default; the core gives the choice of the last backup
+        dialog when there is one, see backup_into)."""
         raise JobFailed(f"{self.label} has no backup")
 
     def backup_fields(self) -> list[Field]:
-        """What may be chosen for a backup (checkbox or text), given as
-        options. A checkbox not posted is off: its off must be the backup
-        made without any choice."""
+        """What may be chosen for a backup (checkbox, text, number or
+        checklist), given as options. A checkbox not posted is off: its off
+        must be the backup made without any choice. Only the backup dialog
+        shows the fields that are not checkboxes; the other ways to back up
+        (a copy from a link, a schedule, MCP) take their values from the
+        last backup dialog of the instance."""
         return []
+
+    async def backup_choices(self, instance: Instance, key: str) -> dict:
+        """The rows the backup dialog offers for the checklist field key:
+        {"rows": [{"value", "label", "size" (bytes), "detail"}], "total":
+        bytes or None, "total_label"}. With a total (what the rows are part
+        of, the database's size) the dialog shows it, the size of the rows
+        ticked and what is left, an estimate of the backup. Raise JobFailed
+        when they cannot be found."""
+        raise JobFailed(f"{self.label} has no choices for {key}")
 
     async def restore(self, job: Job, instance: Instance, backup_zip: Path, options: dict) -> None:
         """Load a file of backup (made here or by a linked instance) into the
@@ -497,7 +520,7 @@ async def restore_fetched(job: Job, instance: Instance, backup_zip: Path, option
     await instance.plugin.restore(job, instance, backup_zip, options)
 
 
-ASYNC_METHODS = ("checks", "after_pull", "backup", "restore", "before_start", "dev_setup", "discover")
+ASYNC_METHODS = ("checks", "after_pull", "backup", "backup_choices", "restore", "before_start", "dev_setup", "discover")
 _ID = re.compile(r"[a-z][a-z0-9_-]{0,31}")
 
 
@@ -552,8 +575,17 @@ def parts_problems(plugin: ServicePlugin) -> list[str]:
             problems.append(f"action {a.id}: no template {a.dialog} in the plugin's templates_dir")
         if a.dialog and a.params:
             problems.append(f"action {a.id}: a dialog of its own or params, not both")
-    for what, fields in (("backup", plugin.backup_fields()), ("restore", plugin.restore_fields())):
+    backup_kinds = ("checkbox", "text", "number", "checklist")
+    for what, fields, kinds in (("backup", plugin.backup_fields(), backup_kinds),
+                                ("restore", plugin.restore_fields(), ("checkbox", "text"))):
+        keys = {f.key: f.kind for f in fields if isinstance(f, Field)}
         for f in fields:
-            if not isinstance(f, Field) or f.kind not in ("checkbox", "text"):
-                problems.append(f"{what} field {f!r} is not a plugin_api.Field of kind checkbox or text")
+            if not isinstance(f, Field) or f.kind not in kinds:
+                problems.append(f"{what} field {f!r} is not a plugin_api.Field of kind {', '.join(kinds)}")
+                continue
+            if f.shown_with and keys.get(f.shown_with) != "checkbox":
+                problems.append(f"{what} field {f.key}: shown_with {f.shown_with!r} is not a checkbox of its fields")
+            if f.threshold and (f.kind != "checklist" or keys.get(f.threshold) != "number"):
+                problems.append(f"{what} field {f.key}: threshold is a number field of its fields, "
+                                "for a checklist")
     return problems
