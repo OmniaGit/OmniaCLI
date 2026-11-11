@@ -42,7 +42,7 @@
    come to the Dashboard for is a server or a link to work on; it opens a
    folded section, or group, that holds a match (_list.html) #}
 {% set searched = "servers linked" if machine and machine_links else "servers" %}
-{% if total + (machine_links | length if machine else 0) > 1 or q %}{{ list_search(searched, "Search server, linked instance, workspace, group, database, branch…", q) }}{% endif %}
+{% if total + (machine_links | length if machine else 0) > 1 or q %}{{ list_search(searched, "Search server, linked instance, workspace, group, database, branch…", q, wide=true) }}{% endif %}
 <section class="fold" data-fold="servers">
 <div class="fold-head">
   <h1><button type="button" class="fold-toggle" aria-expanded="true"><span class="fold-icon" aria-hidden="true">▾</span>Servers</button></h1>
