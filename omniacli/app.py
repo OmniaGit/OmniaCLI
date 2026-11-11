@@ -34,7 +34,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.background import BackgroundTask
 from starlette.requests import ClientDisconnect, HTTPConnection
 
-from . import (backupchoices, checks, consumer, disks, gitcredentials, linkcopy, listgroups, ops, packages, plugins, pluginstore, puller, publisher,
+from . import (backupchoices, checks, restoreroom, consumer, disks, gitcredentials, linkcopy, listgroups, ops, packages, plugins, pluginstore, puller, publisher,
                schedules, selflog, sshlinks, shell, stacktemplates, templatestore, tunnel, workspacehelper, workspaceops)
 from .accesslog import AccessLog
 from .diskhistory import DiskHistory, DiskRecorder
@@ -1130,6 +1130,42 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             except JobFailed as exc:
                 return refuse(str(exc))
         return out
+
+    @app.get("/api/servers/{server}/{role}/backup/estimate")
+    async def backup_estimate(server: str, role: str, user: Principal = Depends(developer)):
+        """What a backup of the instance would hold, for the previews of the
+        dialogs (plugin_api.backup_estimate), with the rows of its lists the
+        instance's last backup dialog ticks (backupchoices) and that choice."""
+        instance = get_instance(server, role)
+        try:
+            found = await instance.plugin.backup_estimate(instance)
+        except JobFailed as exc:
+            return refuse(str(exc))
+        remembered = backupchoices.load(backup_folder(instance))
+        fields = {f.key: f for f in instance.plugin.backup_fields()}
+        ticked = {}
+        for key, rows in (found.get("lists") or {}).items():
+            field = fields.get(key)
+            threshold = fields.get(field.threshold) if field is not None and field.threshold else None
+            megabytes = (remembered.get("values") or {}).get(field.threshold) if threshold else None
+            if megabytes in (None, "") and threshold is not None:
+                megabytes = threshold.default
+            ticked[key] = backupchoices.ticked(rows, remembered, key, megabytes)
+        return {**found, "ticked": ticked,
+                "remembered": {"values": remembered.get("values") or {}, "shown": remembered.get("shown") or {},
+                               "user": remembered.get("user"), "saved": remembered.get("saved")}}
+
+    @app.get("/api/servers/{server}/{role}/restore/room")
+    async def restore_room(server: str, role: str, user: Principal = Depends(developer)):
+        """The disks a restore into the instance writes to, with their room
+        (restoreroom.py)."""
+        instance = get_instance(server, role)
+        try:
+            found = await instance.plugin.restore_room(instance)
+        except JobFailed as exc:
+            return refuse(str(exc))
+        paths = {**(found.get("paths") or {}), "backups": str(backup_folder(instance))}
+        return await restoreroom.room(paths, found.get("freed") or {}, found.get("notes") or [])
 
     @app.post("/servers/{server}/{role}/backup")
     async def action_backup(

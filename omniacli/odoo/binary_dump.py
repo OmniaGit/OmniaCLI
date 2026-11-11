@@ -5,9 +5,14 @@ with the folder of odoo-bin on PYTHONPATH: the database's binary columns,
 and a backup of it with some of them emptied.
 
     binary_dump.py scan <odoo config> <database>
-        prints COLUMNS_MARK and, as JSON, the database's size on disk and
-        every bytea column: {size, columns: [{schema, table, column, bytes,
-        rows, not_null}]}
+        prints COLUMNS_MARK and, as JSON, the database's size on disk, its
+        filestore and every bytea column: {size, filestore: {path, bytes,
+        files}, columns: [{schema, table, column, bytes, rows, not_null}]}
+    binary_dump.py room <odoo config> <database>
+        prints ROOM_MARK and, as JSON, where a restore of the database
+        writes and what it drops first: {data_directory (None when
+        PostgreSQL does not tell it), db_host, db_port, database_bytes (0:
+        no such database), filestore: {path, bytes, files}, temp}
     binary_dump.py dump <odoo config> <database> <dest zip> <columns> <filestore 0|1>
         writes the zip Odoo restores (dump.sql, manifest.json, filestore/)
         with the columns emptied; columns: JSON [[schema, table, column]]
@@ -34,6 +39,7 @@ import tempfile
 import zipfile
 
 COLUMNS_MARK = "OMNIACLI_BINARY_COLUMNS="
+ROOM_MARK = "OMNIACLI_RESTORE_ROOM="
 # the schemas of PostgreSQL itself
 SYSTEM_SCHEMAS = ("pg_catalog", "information_schema", "pg_toast")
 
@@ -80,6 +86,46 @@ def scan(cr):
         size, rows = cr.fetchone()
         found.append({"schema": schema, "table": table, "column": column, "bytes": int(size),
                       "rows": int(rows), "not_null": bool(not_null)})
+    return found
+
+
+def folder_size(folder):
+    """{path, bytes, files} of a folder's files (0 when it does not exist)."""
+    size = files = 0
+    for root, _, names in os.walk(folder):
+        for name in names:
+            try:
+                size += os.lstat(os.path.join(root, name)).st_size
+                files += 1
+            except OSError:
+                pass
+    return {"path": folder, "bytes": size, "files": files}
+
+
+def room(odoo, database):
+    """Where a restore of database writes, and what it drops first. Read on
+    the maintenance database postgres: the database may not exist."""
+    import psycopg2
+
+    config = odoo.tools.config
+    found = {"data_directory": None, "db_host": config.get("db_host") or None,
+             "db_port": int(config.get("db_port") or 5432), "database_bytes": 0,
+             "filestore": folder_size(odoo.tools.config.filestore(database)),
+             "temp": tempfile.gettempdir()}
+    cnx = connect(odoo, "postgres")
+    try:
+        cr = cnx.cursor()
+        cr.execute("SELECT pg_database_size(datname) FROM pg_database WHERE datname = %s", (database,))
+        row = cr.fetchone()
+        found["database_bytes"] = int(row[0]) if row else 0
+        try:
+            # superuser or pg_read_all_settings only
+            cr.execute("SHOW data_directory")
+            found["data_directory"] = cr.fetchone()[0]
+        except psycopg2.Error:
+            cnx.rollback()
+    finally:
+        cnx.close()
     return found
 
 
@@ -181,13 +227,17 @@ def main(argv):
     import odoo.tools.misc
 
     odoo.tools.config.parse_config(["-c", config])
+    if mode == "room":
+        print(ROOM_MARK + json.dumps(room(odoo, database)))
+        return
     cnx = connect(odoo, database)
     try:
         if mode == "scan":
             cr = cnx.cursor()
             cr.execute("SELECT pg_database_size(current_database())")
             size = int(cr.fetchone()[0])
-            print(COLUMNS_MARK + json.dumps({"size": size, "columns": scan(cr)}))
+            print(COLUMNS_MARK + json.dumps({"size": size, "columns": scan(cr),
+                                             "filestore": folder_size(odoo.tools.config.filestore(database))}))
             return
         if mode != "dump":
             raise SystemExit("unknown mode %r" % mode)

@@ -115,6 +115,19 @@ def _size(size: int) -> str:
         size /= 1024
 
 
+def _column_rows(found: dict) -> list[dict]:
+    """The binary columns that hold data, the biggest first, as rows of the
+    backup dialog's list."""
+    rows = []
+    for c in sorted(found["columns"], key=lambda c: -c["bytes"]):
+        if c["bytes"] <= 0:
+            continue
+        rows.append({"value": column_value(c), "label": column_value(c), "size": c["bytes"],
+                     "detail": f"{_size(c['bytes'])} in {c['rows']} rows"
+                               + (", NOT NULL: left ''" if c["not_null"] else "")})
+    return rows
+
+
 def _copy_what(params: dict) -> str:
     """What a copy of production loads, for the job title."""
     if params["backup"]:
@@ -256,14 +269,30 @@ class OdooPlugin(ServicePlugin):
         if key != "binary_columns":
             raise JobFailed(f"no choices for {key}")
         found = await ops.binary_columns(instance)
-        rows = []
-        for c in sorted(found["columns"], key=lambda c: -c["bytes"]):
-            if c["bytes"] <= 0:
-                continue
-            rows.append({"value": column_value(c), "label": column_value(c), "size": c["bytes"],
-                         "detail": f"{_size(c['bytes'])} in {c['rows']} rows"
-                                   + (", NOT NULL: left ''" if c["not_null"] else "")})
-        return {"rows": rows, "total": found.get("size"), "total_label": "Database on disk"}
+        return {"rows": _column_rows(found), "total": found.get("size"), "total_label": "Database on disk"}
+
+    async def backup_estimate(self, instance: Instance) -> dict:
+        found = await ops.binary_columns(instance)
+        filestore = found.get("filestore") or {}
+        return {"database": found.get("size") or 0, "files": filestore.get("bytes"),
+                "files_off": "no_filestore", "list": "binary_columns", "list_on": "no_binaries",
+                "lists": {"binary_columns": _column_rows(found)}}
+
+    async def restore_room(self, instance: Instance) -> dict:
+        found = await ops.restore_room(instance)
+        notes = []
+        host = found.get("db_host")
+        if not found.get("data_directory"):
+            notes.append(f"PostgreSQL runs on {host}: its disk is not checked from here"
+                         if host not in ops.LOCAL_HOSTS and not str(host).startswith("/") else
+                         "PostgreSQL does not tell its data folder to this user (not a superuser) and "
+                         "pg_lsclusters does not find it: its disk is not checked")
+        notes.append(f"the restore unpacks the backup in {found.get('temp')} first")
+        filestore = found.get("filestore") or {}
+        return {"paths": {"database": found.get("data_directory"), "files": filestore.get("path"),
+                          "temp": found.get("temp")},
+                "freed": {"database": found.get("database_bytes") or 0, "files": filestore.get("bytes") or 0},
+                "notes": notes}
 
     def process_command(self, instance: Instance) -> tuple[list[str], Path]:
         return ops.process_command(instance)

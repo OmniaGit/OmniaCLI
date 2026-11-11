@@ -1,0 +1,86 @@
+{# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C · SPDX-License-Identifier: AGPL-3.0-or-later -#}
+{# The room widget: how much a backup will weigh, and whether its restore
+   fits on the disks of the instance that receives it. One for every dialog
+   that makes a backup to restore (Backup, Copy production to test, Copy
+   from link): include it once in the page, then
+
+     const room = omniaRoom(holder);
+     room.estimate(data);   // /api/servers/<s>/<r>/backup/estimate of the instance backed up,
+                            // or {error}
+     room.room(data, what); // /api/servers/<s>/<r>/restore/room of the instance that
+                            // receives it, or {error}; null: no restore to check;
+                            // what: "the restore into srv/test"
+     room.reset(withRoom);  // reading again (withRoom false: no restore to check)
+     room.update({files, ticked, zip});
+       // files: the filestore is in the backup and restored; ticked: the bytes
+       // of the binary columns left out; zip: the zip is written on this machine
+
+   The sizes are estimates from the sizes on disk, on the high side: the
+   dump of the database is its size on disk plus once more the binary rows
+   kept (pg_dump writes them in hex), the zip is not counted compressed.
+   Per disk it adds up what the restore writes there (the zip, the backup
+   unpacked, PostgreSQL's data, the filestore) against its free room plus
+   what the restore drops there first (the old database and filestore). -#}
+<script>
+window.omniaRoom = window.omniaRoom || function (holder) {
+  const MB = 1048576, GB = 1073741824;
+  const sizeText = (b) => b >= GB ? (b / GB).toFixed(2) + " GB"
+    : b >= MB ? (b / MB).toFixed(1) + " MB" : Math.max(0, Math.round(b / 1024)) + " KB";
+  const ROLE = {backups: "the backup zip", temp: "the backup unpacked", database: "PostgreSQL",
+                files: "the filestore"};
+  // est: null while it is read; rm: undefined while it is read, null: no restore
+  let est = null, rm = null, title = "the restore", last = {files: true, ticked: 0, zip: true};
+  holder.replaceChildren();
+  const box = document.createElement("div");
+  box.style.cssText = "margin-top: 8px; font-size: 13px";
+  holder.append(box);
+
+  function line(text, className = "muted") {
+    const p = document.createElement("div");
+    p.className = className; p.textContent = text;
+    box.append(p);
+    return p;
+  }
+  function draw() {
+    box.replaceChildren();
+    if (est === null) { line("Weight of the backup: reading the database…"); return; }
+    if (est.error) { line("Weight of the backup: " + est.error); return; }
+    const binary = ((est.lists || {})[est.list] || []).reduce((s, r) => s + (r.size || 0), 0);
+    const ticked = Math.min(last.ticked || 0, est.database || 0);
+    const database = Math.max(0, (est.database || 0) - ticked);
+    const dump = Math.max(0, (est.database || 0) + binary - 2 * ticked);
+    const files = last.files && est.files ? est.files : 0;
+    const total = dump + files;
+    line(`Backup ≈ ${sizeText(total)}: database ${sizeText(database)}`
+      + (ticked ? ` (${sizeText(est.database)} on disk, ${sizeText(ticked)} of binary columns left out)` : "")
+      + `, its dump ≈ ${sizeText(dump)}`
+      + (est.files === null || est.files === undefined ? "" : last.files ? `, filestore ${sizeText(files)}` : ", no filestore")
+      + ". An estimate on the high side: the zip is smaller.", "");
+    if (rm === null) return;
+    if (rm === undefined) { line(`Room for ${title}: reading the disks…`); return; }
+    if (rm.error) { line(`Room for ${title}: ${rm.error}`); return; }
+    line(`Room for ${title}:`, "");
+    const need = {backups: last.zip ? total : 0, temp: total, database, files};
+    for (const disk of rm.disks || []) {
+      const needs = disk.roles.reduce((s, r) => s + (need[r] || 0), 0);
+      if (!needs) continue;
+      const freed = disk.roles.reduce((s, r) => s + ((rm.freed || {})[r] || 0), 0);
+      const fits = needs <= disk.free + freed;
+      line(`${fits ? "✓" : "✗ does not fit:"} ${disk.mount} (${disk.roles.map((r) => ROLE[r] || r).join(", ")}): `
+        + `needs ≈ ${sizeText(needs)}, free ${sizeText(disk.free)}`
+        + (freed ? ` + ${sizeText(freed)} the restore drops first` : ""), fits ? "" : "error");
+    }
+    for (const role of rm.unknown || []) {
+      if (need[role]) line(`${ROLE[role] || role}: its disk is not known, not checked`);
+    }
+    for (const note of rm.notes || []) line(note);
+  }
+  return {
+    estimate(data) { est = data; draw(); },
+    room(data, what) { rm = data; if (what) title = what; draw(); },
+    update(choices) { last = {...last, ...choices}; draw(); },
+    reset(withRoom = true) { est = null; rm = withRoom ? undefined : null; draw(); },
+    sizeText,
+  };
+};
+</script>

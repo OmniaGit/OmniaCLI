@@ -3,20 +3,22 @@
    data-backup (the backup's URL, ?download=1 to download it after) with
    the type's choices of a backup, and posts them.
 
-   It opens with the instance's last choice (backupchoices.py, read from
-   /api/servers/<server>/<role>/backup/choices). A field with shown_with
-   shows while that checkbox is ticked. A checklist field (the binary
-   columns of Odoo) loads its rows from the same route (?key=) and shows
-   them with the checklist widget: ticked those ticked last time, unticked
-   those shown last time and left unticked, the others ticked when their
-   size reaches the threshold field (a change of the threshold ticks every
-   row by it). With a total (Odoo: the database's size on disk) it shows
-   the total, the size ticked and what is left: an estimate of the
-   database in the backup, before the zip compresses it. It posts the
-   ticked values joined by commas, the rows shown
-   (<key>__shown) and remember=1: the choice kept for next time. -#}
+   On opening it reads /api/servers/<server>/<role>/backup/estimate (what
+   the backup would hold, the rows of its checklists and the instance's
+   last choice, backupchoices.py) and .../restore/room (the disks of a
+   restore into the same instance), shown by the room widget (_room.html):
+   the weight of the backup and whether it fits here.
+
+   It opens with the last choice. A field with shown_with shows while that
+   checkbox is ticked. A checklist field (the binary columns of Odoo) shows
+   its rows with the checklist widget: ticked those ticked last time,
+   unticked those shown last time and left unticked, the others ticked when
+   their size reaches the threshold field (a change of the threshold ticks
+   every row by it). It posts the ticked values joined by commas, the rows
+   shown (<key>__shown) and remember=1: the choice kept for next time. -#}
 {% from "_icons.html" import icon %}
 {% include "_checklist.html" %}
+{% include "_room.html" %}
 <dialog id="backup-dialog">
   <form method="post" id="backup-form">
     <h2 id="backup-title" style="margin-bottom: 4px"></h2>
@@ -31,13 +33,13 @@
     <input type="hidden" name="{{ f.key }}">
     <input type="hidden" name="{{ f.key }}__shown">
     <div data-checklist="{{ f.key }}" data-threshold="{{ f.threshold }}"></div>
-    <p class="muted" data-checklist-total="{{ f.key }}" style="margin: 4px 0 0; font-size: 13px" hidden></p>
     {% else %}
     <label style="display: block; margin-top: 6px">{{ f.label }} <input type="{{ 'number' if f.kind == 'number' else 'text' }}" {% if f.kind == "number" %}min="0" step="any" style="width: 7em"{% endif %} name="{{ f.key }}" data-default="{{ f.default if f.default is not none else '' }}" value="{{ f.default if f.default is not none else '' }}" placeholder="{{ f.placeholder }}"></label>
     {% endif %}
     {% if f.help %}<p class="muted" style="margin: 2px 0 0 22px; font-size: 13px">{{ f.help }}</p>{% endif %}
     </div>
     {% endfor %}
+    <div id="backup-room"></div>
     <p class="muted" id="backup-remembered" style="font-size: 13px" hidden></p>
     <div class="actions">
       <button type="submit" id="backup-submit">{{ icon("backup") }}Back up</button>
@@ -51,29 +53,28 @@
   const form = document.getElementById("backup-form");
   const MB = 1048576;
   let opened = 0;           // an answer for a dialog opened again since is dropped
-  let choicesUrl = "";
+  let estimate = null;      // the estimate's answer, null until it comes
   let remembered = {values: {}, shown: {}};
-  const lists = {};         // key: {list, loaded, shown, threshold}
+  const lists = {};         // key: {list, rows, loaded, threshold}
   const input = (key) => form.elements.namedItem(key);
+  const room = omniaRoom(document.getElementById("backup-room"));
 
   for (const holder of form.querySelectorAll("[data-checklist]")) {
     const key = holder.dataset.checklist;
-    lists[key] = {rows: [], loaded: false, total: null, threshold: holder.dataset.threshold};
-    lists[key].list = omniaChecklist(holder, {onchange: () => showTotal(key)});
+    lists[key] = {rows: [], loaded: false, threshold: holder.dataset.threshold};
+    lists[key].list = omniaChecklist(holder, {onchange: () => updateRoom()});
   }
-  const sizeText = (b) => b >= 1073741824 ? (b / 1073741824).toFixed(2) + " GB"
-    : b >= MB ? (b / MB).toFixed(1) + " MB" : Math.max(1, Math.round(b / 1024)) + " KB";
-  function showTotal(key) {
-    const entry = lists[key];
-    const line = form.querySelector(`[data-checklist-total="${CSS.escape(key)}"]`);
-    if (!entry || !line) return;
-    line.hidden = !entry.loaded || entry.total === null || entry.total === undefined;
-    if (line.hidden) return;
-    const ticked = new Set(entry.list.values());
-    const emptied = entry.rows.filter((r) => ticked.has(r.value)).reduce((sum, r) => sum + (r.size || 0), 0);
-    line.textContent = `${entry.totalLabel || "Total"}: ${sizeText(entry.total)} · ticked: ${sizeText(emptied)}`
-      + ` · in the backup about ${sizeText(Math.max(0, entry.total - emptied))}`
-      + " (an estimate from the size on disk; the zip is smaller still)";
+  function updateRoom() {
+    if (!estimate || estimate.error) return;
+    const filesOff = estimate.files_off && input(estimate.files_off);
+    const listOn = estimate.list_on && input(estimate.list_on);
+    const entry = estimate.list && lists[estimate.list];
+    let ticked = 0;
+    if (entry && entry.loaded && (!listOn || listOn.checked)) {
+      const values = new Set(entry.list.values());
+      ticked = entry.rows.filter((r) => values.has(r.value)).reduce((s, r) => s + (r.size || 0), 0);
+    }
+    room.update({files: !(filesOff && filesOff.checked), ticked, zip: true});
   }
   function showFields() {
     for (const part of form.querySelectorAll("[data-shown-with]")) {
@@ -90,27 +91,14 @@
     const entry = lists[key], bytes = limit(entry);
     for (const row of entry.rows) entry.list.check(row.value, bytes !== null && row.size >= bytes);
   }
-  async function loadList(key) {
-    const entry = lists[key], mine = opened;
+  function fillList(key) {
+    // the rows from the estimate: ticked as the rule above says
+    const entry = lists[key];
     const state = form.querySelector(`[data-checklist-state="${CSS.escape(key)}"]`);
-    if (entry.loaded) return;
+    if (estimate === null) { state.textContent = "· reading the database…"; state.className = "muted"; return; }
+    if (estimate.error) { state.textContent = "· " + estimate.error; state.className = "error"; return; }
+    entry.rows = (estimate.lists || {})[key] || [];
     entry.loaded = true;
-    state.textContent = "· reading the database…"; state.className = "muted";
-    entry.list.setRows([]);
-    let data = null;
-    try {
-      const resp = await fetch(`${choicesUrl}?key=${encodeURIComponent(key)}`, {headers: {Accept: "application/json"}});
-      data = await resp.json().catch(() => null);
-      if (!resp.ok) throw new Error((data && (data.error || data.detail)) || "HTTP " + resp.status);
-    } catch (e) {
-      if (mine !== opened) return;
-      entry.loaded = false;
-      state.textContent = "· " + e.message; state.className = "error";
-      return;
-    }
-    if (mine !== opened) return;
-    entry.rows = data.rows || [];
-    entry.total = data.total ?? null; entry.totalLabel = data.total_label || "";
     const chosen = new Set(remembered.values[key] || []), shown = new Set(remembered.shown[key] || []);
     const bytes = limit(entry);
     entry.list.setRows(entry.rows.map((row) => ({
@@ -119,23 +107,19 @@
     })));
     state.textContent = entry.rows.length ? "" : "· none holds data"; state.className = "muted";
   }
-  function loadShown() {
-    for (const holder of form.querySelectorAll("[data-checklist]")) {
-      if (!holder.closest("[data-shown-with]")?.hidden) loadList(holder.dataset.checklist);
-    }
-  }
   form.addEventListener("change", (ev) => {
     if (ev.target.type === "checkbox" && form.querySelector(`[data-shown-with="${CSS.escape(ev.target.name)}"]`)) {
-      showFields(); loadShown();
+      showFields();
     }
     for (const [key, entry] of Object.entries(lists)) {
       if (entry.threshold && ev.target.name === entry.threshold) tickBySize(key);
     }
+    updateRoom();
   });
   form.addEventListener("submit", () => {
     for (const [key, entry] of Object.entries(lists)) {
-      // not loaded (its checkbox off, or the database not read): not posted,
-      // so the backup takes the last choice
+      // not loaded (the database not read): not posted, so the backup
+      // takes the last choice
       input(key).disabled = !entry.loaded;
       input(key + "__shown").disabled = !entry.loaded;
       input(key).value = entry.list.values().join(",");
@@ -151,30 +135,41 @@
       else el.value = has && values[key] !== null ? values[key] : el.dataset.default;
     }
   }
+  async function json(url) {
+    try {
+      const resp = await fetch(url, {headers: {Accept: "application/json"}});
+      const data = await resp.json().catch(() => null);
+      if (!resp.ok) return {error: (data && (data.error || data.detail)) || "HTTP " + resp.status};
+      return data || {error: "no answer"};
+    } catch (e) { return {error: e.message}; }
+  }
   for (const button of document.querySelectorAll("[data-backup]")) {
     button.onclick = async () => {
       const download = button.dataset.download === "1";
       const mine = ++opened;
       form.action = button.dataset.backup + (download ? "?download=1" : "");
       const [server, role] = button.dataset.key.split("/");
-      choicesUrl = `{{ prefix }}/api/servers/${encodeURIComponent(server)}/${encodeURIComponent(role)}/backup/choices`;
+      const api = `{{ prefix }}/api/servers/${encodeURIComponent(server)}/${encodeURIComponent(role)}`;
       remembered = {values: {}, shown: {}};
-      for (const entry of Object.values(lists)) {
-        entry.loaded = false; entry.rows = []; entry.total = null; entry.list.setRows([]);
-      }
-      for (const s of form.querySelectorAll("[data-checklist-state]")) s.textContent = "";
+      estimate = null;
+      for (const entry of Object.values(lists)) { entry.loaded = false; entry.rows = []; entry.list.setRows([]); }
       fill({});
       showFields();
+      for (const key of Object.keys(lists)) fillList(key);
+      room.reset(true);
       const note = document.getElementById("backup-remembered");
       note.hidden = true;
       document.getElementById("backup-title").textContent = `Backup ${button.dataset.key}` + (download ? " + download" : "");
       document.getElementById("backup-sub").textContent = download
         ? "The zip is downloaded when the backup is ready." : "The zip stays in the instance's backups.";
       dialog.showModal();
-      const resp = await fetch(choicesUrl, {headers: {Accept: "application/json"}}).catch(() => null);
-      const data = resp && resp.ok ? await resp.json().catch(() => null) : null;
+      json(`${api}/restore/room`).then((data) => {
+        if (mine === opened) room.room(data, `a restore into ${button.dataset.key} on this machine`);
+      });
+      const data = await json(`${api}/backup/estimate`);
       if (mine !== opened) return;
-      if (data && data.remembered && data.remembered.saved) {
+      estimate = data;
+      if (data.remembered && data.remembered.saved) {
         remembered = data.remembered;
         fill(remembered.values || {});
         note.textContent = `The choices of the last backup (${remembered.saved.replace("T", " ")}`
@@ -182,7 +177,9 @@
         note.hidden = false;
       }
       showFields();
-      loadShown();
+      for (const key of Object.keys(lists)) fillList(key);
+      room.estimate(data.error ? {error: data.error} : data);
+      updateRoom();
     };
   }
 })();

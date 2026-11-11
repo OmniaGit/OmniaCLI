@@ -1,6 +1,10 @@
 {# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C · SPDX-License-Identifier: AGPL-3.0-or-later -#}
 {# The dialog of the action "copy-production" of the Odoo plugin: drawn once
-   on the server page, it opens for the button data-action="odoo.copy-production". -#}
+   on the server page, it opens for the button data-action="odoo.copy-production".
+   For a new backup the room widget (_room.html) shows its weight (the
+   estimate of production, with the binary columns its last Backup dialog
+   ticks) and whether the restore fits on test's disks. -#}
+{% include "_room.html" %}
 <dialog id="copy-dialog">
   <form method="dialog" id="copy-form">
     <h2 id="copy-title" style="margin-bottom: 4px"></h2>
@@ -18,6 +22,7 @@
       <label style="display: block; margin-top: 4px" title="The binary columns ticked in the last Backup dialog of production (without one: those of at least 10 MB) are left empty in the backup">
         <input type="checkbox" name="no_binaries"> without binary columns (as chosen in production's last Backup)</label>
     </div>
+    <div id="copy-room" style="margin-left: 22px"></div>
     <div id="copy-backups" class="scroll" style="max-height: 40vh; margin: 6px 0"><span class="muted">Loading the backups…</span></div>
     <p id="copy-error" class="error"></p>
     <div class="actions">
@@ -32,10 +37,35 @@
   const list = document.getElementById("copy-backups");
   const errorBox = document.getElementById("copy-error");
   const filestoreChoices = document.querySelectorAll("#copy-filestore input");
-  let target = null;
+  let target = null, estimate = null, opened = 0;
+  const roomBox = document.getElementById("copy-room");
+  const room = omniaRoom(roomBox);
+  function updateRoom() {
+    const backup = dialog.querySelector("input[name=backup]:checked").value;
+    roomBox.hidden = backup !== "";
+    if (!estimate || estimate.error) return;
+    const filestore = dialog.querySelector("input[name=filestore]:checked").value;
+    let ticked = 0;
+    if (dialog.querySelector("input[name=no_binaries]").checked) {
+      const values = new Set((estimate.ticked || {})[estimate.list] || []);
+      ticked = ((estimate.lists || {})[estimate.list] || []).filter((r) => values.has(r.value))
+        .reduce((s, r) => s + (r.size || 0), 0);
+    }
+    // shared: no filestore in the backup, test's made of hard links (no room)
+    room.update({files: filestore === "copy", ticked, zip: true});
+  }
+  async function json(url) {
+    try {
+      const resp = await fetch(url, {headers: {Accept: "application/json"}});
+      const data = await resp.json().catch(() => null);
+      if (!resp.ok) return {error: (data && (data.error || data.detail)) || "HTTP " + resp.status};
+      return data || {error: "no answer"};
+    } catch (e) { return {error: e.message}; }
+  }
   // the choice applies to a new backup only
   dialog.addEventListener("change", (ev) => {
     if (ev.target.name === "backup") for (const c of filestoreChoices) c.disabled = ev.target.value !== "";
+    updateRoom();
   });
   const sizeText = (b) => b >= 1073741824 ? (b / 1073741824).toFixed(2) + " GiB"
     : b >= 1048576 ? (b / 1048576).toFixed(1) + " MiB" : Math.max(1, Math.round(b / 1024)) + " KiB";
@@ -71,7 +101,18 @@
       dialog.querySelector('input[name=backup][value=""]').checked = true;
       for (const c of filestoreChoices) { c.checked = c.type === "radio" && c.value === "share"; c.disabled = false; }
       errorBox.textContent = "";
+      dialog.querySelector("input[name=no_binaries]").checked = false;
+      const mine = ++opened;
+      estimate = null; room.reset(true); updateRoom();
       dialog.showModal(); load();
+      const api = `{{ prefix }}/api/servers/${encodeURIComponent(target.server)}`;
+      json(`${api}/test/restore/room`).then((data) => {
+        if (mine === opened) room.room(data, `the restore into ${target.server}/test`);
+      });
+      json(`${api}/production/backup/estimate`).then((data) => {
+        if (mine !== opened) return;
+        estimate = data; room.estimate(data); updateRoom();
+      });
     };
   }
   document.getElementById("copy-form").addEventListener("submit", async (ev) => {

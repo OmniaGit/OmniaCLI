@@ -1,7 +1,12 @@
 {# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C · SPDX-License-Identifier: AGPL-3.0-or-later -#}
 {# Copy from link: drawn once on the server page, it opens for the buttons
    data-from-link (url, link, server, role, label, known, database). The
-   backups there are listed through the link's pages here (/links/<link>/). -#}
+   backups there are listed through the link's pages here (/links/<link>/).
+   For a new backup the room widget (_room.html) shows its weight (the
+   estimate there, through the link, with the binary columns the last
+   Backup dialog there ticks) and whether its restore fits on the disks of
+   the instance here. -#}
+{% include "_room.html" %}
 <dialog id="from-link-dialog">
   <form method="dialog" id="from-link-form">
     <h2 id="from-link-title" style="margin-bottom: 4px"></h2>
@@ -10,6 +15,7 @@
     {% for f in backup_fields if f.kind == "checkbox" %}
     <label style="display: block; margin-left: 22px" title="{{ f.help }}"><input type="checkbox" data-backup-option="{{ f.key }}" {{ "checked" if f.default }}> {{ f.label | lower }}</label>
     {% endfor %}
+    <div id="from-link-room" style="margin-left: 22px"></div>
     <div id="from-link-backups" class="scroll" style="max-height: 35vh; margin: 6px 0"></div>
     <div id="from-link-options">
       {% for f in restore_fields %}
@@ -37,11 +43,37 @@
   const list = document.getElementById("from-link-backups");
   const errorBox = document.getElementById("from-link-error");
   const typed = document.getElementById("from-link-typed");
-  let target = null, key = "";
+  let target = null, key = "", estimate = null, opened = 0;
   const backupOptions = [...dialog.querySelectorAll("[data-backup-option]")];
+  const roomBox = document.getElementById("from-link-room");
+  const room = omniaRoom(roomBox);
+  const option = (name) => backupOptions.find((b) => b.dataset.backupOption === name);
+  function updateRoom() {
+    roomBox.hidden = dialog.querySelector("input[name=backup]:checked").value !== "";
+    if (!estimate || estimate.error) return;
+    const filesOff = estimate.files_off && option(estimate.files_off);
+    const listOn = estimate.list_on && option(estimate.list_on);
+    let ticked = 0;
+    if (!listOn || listOn.checked) {
+      const values = new Set((estimate.ticked || {})[estimate.list] || []);
+      ticked = ((estimate.lists || {})[estimate.list] || []).filter((r) => values.has(r.value))
+        .reduce((s, r) => s + (r.size || 0), 0);
+    }
+    if (estimate.list && !listOn) ticked = 0;
+    room.update({files: !(filesOff && filesOff.checked), ticked, zip: true});
+  }
+  async function json(url) {
+    try {
+      const resp = await fetch(url, {headers: {Accept: "application/json"}});
+      const data = await resp.json().catch(() => null);
+      if (!resp.ok) return {error: (data && (data.error || data.detail)) || "HTTP " + resp.status};
+      return data || {error: "no answer"};
+    } catch (e) { return {error: e.message}; }
+  }
   // the choices of a new backup: not for one already there
   dialog.addEventListener("change", (ev) => {
     if (ev.target.name === "backup") for (const box of backupOptions) box.disabled = ev.target.value !== "";
+    updateRoom();
   });
   const sizeText = (b) => b >= 1073741824 ? (b / 1073741824).toFixed(2) + " GiB"
     : b >= 1048576 ? (b / 1048576).toFixed(1) + " MiB" : Math.max(1, Math.round(b / 1024)) + " KiB";
@@ -86,6 +118,20 @@
       document.getElementById("from-link-confirm").hidden = !target.database;
       document.getElementById("from-link-db").textContent = target.database;
       typed.value = ""; errorBox.textContent = "";
+      const mine = ++opened;
+      estimate = null; room.reset(true); updateRoom();
+      const [here, hereRole] = key.split("/");
+      json(`{{ prefix }}/api/servers/${encodeURIComponent(here)}/${encodeURIComponent(hereRole)}/restore/room`)
+        .then((data) => { if (mine === opened) room.room(data, `the restore into ${key} here`); });
+      const there = target.puller ? Promise.resolve({error: "a relay tells no weight of the backup there"})
+        : !target.known ? Promise.resolve({error: `no link ${target.link} here`})
+        : json(`{{ prefix }}/links/${target.link}/api/servers/${target.server}/${target.role}/backup/estimate`)
+          .then((d) => d.error && /404|Not Found/.test(d.error)
+            ? {error: "the OmniaCLI there tells no weight of a backup (an older version)"} : d);
+      there.then((data) => {
+        if (mine !== opened) return;
+        estimate = data; room.estimate(data); updateRoom();
+      });
       dialog.showModal();
       if (target.puller) {
         // a puller brings a new backup only: the relay keeps none

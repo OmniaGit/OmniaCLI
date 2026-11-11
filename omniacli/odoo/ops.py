@@ -37,6 +37,9 @@ CRON_GUARD_MARK = "OMNIACLI_ACTIVE_CRONS="
 # and to back it up with some of them emptied
 BINARY_SCRIPT = Path(__file__).with_name("binary_dump.py")
 BINARY_MARK = "OMNIACLI_BINARY_COLUMNS="
+ROOM_MARK = "OMNIACLI_RESTORE_ROOM="
+# the hosts of a PostgreSQL on this machine (empty: its socket)
+LOCAL_HOSTS = (None, "", "localhost", "127.0.0.1", "::1")
 
 
 @contextlib.contextmanager
@@ -53,26 +56,62 @@ def _staged_script(script: Path, prefix: str):
         shutil.rmtree(staging, ignore_errors=True)
 
 
-async def binary_columns(instance: Instance) -> dict:
-    """The size on disk of the instance's database and every bytea column
-    of it with the bytes it holds (binary_dump.py scan, as the user the
-    instance runs as): {size, columns: [{schema, table, column, bytes,
-    rows, not_null}]}."""
+async def _binary_dump(instance: Instance, mode: str, mark: str) -> dict:
+    """binary_dump.py scan or room on the instance's database, as the user
+    the instance runs as: the JSON it prints after mark."""
     opts = instance.options
     env = odoo_env(instance)
     with _staged_script(BINARY_SCRIPT, "omniacli-binaries-") as script:
-        cmd = [opts.venv_bin / "python", script, "scan", opts.odoo_config, opts.database]
+        cmd = [opts.venv_bin / "python", script, mode, opts.odoo_config, opts.database]
         code, out = await capture(as_user(instance.run_as, cmd, env), env=env, timeout=600)
-    found = [line for line in out.splitlines() if line.startswith(BINARY_MARK)]
+    found = [line for line in out.splitlines() if line.startswith(mark)]
     if code or not found:
-        raise JobFailed(f"the binary columns of {opts.database} cannot be read: {out[-2000:]}")
+        raise JobFailed(f"{opts.database} cannot be read ({mode}): {out[-2000:]}")
     try:
-        data = json.loads(found[-1][len(BINARY_MARK):])
-        if not isinstance(data, dict) or not isinstance(data.get("columns"), list):
-            raise ValueError("not {size, columns}")
-        return data
+        data = json.loads(found[-1][len(mark):])
     except ValueError as exc:
-        raise JobFailed(f"the binary columns of {opts.database}: {exc}") from None
+        raise JobFailed(f"{opts.database} ({mode}): {exc}") from None
+    if not isinstance(data, dict):
+        raise JobFailed(f"{opts.database} ({mode}): not a mapping")
+    return data
+
+
+async def restore_room(instance: Instance) -> dict:
+    """Where a restore into the instance writes and what it drops first
+    (binary_dump.py room), with PostgreSQL's data folder found by
+    pg_lsclusters when PostgreSQL does not tell it (not a superuser) and it
+    runs on this machine; data_directory stays None when it is not found."""
+    found = await _binary_dump(instance, "room", ROOM_MARK)
+    if not found.get("data_directory") and (found.get("db_host") in LOCAL_HOSTS
+                                            or str(found.get("db_host")).startswith("/")):
+        found["data_directory"] = await _cluster_folder(int(found.get("db_port") or 5432))
+    return found
+
+
+async def _cluster_folder(port: int) -> str | None:
+    """The data folder of the PostgreSQL cluster on port (Debian's
+    pg_lsclusters, which any user may run); None without it."""
+    if not shutil.which("pg_lsclusters"):
+        return None
+    code, out = await capture(["pg_lsclusters", "--no-header"], timeout=30)
+    if code:
+        return None
+    for line in out.splitlines():
+        fields = line.split()
+        if len(fields) >= 6 and fields[2] == str(port):
+            return fields[5]
+    return None
+
+
+async def binary_columns(instance: Instance) -> dict:
+    """The size on disk of the instance's database and every bytea column
+    of it with the bytes it holds (binary_dump.py scan, as the user the
+    instance runs as): {size, filestore: {path, bytes, files}, columns:
+    [{schema, table, column, bytes, rows, not_null}]}."""
+    data = await _binary_dump(instance, "scan", BINARY_MARK)
+    if not isinstance(data.get("columns"), list):
+        raise JobFailed(f"the binary columns of {instance.options.database}: no list of columns")
+    return data
 
 
 async def _cron_guard(instance: Instance, *args: str) -> tuple[int, str]:

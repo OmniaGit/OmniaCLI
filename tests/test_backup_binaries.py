@@ -158,3 +158,50 @@ async def test_copy_production_takes_the_last_ticks(client, env, scanned):
     assert job["title"] == "Copy production to test srv (new backup, binary columns emptied)", job["title"]
     # ir_attachment.preview was not shown last time: ticked by its size
     assert scanned[-1] == ["ir_attachment.preview", "res_company.logo_web"]
+
+
+async def test_estimate_gives_the_weight_and_the_last_ticks(client, env, scanned, monkeypatch):
+    url = "/api/servers/srv/production/backup/estimate"
+    COLUMNS["filestore"] = {"path": "/x", "bytes": 50 * MB, "files": 3}
+    try:
+        got = (await client.get(url, headers={"Authorization": AUTH})).json()
+        assert got["database"] == 900 * MB and got["files"] == 50 * MB
+        assert got["files_off"] == "no_filestore" and got["list"] == "binary_columns" and got["list_on"] == "no_binaries"
+        # nobody chose yet: the columns of at least 10 MB
+        assert got["ticked"] == {"binary_columns": ["plm_document.printout", "ir_attachment.preview"]}
+        resp = await client.post("/servers/srv/production/backup", headers=POST, data={
+            "no_binaries": "on", "binary_columns": "res_company.logo_web",
+            "binary_columns__shown": "plm_document.printout,ir_attachment.preview,res_company.logo_web",
+            "remember": "1"})
+        await wait_job(client, resp.headers["location"].split("/jobs/")[1])
+        got = (await client.get(url, headers={"Authorization": AUTH})).json()
+        assert got["ticked"] == {"binary_columns": ["res_company.logo_web"]} and got["remembered"]["saved"]
+    finally:
+        COLUMNS.pop("filestore")
+
+
+async def test_room_places_each_folder_on_its_disk(client, env, monkeypatch):
+    tmp = env["tmp"]
+
+    async def restore_room(instance):
+        return {"data_directory": None, "db_host": "db.example", "db_port": 5432, "database_bytes": 7 * MB,
+                "filestore": {"path": str(tmp / "filestore" / "DB_test"), "bytes": 3 * MB, "files": 2},
+                "temp": str(tmp)}
+
+    monkeypatch.setattr(odoo_ops, "restore_room", restore_room)
+    got = (await client.get("/api/servers/srv/test/restore/room", headers={"Authorization": AUTH})).json()
+    # PostgreSQL on another machine: its disk is not checked, and said so
+    assert got["unknown"] == ["database"] and any("db.example" in n for n in got["notes"])
+    roles = [r for d in got["disks"] for r in d["roles"]]
+    assert sorted(roles) == ["backups", "files", "temp"] and all(d["free"] > 0 for d in got["disks"])
+    assert got["freed"] == {"database": 7 * MB, "files": 3 * MB}
+    # a user may not read it (developer and admin may)
+    assert (await client.get("/api/servers/srv/test/restore/room",
+                             headers={"Authorization": basic("viewer")})).status_code == 403
+
+
+async def test_room_unknown_path():
+    from omniacli import restoreroom
+
+    got = await restoreroom.room({"backups": "/", "temp": None, "database": "relative/folder"}, {}, [])
+    assert [d["mount"] for d in got["disks"]] and "temp" in got["unknown"] and "files" in got["unknown"]

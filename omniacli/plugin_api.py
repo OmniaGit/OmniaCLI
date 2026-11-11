@@ -356,6 +356,27 @@ class ServicePlugin(ABC):
         when they cannot be found."""
         raise JobFailed(f"{self.label} has no choices for {key}")
 
+    async def backup_estimate(self, instance: Instance) -> dict:
+        """What a backup of the instance would hold, before it is made, for
+        the preview of the dialogs: {"database": bytes on disk, "files":
+        bytes or None, "files_off": the checkbox that leaves the files out,
+        "list": the checklist whose ticked rows are left out of the
+        database, "list_on": its checkbox, "lists": {key: rows as
+        backup_choices}}. The dump of a database is taken as its size on
+        disk plus once more its binary rows not left out (written in hex).
+        Raise JobFailed when it cannot be told."""
+        raise JobFailed(f"{self.label} has no estimate of a backup")
+
+    async def restore_room(self, instance: Instance) -> dict:
+        """Where a restore into the instance writes, for the room check of
+        the dialogs: {"paths": {"database": folder or None (not known),
+        "files": folder, "temp": folder where the backup is unpacked},
+        "freed": {"database": bytes, "files": bytes the restore drops
+        first}, "notes": [text]}. The core adds the instance's backup
+        folder (the zip) and places each path on its disk. Raise JobFailed
+        when it cannot be told."""
+        raise JobFailed(f"{self.label} has no room check of a restore")
+
     async def restore(self, job: Job, instance: Instance, backup_zip: Path, options: dict) -> None:
         """Load a file of backup (made here or by a linked instance) into the
         instance, whose data it replaces. options: the values of
@@ -520,7 +541,8 @@ async def restore_fetched(job: Job, instance: Instance, backup_zip: Path, option
     await instance.plugin.restore(job, instance, backup_zip, options)
 
 
-ASYNC_METHODS = ("checks", "after_pull", "backup", "backup_choices", "restore", "before_start", "dev_setup", "discover")
+ASYNC_METHODS = ("checks", "after_pull", "backup", "backup_choices", "backup_estimate", "restore_room", "restore",
+                 "before_start", "dev_setup", "discover")
 _ID = re.compile(r"[a-z][a-z0-9_-]{0,31}")
 
 
