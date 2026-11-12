@@ -18,7 +18,7 @@ import signal
 import subprocess
 from pathlib import Path
 
-from . import backupchoices, packages
+from . import backupchoices, packages, private
 from .config import Instance, Repository, Server
 from .jobs import Job, JobFailed
 
@@ -44,13 +44,17 @@ STOP_TIMEOUT = 60
 KILL_WAIT = 10
 
 
+# what as_user carries past sudo
+SUDO_ENV = ("PYTHONPATH", "TMPDIR")
+
+
 def as_user(run_as: str | None, cmd: list, env: dict | None = None) -> list:
     """cmd as the system user run_as, through sudo -n; sudo resets the
-    environment, so a PYTHONPATH of env goes on the command line (sudoers
-    needs SETENV for it)."""
+    environment, so a PYTHONPATH or TMPDIR of env goes on the command line
+    (sudoers needs SETENV for it)."""
     if run_as is None:
         return cmd
-    extra = [f"PYTHONPATH={env['PYTHONPATH']}"] if env and env.get("PYTHONPATH") else []
+    extra = [f"{k}={env[k]}" for k in SUDO_ENV if env and env.get(k)]
     return ["sudo", "-n", "-u", run_as, *extra, *cmd]
 
 
@@ -687,10 +691,11 @@ async def backup_into(job: Job, instance: Instance, dest_dir: Path, options: dic
     """The plugin's backup into dest_dir, the instance's backup folder. A
     checklist the caller does not give (None) while its checkbox is ticked
     takes the ticks of the instance's last backup dialog (backupchoices),
-    when it chose one; without, the plugin's own default."""
+    when it chose one; without, the plugin's own default. The folder is
+    700 and the zip 600, whatever the plugin made (private.py)."""
     if not instance.plugin.has_backup:
         raise JobFailed(f"{_label(instance)} has no backup")
-    dest_dir.mkdir(parents=True, exist_ok=True)
+    private.backup_folder(dest_dir)
     options = dict(options or {})
     remembered = backupchoices.load(dest_dir)
     fields = instance.plugin.backup_fields()
@@ -709,7 +714,7 @@ async def backup_into(job: Job, instance: Instance, dest_dir: Path, options: dic
         options[f.key] = backupchoices.ticked(rows, remembered, f.key, megabytes)
         job.log(f"--- {f.label}: the choice of the backup dialog of {remembered.get('saved', '?')} "
                 f"({remembered.get('user') or '?'}): {', '.join(options[f.key]) or 'none'}")
-    return await instance.plugin.backup(job, instance, dest_dir, options)
+    return private.backup_file(await instance.plugin.backup(job, instance, dest_dir, options))
 
 
 async def pull_restart(job: Job, instance: Instance, only_if_changed: bool = False,

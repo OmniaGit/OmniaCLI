@@ -287,10 +287,14 @@ class OdooPlugin(ServicePlugin):
                          if host not in ops.LOCAL_HOSTS and not str(host).startswith("/") else
                          "PostgreSQL does not tell its data folder to this user (not a superuser) and "
                          "pg_lsclusters does not find it: its disk is not checked")
-        notes.append(f"the restore unpacks the backup in {found.get('temp')} first")
+        # where ops.restore unpacks: beside the zip, or run_as's staging
+        temp = (str(ops.BACKUP_STAGING) if instance.run_as is not None
+                else str(self._host.backup_folder(instance)) if self._host is not None else None)
+        notes.append(f"the restore unpacks the backup in {temp} first" if temp
+                     else "the folder where the restore unpacks the backup is not known: not checked")
         filestore = found.get("filestore") or {}
         return {"paths": {"database": found.get("data_directory"), "files": filestore.get("path"),
-                          "temp": found.get("temp")},
+                          "temp": temp},
                 "freed": {"database": found.get("database_bytes") or 0, "files": filestore.get("bytes") or 0},
                 "notes": notes}
 

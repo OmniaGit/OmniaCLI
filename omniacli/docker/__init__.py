@@ -56,6 +56,7 @@ from ..plugin_api import (
     JobFailed,
     Server,
     ServicePlugin,
+    backup_into,
     capture,
     restart,
     run,
@@ -449,8 +450,8 @@ class DockerPlugin(ServicePlugin):
             raise JobFailed(f"Odoo {major} cannot back up a database without its filestore "
                             f"(from Odoo {NO_FILESTORE_MAJOR}): copy the filestore")
         folder = self._host.backup_folder(prod)
-        folder.mkdir(parents=True, exist_ok=True)
-        backup_zip = await self.backup(job, prod, folder, {"no_filestore": mode != "copy"})
+        # the core's backup: a private folder and zip
+        backup_zip = await backup_into(job, prod, folder, {"no_filestore": mode != "copy"})
         await stop(job, test)
         opts = test.options
         job.log(f"--- load {backup_zip.name} into database {opts.database} of test (neutralized)")

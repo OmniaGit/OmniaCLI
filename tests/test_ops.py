@@ -256,7 +256,7 @@ echo dump > "$last"
     dest = await ops.backup(job(), prod, env["settings"].backup_dir)
     assert dest.parent == env["settings"].backup_dir / "srv" / "production" and dest.read_text() == "dump\n"
     assert seen.read_text() == "700\n"
-    assert stat.S_IMODE(dest.stat().st_mode) == 0o640
+    assert stat.S_IMODE(dest.stat().st_mode) == 0o600
     assert not dest.with_name(dest.name + ".part").exists()
     sudo = fake_sudo.read_text()
     assert "sudo -n -u odoo " in sudo and f"{staging}/omniacli-backup-" in sudo

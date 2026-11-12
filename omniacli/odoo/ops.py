@@ -23,6 +23,9 @@ PIP_TIMEOUT = 1800
 # folder here that only that user can enter: it cannot reach the backup folder
 # (on disk: /tmp may be in memory)
 BACKUP_STAGING = Path("/var/tmp")
+# the folder (700, beside the zip) where a restore without run_as unpacks
+# the backup: the backup listing shows only the zips
+RESTORE_TEMP = ".restore-"
 # what OmniaCLI runs in an instance's venv: click-odoo-update, click-odoo-backupdb
 CLI_PACKAGE = "click-odoo-contrib"
 # what the venv's python runs to share a filestore through hard links
@@ -449,7 +452,7 @@ async def _backup_to(job: Job, instance: Instance, dest: Path, command, env: dic
         # through <file>.part: a cut copy leaves nothing
         part = dest.with_name(dest.name + ".part")
         try:
-            with os.fdopen(os.open(part, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o640), "wb") as out:
+            with os.fdopen(os.open(part, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb") as out:
                 await run(job, _python_as(instance, _FILE_TO_STDOUT, staged), stdout=out)
             part.replace(dest)
         finally:
@@ -487,7 +490,13 @@ async def restore(job: Job, instance: Instance, backup_zip: Path, neutralize: bo
     """click-odoo-restoredb of a backup zip into the instance's database: the
     database and its filestore are dropped first (--force), the copy gets a
     new dbuuid (--copy), and with neutralize Odoo disables its crons and
-    outgoing mails (--neutralize, Odoo 16 and later)."""
+    outgoing mails (--neutralize, Odoo 16 and later).
+
+    Odoo unpacks the zip (dump.sql, filestore) in a folder of tempfile
+    first (Odoo 10 to 19): TMPDIR puts it on the disk of the backups, not
+    in /tmp (the system's disk, or memory). Without run_as a folder 700
+    beside the zip (restore_temp), with run_as the private folder of the
+    staged zip; removed at the end, failed or not."""
     opts = instance.options
     cmd = [opts.venv_bin / "click-odoo-restoredb", "-c", opts.odoo_config, "--copy", "--force"]
     if neutralize:
@@ -496,13 +505,18 @@ async def restore(job: Job, instance: Instance, backup_zip: Path, neutralize: bo
     job.log(f"--- restore {backup_zip.name} into database {opts.database}"
             + (" (neutralized)" if neutralize else ""))
     if instance.run_as is None:
-        await run(job, [*cmd, opts.database, backup_zip], env=env)
+        with tempfile.TemporaryDirectory(prefix=RESTORE_TEMP, dir=backup_zip.parent) as unpacked:
+            job.log(f"the backup is unpacked in {unpacked} first")
+            await run(job, [*cmd, opts.database, backup_zip], env={**env, "TMPDIR": unpacked})
         return
-    # run_as cannot read the backup folder: a copy in its private folder
+    # run_as cannot read the backup folder: a copy in its private folder,
+    # unpacked there too
     async with _private_folder(instance, "omniacli-restore-") as folder:
         staged = folder / backup_zip.name
         with open(backup_zip, "rb") as source:
             await run(job, _python_as(instance, _FILE_FROM_STDIN, staged), stdin=source)
+        env = {**env, "TMPDIR": str(folder)}
+        job.log(f"the backup is unpacked in {folder} first")
         await run(job, as_user(instance.run_as, [*cmd, opts.database, staged], env), env=env)
 
 

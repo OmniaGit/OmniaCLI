@@ -143,7 +143,38 @@ cat "$last" >> {seen}
     assert seen.read_bytes() == b"700\n600\ndu\x00\xffmp"
     sudo = fake_sudo.read_text()
     assert "sudo -n -u odoo " in sudo and f"{staging}/omniacli-restore-" in sudo and "prod.zip" in sudo
+    # Odoo unpacks it in the same private folder, past sudo
+    assert f" TMPDIR={staging}/omniacli-restore-" in sudo
     assert list(staging.iterdir()) == []  # the staging folder is removed
+
+
+async def test_restore_unpacks_beside_the_zip(env):
+    """Without run_as Odoo unpacks the backup in a folder 700 beside the
+    zip (TMPDIR), not in /tmp, removed after, failed or not."""
+    from omniacli.jobs import Job, JobFailed
+
+    seen = env["tmp"] / "seen"
+    restoredb = env["tmp"] / "venv" / "bin" / "click-odoo-restoredb"
+    restoredb.write_text(f'#!/bin/sh\necho "$TMPDIR" > {seen}\nstat -c %a "$TMPDIR" >> {seen}\n'
+                         f'if [ -e {env["tmp"] / "restore-fails"} ]; then exit 1; fi\n')
+    folder = env["tmp"] / "backups" / "srv" / "test"
+    folder.mkdir(parents=True)
+    backup = folder / "prod.zip"
+    backup.write_bytes(b"dump")
+    test = env["settings"].instance("srv", "test")
+    job = Job(id="t", title="t", instances=[], source="test")
+    await odoo_ops.restore(job, test, backup, True)
+    where, mode = seen.read_text().split()
+    assert Path(where).parent == folder and Path(where).name.startswith(odoo_ops.RESTORE_TEMP) and mode == "700"
+    assert sorted(p.name for p in folder.iterdir()) == ["prod.zip"]
+    (env["tmp"] / "restore-fails").write_text("")
+    try:
+        await odoo_ops.restore(job, test, backup, True)
+    except JobFailed:
+        pass
+    else:
+        raise AssertionError("the restore did not fail")
+    assert sorted(p.name for p in folder.iterdir()) == ["prod.zip"]
 
 
 def shared_setup(env, monkeypatch, data_dir=True):

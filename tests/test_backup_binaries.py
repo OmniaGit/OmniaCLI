@@ -205,3 +205,50 @@ async def test_room_unknown_path():
 
     got = await restoreroom.room({"backups": "/", "temp": None, "database": "relative/folder"}, {}, [])
     assert [d["mount"] for d in got["disks"]] and "temp" in got["unknown"] and "files" in got["unknown"]
+
+
+def test_private_folders_and_files(tmp_path):
+    """The backups are OmniaCLI's own: the instance's folder and its
+    server's 700, a zip 600, also when they were there before."""
+    import os
+    import stat
+
+    from omniacli import private
+
+    mode = lambda p: stat.S_IMODE(p.stat().st_mode)  # noqa: E731
+    folder = tmp_path / "backups" / "srv" / "test"
+    assert private.backup_folder(folder) == folder
+    assert mode(folder) == 0o700 and mode(folder.parent) == 0o700
+    folder.chmod(0o755)
+    private.backup_folder(folder)
+    assert mode(folder) == 0o700
+    old = os.umask(0o022)
+    try:
+        with private.new_file(folder / "a.zip.part") as out:
+            out.write(b"x")
+        (folder / "b.zip").write_bytes(b"x")
+    finally:
+        os.umask(old)
+    assert mode(folder / "a.zip.part") == 0o600 and mode(folder / "b.zip") == 0o644
+    private.backup_file(folder / "b.zip")
+    assert mode(folder / "b.zip") == 0o600
+
+
+def test_as_user_carries_tmpdir():
+    from omniacli.ops import as_user
+
+    assert as_user("odoo", ["x"], {"PYTHONPATH": "/p", "TMPDIR": "/t", "HOME": "/h"}) == \
+        ["sudo", "-n", "-u", "odoo", "PYTHONPATH=/p", "TMPDIR=/t", "x"]
+    assert as_user(None, ["x"], {"TMPDIR": "/t"}) == ["x"]
+
+
+async def test_backup_zip_is_private(client, env, scanned):
+    import stat
+
+    resp = await client.post("/servers/srv/production/backup", headers=POST, data={})
+    data = await wait_job(client, resp.headers["location"].split("/jobs/")[1])
+    assert data["status"] == "success", data
+    folder = env["tmp"] / "backups" / "srv" / "production"
+    zips = list(folder.glob("*.zip"))
+    assert zips and all(stat.S_IMODE(z.stat().st_mode) == 0o600 for z in zips)
+    assert stat.S_IMODE(folder.stat().st_mode) == 0o700

@@ -34,7 +34,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.background import BackgroundTask
 from starlette.requests import ClientDisconnect, HTTPConnection
 
-from . import (backupchoices, checks, restoreroom, consumer, disks, gitcredentials, linkcopy, listgroups, ops, packages, plugins, pluginstore, puller, publisher,
+from . import (backupchoices, checks, private, restoreroom, consumer, disks, gitcredentials, linkcopy, listgroups, ops, packages, plugins, pluginstore, puller, publisher,
                schedules, selflog, sshlinks, shell, stacktemplates, templatestore, tunnel, workspacehelper, workspaceops)
 from .accesslog import AccessLog
 from .diskhistory import DiskHistory, DiskRecorder
@@ -1346,8 +1346,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         name = re.sub(r"[^A-Za-z0-9._-]", "_", Path(name).name)
         if not linkcopy.BACKUP_NAME.fullmatch(name):
             return refuse("The file must be a .zip")
-        folder = backup_folder(instance)
-        folder.mkdir(parents=True, exist_ok=True)
+        folder = private.backup_folder(backup_folder(instance))
         dest = folder / name
         if dest.exists():
             return refuse(f"{name} is in the backups of {instance.key} already: choose it from the list",
