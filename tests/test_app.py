@@ -4,7 +4,10 @@ import asyncio
 import base64
 import dataclasses
 import datetime
+import json
 import re
+import sys
+from pathlib import Path
 
 import httpx
 import pytest
@@ -308,6 +311,70 @@ async def test_list_addons(env):
     addons = odoo_ops.list_addons(test)
     assert [(a["name"], a["in_repository"]) for a in addons] == [("in_repo", True), ("outside", False)]
     assert odoo_ops.odoo_major(odoo_ops.find_odoo_bin(test)) == 18
+
+
+async def test_manifest_versions(env):
+    test = make_addons(env)
+    addons = odoo_ops.list_addons(test)
+    paths = {a["name"]: Path(a["path"]) for a in addons}
+    (paths["in_repo"] / "__manifest__.py").write_text("{'name': 'x', 'version': '1.4'}")
+    assert odoo_ops.manifest_versions(addons) == {"in_repo": "1.4", "outside": None}
+    (paths["outside"] / "__manifest__.py").write_text("{'version': broken")
+    assert odoo_ops.manifest_versions(addons) == {"in_repo": "1.4"}
+
+
+def test_module_versions_compare(monkeypatch):
+    """The installed version against the manifest's, made canonical by Odoo."""
+    import types
+
+    from omniacli.odoo import binary_dump
+
+    module = types.ModuleType("odoo.modules.module")
+    module.adapt_version = lambda v: v if v.startswith("19.0.") else "19.0." + v
+    parse = types.ModuleType("odoo.tools.parse_version")
+    parse.parse_version = lambda v: tuple(int(x) for x in v.split("."))
+    monkeypatch.setitem(sys.modules, "odoo.modules.module", module)
+    monkeypatch.setitem(sys.modules, "odoo.tools.parse_version", parse)
+
+    class Cursor:
+        def execute(self, query):
+            pass
+
+        def fetchall(self):
+            return [("base", "installed", "19.0.1.3"), ("sale", "to upgrade", "19.0.1.2"),
+                    ("crm", "uninstalled", None), ("gone", "installed", "19.0.1.0")]
+
+    got = binary_dump.module_versions(Cursor(), None, {"base": "1.3", "sale": "1.10", "crm": None,
+                                                       "extra": "19.0.2.0"})
+    assert got["base"] == {"state": "installed", "installed": "19.0.1.3", "available": "19.0.1.3",
+                           "newer": False}
+    assert got["sale"]["newer"] and got["sale"]["available"] == "19.0.1.10"
+    assert got["crm"] == {"state": "uninstalled", "installed": None, "available": "19.0.1.0", "newer": False}
+    assert got["gone"]["available"] is None and not got["gone"]["newer"]
+    assert got["extra"]["state"] is None and got["extra"]["installed"] is None
+
+
+async def test_addon_versions_endpoint(client, env, monkeypatch):
+    make_addons(env)
+    asked = []
+
+    async def fake(instance, mode, mark, input=None, timeout=600):
+        asked.append((mode, json.loads(input)))
+        return {"in_repo": {"state": "installed", "installed": "18.0.1.0", "available": "18.0.1.1",
+                            "newer": True}}
+
+    monkeypatch.setattr(odoo_ops, "_binary_dump", fake)
+    url = "/x/odoo/servers/srv/test/addons/versions"
+    data = (await client.get(url, headers={"Authorization": AUTH})).json()
+    assert data["modules"]["in_repo"]["newer"]
+    assert asked == [("modules", {"in_repo": None, "outside": None})]
+
+    async def failing(*args, **kwargs):
+        raise odoo_ops.JobFailed("db1 cannot be read (modules): no PostgreSQL")
+
+    monkeypatch.setattr(odoo_ops, "_binary_dump", failing)
+    resp = await client.get(url, headers={"Authorization": AUTH})
+    assert resp.status_code == 502 and "no PostgreSQL" in resp.json()["error"]
 
 
 async def test_update_popup_actions(client, env):

@@ -12,6 +12,7 @@
       <div id="addon-recent" class="actions" style="margin: 8px 0" hidden></div>
       <input type="text" id="addon-filter" placeholder="Filter modules…" style="margin: 8px 0">
       <div id="addon-list" class="addon-list"><span class="muted">Loading…</span></div>
+      <p class="muted" id="addon-versions" style="margin: -4px 0 8px"></p>
       <label>Other modules, comma separated
         <input type="text" id="addon-extra" placeholder="e.g. base"></label>
       <p class="muted" id="addon-count"></p>
@@ -94,23 +95,62 @@
     h.className = "addon-group"; h.textContent = title; list.appendChild(h);
     for (const a of addons) {
       const label = document.createElement("label");
-      label.className = "addon"; label.title = a.path; label.dataset.name = a.name;
+      label.className = "addon"; label.title = a.path; label.dataset.name = a.name; label.dataset.path = a.path;
       const box = document.createElement("input");
       box.type = "checkbox"; box.value = a.name;
       box.onchange = () => { dialog.querySelector("input[value=chosen]").checked = true; refresh(); };
-      label.append(box, " " + a.name);
+      const version = document.createElement("span");
+      version.className = "addon-version muted";
+      label.append(box, " " + a.name, version);
       list.appendChild(label);
     }
   }
+  // the installed and the available version of each module, asked after
+  // the list: the database may answer in a second or more
+  async function loadVersions(asked) {
+    let data = {};
+    try {
+      const resp = await fetch(`{{ prefix }}/x/odoo/servers/${asked.server}/${asked.role}/addons/versions`);
+      data = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(data.error || ("Error " + resp.status));
+    } catch (e) {
+      if (target === asked) document.getElementById("addon-versions").textContent = "Versions not read: " + e.message;
+      return;
+    }
+    if (target !== asked) return;  // the dialog was opened again for another instance
+    const modules = data.modules || {};
+    let newer = 0;
+    for (const label of list.querySelectorAll(".addon")) {
+      const m = modules[label.dataset.name];
+      const span = label.querySelector(".addon-version");
+      label.classList.toggle("addon-newer", !!(m && m.newer));
+      if (!m) { span.textContent = ""; continue; }
+      if (!m.installed) span.textContent = "  not installed";
+      else if (m.available && m.available !== m.installed) span.textContent = `  ${m.installed} → ${m.available}`;
+      else span.textContent = "  " + m.installed;
+      if (m.newer) newer += 1;
+      label.title = m.newer ? `${label.dataset.path}\nnewer on disk: ${m.installed} → ${m.available}` : label.dataset.path;
+    }
+    document.getElementById("addon-versions").textContent =
+      newer ? `${newer} installed module${newer > 1 ? "s" : ""} with a newer version on disk (in red)`
+            : "No installed module has a newer version on disk";
+  }
   async function load() {
+    const asked = target;
     list.innerHTML = '<span class="muted">Loading…</span>';
+    document.getElementById("addon-versions").textContent = "";
     const resp = await fetch(`{{ prefix }}/x/odoo/servers/${target.server}/${target.role}/addons`);
     const data = await resp.json();
+    if (target !== asked) return;
     list.innerHTML = "";
     group("In the instance's repositories", data.addons.filter((a) => a.in_repository));
     group("Other modules in the addons path", data.addons.filter((a) => !a.in_repository));
     if (!data.addons.length) list.innerHTML = '<span class="muted">No modules found in the addons path.</span>';
     if (!data.odoo_bin) errorBox.textContent = "odoo-bin not found: set it in the configuration to update chosen modules.";
+    if (data.addons.length) {
+      document.getElementById("addon-versions").textContent = "Reading the versions…";
+      loadVersions(asked);
+    }
   }
   filter.oninput = () => {
     const q = filter.value.trim().toLowerCase();

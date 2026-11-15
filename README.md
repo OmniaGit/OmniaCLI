@@ -93,7 +93,11 @@ live log; *Merge test to production* and *Copy production to test* at the top.
 ![The page of a server](docs/images/server.png)
 
 **Update modules**: the changed modules or chosen ones. The last choices of
-modules of the instance come back as buttons (*Recent*).
+modules of the instance come back as buttons (*Recent*). Each module shows the
+version installed in the database and the one on disk the update brings
+(`19.0.1.2 → 19.0.1.3`); an installed module with a newer version on disk is
+red. The versions are read after the list, by the instance's Python with
+Odoo's own `adapt_version` and `parse_version`.
 
 ![The Update modules dialog](docs/images/update-dialog.png)
 

@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+import ast
+import asyncio
 import configparser
 import contextlib
 import datetime
@@ -41,6 +43,7 @@ CRON_GUARD_MARK = "OMNIACLI_ACTIVE_CRONS="
 BINARY_SCRIPT = Path(__file__).with_name("binary_dump.py")
 BINARY_MARK = "OMNIACLI_BINARY_COLUMNS="
 ROOM_MARK = "OMNIACLI_RESTORE_ROOM="
+MODULES_MARK = "OMNIACLI_MODULE_VERSIONS="
 # the hosts of a PostgreSQL on this machine (empty: its socket)
 LOCAL_HOSTS = (None, "", "localhost", "127.0.0.1", "::1")
 
@@ -59,14 +62,17 @@ def _staged_script(script: Path, prefix: str):
         shutil.rmtree(staging, ignore_errors=True)
 
 
-async def _binary_dump(instance: Instance, mode: str, mark: str) -> dict:
-    """binary_dump.py scan or room on the instance's database, as the user
-    the instance runs as: the JSON it prints after mark."""
+async def _binary_dump(instance: Instance, mode: str, mark: str, input: bytes | None = None,
+                       timeout: float = 600) -> dict:
+    """binary_dump.py scan, room or modules on the instance's database, as
+    the user the instance runs as (input: its standard input): the JSON it
+    prints after mark."""
     opts = instance.options
     env = odoo_env(instance)
     with _staged_script(BINARY_SCRIPT, "omniacli-binaries-") as script:
         cmd = [opts.venv_bin / "python", script, mode, opts.odoo_config, opts.database]
-        code, out = await capture(as_user(instance.run_as, cmd, env), env=env, timeout=600)
+        code, out = await capture(as_user(instance.run_as, cmd, env), env=env, timeout=timeout,
+                                  input=input)
     found = [line for line in out.splitlines() if line.startswith(mark)]
     if code or not found:
         raise JobFailed(f"{opts.database} cannot be read ({mode}): {out[-2000:]}")
@@ -276,6 +282,36 @@ def list_addons(instance: Instance) -> list[dict]:
                     "in_repository": any(r == resolved or r in resolved.parents for r in repos),
                 }
     return sorted(found.values(), key=lambda a: (not a["in_repository"], a["name"]))
+
+
+def manifest_versions(addons: list[dict]) -> dict[str, str | None]:
+    """{module: the version its manifest gives (None: none, Odoo's 1.0)} of
+    the addons list_addons found; a manifest that cannot be read is left out."""
+    found: dict[str, str | None] = {}
+    for addon in addons:
+        for name in _MANIFESTS:
+            path = Path(addon["path"]) / name
+            if not path.is_file():
+                continue
+            try:
+                manifest = ast.literal_eval(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, ValueError, SyntaxError, MemoryError, RecursionError):
+                break
+            if isinstance(manifest, dict):
+                version = manifest.get("version")
+                found[addon["name"]] = str(version) if version is not None else None
+            break
+    return found
+
+
+async def module_versions(instance: Instance) -> dict[str, dict]:
+    """{module: {state, installed, available, newer}} of the addons the
+    update dialog lists and of the database's modules (binary_dump.py
+    modules): the version installed in the database, the one on disk the
+    update brings, and whether that one is newer."""
+    manifests = await asyncio.to_thread(lambda: manifest_versions(list_addons(instance)))
+    return await _binary_dump(instance, "modules", MODULES_MARK,
+                              input=json.dumps(manifests).encode(), timeout=120)
 
 
 async def update_chosen_modules(job: Job, instance: Instance, modules: list[str]) -> None:

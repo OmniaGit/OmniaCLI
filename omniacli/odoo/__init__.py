@@ -591,6 +591,16 @@ class OdooPlugin(ServicePlugin):
                 "odoo_bin": str(odoo_bin) if odoo_bin else None,
             }
 
+        @router.get("/servers/{server}/{role}/addons/versions")
+        async def addon_versions(server: str, role: str):
+            """The installed and the available version of each module, asked
+            after the list so that the dialog does not wait for the database."""
+            instance = host.instance(server, role)
+            try:
+                return {"modules": await ops.module_versions(instance)}
+            except JobFailed as exc:
+                return JSONResponse({"error": str(exc)[-500:]}, status_code=502)
+
         @router.post("/form/config", dependencies=[Depends(host.needs("admin"))])
         async def form_config(payload: dict = Body(...)):
             """The database, log file and repositories an Odoo config gives."""

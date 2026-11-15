@@ -16,6 +16,12 @@ and a backup of it with some of them emptied.
     binary_dump.py dump <odoo config> <database> <dest zip> <columns> <filestore 0|1>
         writes the zip Odoo restores (dump.sql, manifest.json, filestore/)
         with the columns emptied; columns: JSON [[schema, table, column]]
+    binary_dump.py modules <odoo config> <database>
+        reads on its standard input, as JSON, {module: version of its
+        manifest}, and prints MODULES_MARK and, as JSON, {module: {state,
+        installed, available, newer}}: the version in the database, the
+        manifest's made canonical by Odoo's adapt_version, and whether the
+        one on disk is newer (Odoo's parse_version, as its update_list)
 
 pg_dump cannot leave a column out, so the dump is made of its sections on
 one snapshot: the schema (pre-data), the data of every table but those that
@@ -25,7 +31,8 @@ constraints (post-data). dump.sql restores as pg_dump's own.
 
 Odoo 10 runs on Python 2.7: this file is Python 2.7 and 3. It uses only
 what Odoo 10 to 20 all have: tools.config.parse_config and filestore,
-sql_db.connection_info_for, tools.misc.exec_pg_environ, release.
+sql_db.connection_info_for, tools.misc.exec_pg_environ, release,
+modules.module.adapt_version, tools.parse_version.parse_version.
 """
 
 from __future__ import print_function
@@ -40,6 +47,7 @@ import zipfile
 
 COLUMNS_MARK = "OMNIACLI_BINARY_COLUMNS="
 ROOM_MARK = "OMNIACLI_RESTORE_ROOM="
+MODULES_MARK = "OMNIACLI_MODULE_VERSIONS="
 # the schemas of PostgreSQL itself
 SYSTEM_SCHEMAS = ("pg_catalog", "information_schema", "pg_toast")
 
@@ -197,6 +205,33 @@ def manifest(cr, odoo, database):
     }
 
 
+def module_versions(cr, odoo, manifests):
+    """{module: {state, installed, available, newer}} of every module of
+    manifests (its manifest's version, None: Odoo's default 1.0) or of the
+    database. installed: latest_version of ir_module_module (None: not
+    installed); available: the manifest's, canonical (None: not on disk)."""
+    from odoo.modules.module import adapt_version
+    from odoo.tools.parse_version import parse_version
+
+    def canonical(version):
+        try:
+            return adapt_version(version or "1.0")
+        except ValueError:  # Odoo 19 and later refuse a malformed one
+            return version
+
+    cr.execute("SELECT name, state, latest_version FROM ir_module_module")
+    found = {}
+    for name, state, installed in cr.fetchall():
+        found[name] = {"state": state, "installed": installed if state != "uninstalled" else None,
+                       "available": None, "newer": False}
+    for name, version in manifests.items():
+        row = found.setdefault(name, {"state": None, "installed": None, "available": None, "newer": False})
+        row["available"] = canonical(version)
+        if row["installed"]:
+            row["newer"] = parse_version(row["available"]) > parse_version(row["installed"])
+    return found
+
+
 def add_filestore(zf, folder):
     """The filestore under filestore/ of the zip, as Odoo's backup has it."""
     for root, _, files in os.walk(folder):
@@ -225,6 +260,7 @@ def main(argv):
     import odoo.sql_db
     import odoo.tools
     import odoo.tools.misc
+    import odoo.modules.module
 
     odoo.tools.config.parse_config(["-c", config])
     if mode == "room":
@@ -238,6 +274,10 @@ def main(argv):
             size = int(cr.fetchone()[0])
             print(COLUMNS_MARK + json.dumps({"size": size, "columns": scan(cr),
                                              "filestore": folder_size(odoo.tools.config.filestore(database))}))
+            return
+        if mode == "modules":
+            manifests = json.loads(sys.stdin.read() or "{}")
+            print(MODULES_MARK + json.dumps(module_versions(cnx.cursor(), odoo, manifests)))
             return
         if mode != "dump":
             raise SystemExit("unknown mode %r" % mode)
