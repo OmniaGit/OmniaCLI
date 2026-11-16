@@ -354,6 +354,12 @@ async def test_save_checks_the_room_of_the_disk(workspaces, client, env, monkeyp
 async def test_a_storage_taken_out_of_the_configuration(workspaces, client, env, monkeypatch):
     """OmniaCLI starts; the workspace says it cannot be used, creates no
     instance, and is fixed by picking a storage that is listed."""
+    from pathlib import Path
+
+    from omniacli import stacktemplates, workspaceops
+    # the repository's template, not whatever the machine has installed
+    template = stacktemplates.load_template(Path(__file__).parent.parent / "templates" / "odooplm-20")
+    monkeypatch.setattr(workspaceops, "templates", lambda: {template.name: template})
     settings = env["settings"]
     settings.storage_roots = {"default": "/srv/omniacli/default_workspace"}
     acme = settings.workspaces["acme"]
