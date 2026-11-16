@@ -163,6 +163,89 @@ apply_service_user() {
     install -d -o "$user" -g omniacli -m 750 "$DATA" "$DATA/jobs" "$DATA/backups" "$DATA/logs" "$DATA/scripts"
 }
 
+# The workspaces (README, Workspaces): with OMNIACLI_WORKSPACES=1 in
+# /etc/default/omniacli, the service's user may run the root helpers of the
+# workspaces (a sudoers file of the package's own: one line for the
+# workspace helper, one for the compose helper per storage root of
+# workspaces.storage in the main configuration); without it, none.
+WORKSPACES_SUDOERS=/etc/sudoers.d/omniacli-workspaces
+workspaces_enabled() {
+    value=$(sed -n 's/^[[:space:]]*OMNIACLI_WORKSPACES=//p' /etc/default/omniacli 2>/dev/null | tail -n 1 \
+        | sed 's/[[:space:]]*$//; s/^"\(.*\)"$/\1/; s/^'"'"'\(.*\)'"'"'$/\1/')
+    [ "$value" = 1 ]
+}
+
+apply_workspaces() {
+    user="$1"
+    if ! workspaces_enabled; then
+        if [ -e "$WORKSPACES_SUDOERS" ]; then
+            rm -f "$WORKSPACES_SUDOERS"
+            echo "omniacli: the workspaces' helpers are no longer allowed (no OMNIACLI_WORKSPACES=1)"
+        fi
+        return 0
+    fi
+    # each storage as "<name> <folder> <root path it is bound on>"; a list of
+    # folders (the format of before, no names) is told, the rest goes on
+    storages=$("$VENV/bin/python" -c 'import sys, yaml
+from omniacli.config import StorageListError, bound_root, parse_storage_roots
+data = yaml.safe_load(open(sys.argv[1], encoding="utf-8")) or {}
+try:
+    roots = parse_storage_roots(data.get("workspaces"))
+except StorageListError as exc:
+    print(f"omniacli: {exc}, in {sys.argv[1]}: no workspace can be used until then", file=sys.stderr)
+    roots = {}
+print("\n".join(f"{name} {folder} {bound_root(name)}" for name, folder in roots.items()))' "$CONFIG") || {
+        echo "omniacli: OMNIACLI_WORKSPACES=1, but workspaces.storage of $CONFIG cannot be read" >&2
+        exit 1
+    }
+    # the folder of the workspaces when the main configuration lists none,
+    # root's (the helpers refuse one the service's user could change)
+    default=$("$VENV/bin/python" -c 'from omniacli.config import DEFAULT_STORAGE; print(DEFAULT_STORAGE)')
+    bounds=""
+    while read -r name folder bound; do
+        [ -n "$name" ] || continue
+        if [ "$folder" = "$default" ] && [ ! -e "$folder" ]; then
+            install -d -o root -g root -m 755 "$folder"
+            echo "omniacli: $folder made, for the workspaces"
+        fi
+        bounds="$bounds $bound"
+    done <<EOF_STORAGES
+$storages
+EOF_STORAGES
+    tmp="$WORKSPACES_SUDOERS.tmp"
+    {
+        echo "# Written by the omniacli package from OMNIACLI_WORKSPACES=1 in /etc/default/omniacli"
+        echo "# and workspaces.storage of $CONFIG: change them, then sudo dpkg-reconfigure omniacli."
+        echo "$user ALL=(root) NOPASSWD: $VENV/bin/omniacli workspace-helper *"
+        # root acts on a storage only through the root path it is bound on
+        for bound in $bounds; do
+            echo "$user ALL=(root) NOPASSWD: $VENV/bin/omniacli compose-helper $bound/* *"
+        done
+    } > "$tmp"
+    chmod 440 "$tmp"
+    if ! visudo -cf "$tmp" >/dev/null; then
+        rm -f "$tmp"
+        echo "omniacli: the sudoers lines of the workspaces do not check (visudo): nothing written" >&2
+        exit 1
+    fi
+    mv "$tmp" "$WORKSPACES_SUDOERS"
+    echo "omniacli: the workspaces' helpers allowed to $user (OMNIACLI_WORKSPACES)"
+    # every storage that exists bound on its root path, again at every boot
+    # (README, Workspaces), and the units of storages no longer listed taken
+    # away; one refused is told and does not stop the install
+    if [ -d /run/systemd/system ]; then
+        "$VENV/bin/omniacli" workspace-helper storage-setup 2>&1 | "$VENV/bin/python" -c 'import json, sys
+text = sys.stdin.read()
+try:
+    found = json.loads(text.strip().splitlines()[-1])["storages"]
+except Exception:
+    print("omniacli: the storages were not bound: " + text.strip()); sys.exit(0)
+for root, state in found.items():
+    print("omniacli: storage %s: %s" % (root, state))' || true
+    fi
+    [ -n "$storages" ] || echo "omniacli: workspaces.storage of $CONFIG is empty: no workspace can have instances yet"
+}
+
 case "$1" in
     configure)
         if ! getent passwd omniacli >/dev/null; then
@@ -174,6 +257,7 @@ case "$1" in
         apply_service_user "$(service_user)"
         build_venv
         create_config
+        apply_workspaces "$(service_user)"
         # the plugins installed from the Plugins page, into the new venv
         [ -x "$VENV/bin/omniacli" ] && "$VENV/bin/omniacli" plugin-install --all || true
         ;;

@@ -14,6 +14,9 @@ from dataclasses import dataclass
 # user: monitors only; developer: also acts on the servers (pull, update,
 # restart, backup and its download); admin: everything (configuration, merge)
 ROLES = ("user", "developer", "admin")
+# the role of a user of workspaces only: no role on the machine, one of ROLES
+# in each of its workspaces (Settings.workspaces), and nothing else
+WORKSPACE_ROLE = "workspace"
 
 ALGORITHM = "pbkdf2_sha256"
 ITERATIONS = 600_000
@@ -60,9 +63,17 @@ class Principal:
     kind: str = "user"
     # a linked instance: its user who acts through the link (a label only)
     on_behalf: str = ""
+    # a user of workspaces only (WORKSPACE_ROLE): ((workspace, role), ...);
+    # role is then its role in the workspace of what the request reaches
+    workspaces: tuple[tuple[str, str], ...] = ()
+    scoped: bool = False
 
     def can(self, role: str) -> bool:
         return ROLES.index(self.role) >= ROLES.index(role)
+
+    def workspace_role(self, workspace: str) -> str | None:
+        """Its role in workspace, None when it is not a member."""
+        return dict(self.workspaces).get(workspace)
 
     def __str__(self) -> str:
         """The name the jobs record as who started them."""

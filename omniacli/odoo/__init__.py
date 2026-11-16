@@ -35,6 +35,7 @@ from ..plugin_api import (
     JobFailed,
     Server,
     ServicePlugin,
+    backup_into,
     capture,
     restart,
     start,
@@ -84,13 +85,57 @@ def _on(value) -> bool:
     return value not in (None, False, "", "0", "false", "off")
 
 
+# a backup without binary columns empties, when nobody chose, those of at
+# least this many megabytes
+BINARY_THRESHOLD_MB = 10
+MB = 1 << 20
+
+
+def backup_threshold(megabytes) -> int:
+    """The threshold of the binary columns in bytes (BINARY_THRESHOLD_MB when
+    it is not a number of at least 0)."""
+    try:
+        value = float(megabytes)
+    except (TypeError, ValueError):
+        value = -1
+    return int((value if value >= 0 else BINARY_THRESHOLD_MB) * MB)
+
+
+def column_value(column: dict) -> str:
+    """How a column is named in the dialog and the options: table.column,
+    schema.table.column outside public."""
+    name = f"{column['table']}.{column['column']}"
+    return name if column["schema"] == "public" else f"{column['schema']}.{name}"
+
+
+def _size(size: int) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+
+
+def _column_rows(found: dict) -> list[dict]:
+    """The binary columns that hold data, the biggest first, as rows of the
+    backup dialog's list."""
+    rows = []
+    for c in sorted(found["columns"], key=lambda c: -c["bytes"]):
+        if c["bytes"] <= 0:
+            continue
+        rows.append({"value": column_value(c), "label": column_value(c), "size": c["bytes"],
+                     "detail": f"{_size(c['bytes'])} in {c['rows']} rows"
+                               + (", NOT NULL: left ''" if c["not_null"] else "")})
+    return rows
+
+
 def _copy_what(params: dict) -> str:
     """What a copy of production loads, for the job title."""
     if params["backup"]:
         return params["backup"]
+    binaries = ", binary columns emptied" if params.get("no_binaries") else ""
     if params.get("share_filestore"):
-        return "new backup, filestore shared with production"
-    return "new backup" + (" without filestore" if params["no_filestore"] else "")
+        return "new backup, filestore shared with production" + binaries
+    return "new backup" + (" without filestore" if params["no_filestore"] else "") + binaries
 
 
 def _filestores(production: Instance, test: Instance) -> tuple[Path, Path]:
@@ -173,12 +218,85 @@ class OdooPlugin(ServicePlugin):
         await ops.update_modules(job, instance)
 
     async def backup(self, job: Job, instance: Instance, dest_dir: Path, options: dict | None = None) -> Path:
-        return await ops.backup(job, instance, dest_dir, filestore=not (options or {}).get("no_filestore"))
+        options = options or {}
+        emptied = None
+        if options.get("no_binaries"):
+            emptied = await self._emptied(job, instance, options)
+        return await ops.backup(job, instance, dest_dir, filestore=not options.get("no_filestore"),
+                                emptied=emptied)
+
+    async def _emptied(self, job: Job, instance: Instance, options: dict) -> list[dict]:
+        """The binary columns a backup without them empties: those ticked
+        (binary_columns), or, when nobody chose, every one holding at least
+        the threshold."""
+        odoo_bin = ops.find_odoo_bin(instance)
+        major = ops.odoo_major(odoo_bin) if odoo_bin else None
+        if major is not None and major >= 20:
+            raise JobFailed("a backup without binary columns is not made for Odoo 20 and later "
+                            "(OmniaCLI does not restore them)")
+        found = (await ops.binary_columns(instance))["columns"]
+        chosen = options.get("binary_columns")
+        if chosen is None:
+            limit = backup_threshold(options.get("binary_threshold_mb"))
+            emptied = [c for c in found if c["bytes"] >= limit]
+            job.log(f"--- binary columns of at least {limit // MB} MB emptied")
+        else:
+            wanted = set(chosen)
+            emptied = [c for c in found if column_value(c) in wanted]
+            gone = wanted - {column_value(c) for c in emptied}
+            if gone:
+                job.log(f"WARNING: no binary column {', '.join(sorted(gone))} in {instance.options.database}: "
+                        "left out")
+        for c in emptied:
+            job.log(f"    {column_value(c)}: {c['bytes'] / MB:.1f} MB in {c['rows']} rows emptied")
+        if not emptied:
+            job.log("--- no binary column to empty: a whole backup")
+        return emptied
 
     def backup_fields(self) -> list[Field]:
         return [Field("no_filestore", "Without filestore", kind="checkbox", default=False,
                       help="Database only, no attachments: a smaller backup. Restored, the instance has no "
-                           "attachments (the restore drops its filestore)")]
+                           "attachments (the restore drops its filestore)"),
+                Field("no_binaries", "Without binary columns", kind="checkbox", default=False,
+                      help="The binary fields kept in the database (previews, printouts of older "
+                           "databases) are left empty: a smaller dump. Restored, those fields are empty"),
+                Field("binary_threshold_mb", "Ticked from (MB)", kind="number",
+                      default=BINARY_THRESHOLD_MB, shown_with="no_binaries"),
+                Field("binary_columns", "Columns emptied", kind="checklist", shown_with="no_binaries",
+                      threshold="binary_threshold_mb")]
+
+    async def backup_choices(self, instance: Instance, key: str) -> dict:
+        if key != "binary_columns":
+            raise JobFailed(f"no choices for {key}")
+        found = await ops.binary_columns(instance)
+        return {"rows": _column_rows(found), "total": found.get("size"), "total_label": "Database on disk"}
+
+    async def backup_estimate(self, instance: Instance) -> dict:
+        found = await ops.binary_columns(instance)
+        filestore = found.get("filestore") or {}
+        return {"database": found.get("size") or 0, "files": filestore.get("bytes"),
+                "files_off": "no_filestore", "list": "binary_columns", "list_on": "no_binaries",
+                "lists": {"binary_columns": _column_rows(found)}}
+
+    async def restore_room(self, instance: Instance) -> dict:
+        found = await ops.restore_room(instance)
+        notes = []
+        host = found.get("db_host")
+        if not found.get("data_directory"):
+            notes.append(f"PostgreSQL runs on {host}: its disk is not checked from here"
+                         if host not in ops.LOCAL_HOSTS and not str(host).startswith("/") else
+                         "PostgreSQL does not tell its data folder to this user (not a superuser) and "
+                         "pg_lsclusters does not find it: its disk is not checked")
+        # where ops.restore unpacks: beside the zip, or run_as's staging
+        temp = (str(ops.BACKUP_STAGING) if instance.run_as is not None
+                else str(self._host.backup_folder(instance)) if self._host is not None else None)
+        notes.append(f"the restore unpacks the backup in {temp} first" if temp
+                     else "the folder where the restore unpacks the backup is not known: not checked")
+        filestore = found.get("filestore") or {}
+        return {"paths": {"database": found.get("data_directory"), "files": filestore.get("path"),
+                          "temp": temp},
+                "freed": {"database": found.get("database_bytes") or 0, "files": filestore.get("bytes") or 0},
+                "notes": notes}
 
     def process_command(self, instance: Instance) -> tuple[list[str], Path]:
         return ops.process_command(instance)
@@ -222,6 +340,18 @@ class OdooPlugin(ServicePlugin):
         # the local socket takes the system user; sudo keeps the PG*
         # variables (sudoers needs SETENV, the Run as check prints the line)
         return f"sudo -n -u {instance.run_as} --preserve-env={','.join(env)} {ops.psql_path()}", env
+
+    def db_shell_as_service(self, instance: Instance) -> bool:
+        return instance.run_as is None
+
+    def own_user_code(self, instance: Instance) -> str | None:
+        if instance.restart.type == "process":
+            return ("Odoo itself runs as OmniaCLI's user, so a module's code reaches OmniaCLI's files, "
+                    "whatever the shells: use a service with Run as")
+        if instance.run_as is None:
+            return ("without Run as the module updates run as OmniaCLI's user, so a module's code reaches "
+                    "OmniaCLI's files, whatever the shells: set Run as")
+        return None
 
     def script_runner(self, instance: Instance) -> tuple[Path, str | None, dict]:
         # the venv's python, which imports odoo as click-odoo does
@@ -306,7 +436,9 @@ class OdooPlugin(ServicePlugin):
         # without filestore, or sharing production's: of a new backup only
         share = not name and _on(params.get("share_filestore"))
         no_filestore = not name and not share and _on(params.get("no_filestore"))
-        return {"backup": name, "no_filestore": no_filestore, "share_filestore": share}
+        no_binaries = not name and _on(params.get("no_binaries"))
+        return {"backup": name, "no_filestore": no_filestore, "share_filestore": share,
+                "no_binaries": no_binaries}
 
     async def _copy_production(self, job: Job, server: Server, params: dict) -> None:
         """Back up production (or take a backup of it), stop test, restore the
@@ -335,8 +467,10 @@ class OdooPlugin(ServicePlugin):
             job.log(f"--- backup of production: {backup_zip.name}")
         else:
             folder.mkdir(parents=True, exist_ok=True)
-            backup_zip = await self.backup(job, prod, folder,
-                                           {"no_filestore": params["no_filestore"] or shared is not None})
+            # the columns emptied: the last backup dialog's choice of production
+            backup_zip = await backup_into(job, prod, folder,
+                                           {"no_filestore": params["no_filestore"] or shared is not None,
+                                            "no_binaries": params.get("no_binaries", False)})
         await self._restore(job, test, backup_zip, True, shared)
 
     def restore_fields(self) -> list[Field]:
@@ -354,6 +488,17 @@ class OdooPlugin(ServicePlugin):
         await self._restore(job, instance, backup_zip, bool(options.get("neutralize", True)),
                             reset_passwords=bool(options.get("reset_passwords", False)),
                             load_only=bool(options.get("load_only", False)))
+
+    def backup_problem(self, backup_zip: Path) -> str | None:
+        return ops.backup_problem(backup_zip)
+
+    async def before_start(self, instance: Instance) -> None:
+        """No database, or an empty one: odoo-bin would make a blank one of a
+        name it does not find, and a service would fail on an empty one."""
+        state, detail = await checks.database_state(instance)
+        if state in checks.NO_DATABASE:
+            raise JobFailed(f"{instance.key} is not started: {instance.options.database}: {detail}. "
+                            "Restore a backup into it first")
 
     async def _restore(self, job: Job, instance: Instance, backup_zip: Path, neutralize: bool,
                        shared: tuple[Path, Path] | None = None, reset_passwords: bool = False,
@@ -445,6 +590,16 @@ class OdooPlugin(ServicePlugin):
                 "addons": await asyncio.to_thread(ops.list_addons, instance),
                 "odoo_bin": str(odoo_bin) if odoo_bin else None,
             }
+
+        @router.get("/servers/{server}/{role}/addons/versions")
+        async def addon_versions(server: str, role: str):
+            """The installed and the available version of each module, asked
+            after the list so that the dialog does not wait for the database."""
+            instance = host.instance(server, role)
+            try:
+                return {"modules": await ops.module_versions(instance)}
+            except JobFailed as exc:
+                return JSONResponse({"error": str(exc)[-500:]}, status_code=502)
 
         @router.post("/form/config", dependencies=[Depends(host.needs("admin"))])
         async def form_config(payload: dict = Body(...)):

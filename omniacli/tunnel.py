@@ -176,7 +176,7 @@ class TunnelManager:
         from websockets.asyncio.client import connect
 
         ssl_context = None
-        if link.url.startswith("https://"):
+        if link.address.startswith("https://"):
             ssl_context = ssl.create_default_context(cafile=link.ca_file or None)
         path = tunnel_path(tunnel.server, tunnel.role) + ("?probe=1" if probe else "")
         return await connect(websocket_url(link, path), ssl=ssl_context, open_timeout=CONNECT_TIMEOUT,

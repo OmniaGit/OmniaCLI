@@ -104,3 +104,56 @@ async def test_api_and_page(client, env, monkeypatch):
     assert live[0]["forecast"]["reason"]
     page = await client.get("/disks", headers={"Authorization": AUTH})
     assert page.status_code == 200 and "/api/disks/history" in page.text
+
+
+def test_the_workspaces_disks_are_recorded_apart(tmp_path):
+    path = tmp_path / "disk_history.json"
+    history = DiskHistory(path)
+    history.record([disk(10 * GIB, 90 * GIB)], DAY0)
+    assert not history.workspaces_recorded(DAY0)
+    # 1 GiB a day in a disk of 50 GiB from 10: full 40 days after the first
+    for i in range(10):
+        history.record_workspaces([{"name": "acme", "used": 10 * GIB + i * GIB, "capacity": 50 * GIB}],
+                                  DAY0 + datetime.timedelta(days=i))
+    again = DiskHistory(path)
+    assert again.workspaces_recorded(DAY0 + datetime.timedelta(days=9))
+    assert again.workspace_forecast("acme")["full"] == (DAY0 + datetime.timedelta(days=40)).isoformat()
+    assert again.workspace_forecast("none") is None
+    assert [d["name"] for d in again.workspace_series()] == ["acme"] and again.workspace_series({"beta"}) == []
+    # the machine's disks are as they were: the publisher sends them only
+    assert [s["mount"] for s in again.series()] == ["/srv"]
+    # used over its limit (forced): no free space, never a negative one
+    again.record_workspaces([{"name": "acme", "used": 60 * GIB, "capacity": 50 * GIB}], DAY0 + datetime.timedelta(days=10))
+    assert again.workspaces["acme"]["points"][-1][2] == 0
+
+
+async def test_the_recorder_records_the_workspaces(env, tmp_path, monkeypatch):
+    from omniacli.config import Workspace
+
+    async def fake_disks(settings):
+        return [disk(10 * GIB, 90 * GIB)]
+    monkeypatch.setattr(diskhistory._disks, "disks", fake_disks)
+    env["settings"].workspaces = {"acme": Workspace("acme")}
+    calls = []
+
+    async def workspaces():
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("sudo: a password is required")
+        return [{"name": "acme", "used": GIB, "capacity": 10 * GIB}]
+    recorder = DiskRecorder(env["settings"], DiskHistory(tmp_path / "h.json"), workspaces=workspaces)
+    # no helper: the machine's disks are recorded all the same, the workspaces tried again
+    assert await recorder.check(DAY0) is True
+    assert recorder.history.recorded(DAY0) and not recorder.history.workspaces_recorded(DAY0)
+    assert await recorder.check(DAY0) is True
+    assert recorder.history.workspaces_recorded(DAY0)
+    assert await recorder.check(DAY0) is False and len(calls) == 2
+
+
+async def test_every_disk_page_uses_the_widget(client, env):
+    # one widget for every disk shown: no page draws a disk of its own
+    for path in ("/", "/disks"):
+        page = (await client.get(path, headers={"Authorization": AUTH})).text
+        assert "const OmniaDisk" in page and "OmniaDisk.render" in page, path
+    data = (await client.get("/api/disks/history", headers={"Authorization": AUTH})).json()
+    assert "workspaces" in data

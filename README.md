@@ -53,12 +53,32 @@ The screenshots show demo data.
 
 ![The login page](docs/images/login.jpg)
 
-**Dashboard**: the servers with the state of their Odoo and their CPU, the
-whole machine (CPU, network, disks) and the last jobs, updated as they run.
+**Dashboard**: on top, one row for the machine OmniaCLI runs on (CPU and
+network of the last 15 minutes, its disks: a disk opens its history); a
+click on the row opens its whole load below it (the last hour's charts, its
+disks with their estimate), another closes it, as each viewer left it, then
+this instance's servers with their workspace, the state of their Odoo and
+their CPU, then (for admins) **Workspaces**, the list of the Workspaces page,
+then **Linked**, one row for each linked instance's machine (the same row;
+the name opens it), and the last jobs, updated as they run. CPU, network and
+disks are shown by one widget each (`templates/_load.html`), the same in
+every row that shows them: this machine, Linked, the servers' CPU, the
+Workspaces list.
 Every disk is recorded once a day (kept three years, in
 `<data>/disk_history.json`): its panel row says when it will be full, from the
 trend of the last 90 days (at least 7 days of data), and **Disks** (`/disks`)
-charts each disk's used space with that forecast.
+charts each disk's used space with that forecast. The workspaces' disks are
+recorded the same way (the space their image takes, full at their
+`disk_gb`), and **Disks** charts them too.
+
+Every page that shows a disk shows it with one widget
+(`templates/_disk.html`): the Dashboard (this machine's and the linked
+instances' disks, the folded row, a workspace's panel), Workspaces (each
+workspace's disk, the real disk under its storage with what the workspaces
+were promised there), a workspace's page, a puller's page, and Disks. Each
+reads the same: used, free and size, a bar that turns orange under 15% free
+and red under 5%, and the estimate (the day it is full, the growth a day, or
+why there is none yet), orange within 90 days of full and red within 30.
 
 ![The Dashboard](docs/images/dashboard.png)
 
@@ -73,7 +93,11 @@ live log; *Merge test to production* and *Copy production to test* at the top.
 ![The page of a server](docs/images/server.png)
 
 **Update modules**: the changed modules or chosen ones. The last choices of
-modules of the instance come back as buttons (*Recent*).
+modules of the instance come back as buttons (*Recent*). Each module shows the
+version installed in the database and the one on disk the update brings
+(`19.0.1.2 → 19.0.1.3`); an installed module with a newer version on disk is
+red. The versions are read after the list, by the instance's Python with
+Odoo's own `adapt_version` and `parse_version`.
 
 ![The Update modules dialog](docs/images/update-dialog.png)
 
@@ -105,17 +129,19 @@ stopped with *Stop job*.
 
 | Action | Production | Test | What runs |
 |---|---|---|---|
-| Git pull | ✓ | ✓ | `git pull --ff-only <remote> <branch>` in every repository, then `git submodule update --init --recursive` in those with submodules |
+| Git pull | ✓ | ✓ | `git pull --ff-only <remote> <branch>` in every repository, then `git submodule update --init --recursive` in those with submodules. With more than one repository (or a package) a dialog lists them, with the commits each would bring (a `git fetch`), ticked when there are some: **Pull selected** pulls the ticked ones, **Pull all** every one, **Select all** ticks them all |
 | Git pull + restart | ✓ | ✓ | pull, `click-odoo-update` (only the changed modules), restart |
-| Update modules | ✓ | ✓ | a popup asks: the changed modules (`click-odoo-update`) or chosen ones (`odoo-bin -u … --stop-after-init --workers=0`), and whether to restart after. The last 5 choices of modules of each instance are offered again; they are kept in the browser (`localStorage`), so each browser has its own |
+| Update modules | ✓ | ✓ | a popup asks: the changed modules (`click-odoo-update`) or chosen ones (`odoo-bin -u … --stop-after-init --workers=0`), and whether to restart after. On a neutralized database, the scheduled actions that were off are off again after every update, also the update of a pull or of a restore: an update switches on those whose XML says `active=True`; one you switched on by hand stays on. The last 5 choices of modules of each instance are offered again; they are kept in the browser (`localStorage`), so each browser has its own |
 | Restart | ✓ | ✓ | the instance's systemd or init.d restart, `docker compose up -d` then `restart` of a compose project (a type that runs in one, through the root helper `compose-helper`), or OmniaCLI's own start of `odoo-bin` (see below) |
 | Start, Stop | ✓ | ✓ | `systemctl start`/`stop` of a systemd service (each needs its sudoers line, the **Start/Stop permission** check prints them), `docker compose up -d`/`stop` of a compose project (the helper's line), or OmniaCLI's own Odoo; a stopped Odoo stays stopped for the auto update |
-| Backup | ✓ | ✓ | `click-odoo-backupdb` → `<backup_dir>/<server>/<role>/<db>_<timestamp>.zip`, database and filestore; with **Without filestore** checked, the database only (`--no-filestore`), `<db>_<timestamp>_nofilestore.zip`. The backup before a merge always has the filestore |
+| Backup | ✓ | ✓ | `click-odoo-backupdb` → `<backup_dir>/<server>/<role>/<db>_<timestamp>.zip`, database and filestore (the backups are OmniaCLI's own: `<backup_dir>/<server>` and `<server>/<role>` are made mode 700 and every zip there 600, made, downloaded from a link or a relay, or uploaded; a folder or file of another user is left as it is); with **Without filestore** checked, the database only (`--no-filestore`), `<db>_<timestamp>_nofilestore.zip`. With **Without binary columns** checked, the binary fields kept in the database (`bytea` columns: previews and printouts of older PLM databases) are left empty: the dialog lists every one that holds data, the biggest first, with its size, and ticks those of at least **Ticked from (MB)** (10); the dialog always shows the weight of the backup and whether a restore into the same instance fits on this machine (see **Weight and room** below). The dump is made by `omniacli/odoo/binary_dump.py` in the instance's venv: `pg_dump --section` pre-data, data (`--exclude-table-data` of the tables with an emptied column) and post-data on one exported snapshot, the rows of those tables copied with the column `NULL` (`''` where `NOT NULL`), into the same zip (`dump.sql`, `manifest.json`, `filestore/`), `<db>_<timestamp>_nobinaries.zip`, restored as any other; Odoo 10 to 19 (Python 2.7 and 3). The dialog opens with the instance's last choice (`<backup_dir>/<server>/<role>/.backup_choices.json`): a column ticked or left unticked then keeps it, a column new since is ticked by its size; the backups without the dialog (Copy production to test, Copy from link, schedules, MCP) take those ticks. The backup before a merge always has the filestore and every column |
 | pip requirements | ✓ | ✓ | `<venv_bin>/python -m pip install -r` the `requirements.txt` next to `odoo-bin` and that of every repository having one, in one call |
 | pip click-odoo | ✓ | ✓ | `<venv_bin>/python -m pip install click-odoo-contrib`, the scripts OmniaCLI runs in the venv |
 | Merge test to production | | ✓ | backup production, merge, push, update modules, restart production |
-| Copy production to test | ✓ → | ✓ | a popup asks which backup of production: a new one (with the filestore; without it, test has no attachments; or **shared with production**, see below) or one already made; then stop test, `click-odoo-restoredb --copy --force --neutralize` into the test database (drops it and its filestore first; `--neutralize` from Odoo 16: no scheduled actions, no outgoing mail), `click-odoo-update`, start test. **Filestore shared with production**: the backup is made without filestore, and after the restore test's filestore (`<data_dir>/filestore/<db>`) is a tree of hard links to production's files, made by the test's venv python as its `run_as` user: no extra disk space, test reads every attachment, and what test writes or deletes does not touch production's files (Odoo never rewrites a filestore file, it only writes new ones and unlinks). Refused, before anything is touched, when an Odoo config sets no `data_dir` or the two filestores are not on the same filesystem, or the test user may not link production's files (`fs.protected_hardlinks`). Refused when production and test run different Odoo versions, and on Odoo 20+ (click-odoo-restoredb refuses it). A systemd test needs its Start/Stop sudoers lines; an init.d one is not stopped, it is restarted at the end |
-| Copy from link | ✓ (admin) | ✓ | for an instance with a **Database from link**: a popup asks which backup of that instance of the linked OmniaCLI: a new one, made there now (with or without the filestore; an OmniaCLI there older than 2026.1.12 makes it with the filestore), or one already there; whether to neutralize; whether to set every user's password to `admin` (on by default: after the restore `click-odoo` runs `odoo/reset_passwords.py`, which writes the pbkdf2_sha512 hash in SQL, so no password policy refuses it; in `password` from Odoo 12, in `password_crypt` on Odoo 10 and 11 with auth_crypt; refused before anything is touched when the Odoo version is unknown); whether to **only load the database** (off by default, for development: the instance is not stopped, its modules are not updated and it is not restarted; Odoo's drop of the database ends its connections); and for a production its database name, typed. The zip is downloaded into this instance's backups as `<link>_<file>` (through `<file>.part`: a cut download leaves nothing), then restored as above: stop, `click-odoo-restoredb --copy --force [--neutralize]`, the passwords, `click-odoo-update`, start. Refused, before anything is touched, when the backup's `manifest.json` names another Odoo version than the instance's |
+| Weight and room | ✓ | ✓ | the Backup, Copy production to test and Copy from link dialogs show, for a new backup, its weight (the database on disk less the binary columns left out, its dump: that size plus once more the binary rows kept, which pg_dump writes in hex, the filestore when it is in the backup) and, disk by disk, whether its restore fits on the instance that receives it: the zip in its backup folder, the backup unpacked (Odoo's restore unpacks it first: beside the zip, see **Restore**; with `run_as` in `/var/tmp`), PostgreSQL's data folder (`SHOW data_directory`; not a superuser: `pg_lsclusters` by the port; PostgreSQL on another machine: not checked, and said so) and the filestore, against the room free there plus the database and filestore the restore drops first. The estimates are on the high side (the zip is not counted compressed); the dialogs warn, they do not refuse. Copy from link asks the weight to the OmniaCLI there through the link (an older one, or a puller, tells none) |
+| Copy production to test | ✓ → | ✓ | a popup asks which backup of production: a new one (**shared with production** by default, see below; or with the filestore; or without it, test has no attachments) or one already made; then stop test, `click-odoo-restoredb --copy --force --neutralize` into the test database (drops it and its filestore first; `--neutralize` from Odoo 16: no scheduled actions, no outgoing mail), `click-odoo-update`, start test. **Without binary columns** empties, in the new backup, the columns ticked in production's last Backup dialog (none chosen yet: those of at least 10 MB). **Filestore shared with production**: the backup is made without filestore, and after the restore test's filestore (`<data_dir>/filestore/<db>`) is a tree of hard links to production's files, made by the test's venv python as its `run_as` user: no extra disk space, test reads every attachment, and what test writes or deletes does not touch production's files (Odoo never rewrites a filestore file, it only writes new ones and unlinks). Refused, before anything is touched, when an Odoo config sets no `data_dir` or the two filestores are not on the same filesystem, or the test user may not link production's files (`fs.protected_hardlinks`). Refused when production and test run different Odoo versions, and on Odoo 20+ (click-odoo-restoredb refuses it). A systemd test needs its Start/Stop sudoers lines; an init.d one is not stopped, it is restarted at the end |
+| Copy from link | ✓ (admin) | ✓ | for an instance with a **Database from link**: a popup asks which backup of that instance of the linked OmniaCLI: a new one, made there now (with or without the filestore; an OmniaCLI there older than 2026.1.12 makes it with the filestore), or one already there; whether to neutralize; whether to set every user's password to `admin` (on by default: after the restore `click-odoo` runs `odoo/reset_passwords.py`, which writes the pbkdf2_sha512 hash in SQL, so no password policy refuses it; in `password` from Odoo 12, in `password_crypt` on Odoo 10 and 11 with auth_crypt; refused before anything is touched when the Odoo version is unknown); whether to **only load the database** (off by default, for development: the instance is not stopped, its modules are not updated and it is not restarted; Odoo's drop of the database ends its connections); and for a production its database name, typed. The zip is downloaded into this instance's backups as `<link>_<file>` (through `<file>.part`: a cut download leaves nothing), then restored as above: stop, `click-odoo-restoredb --copy --force [--neutralize]`, the passwords, `click-odoo-update`, start. Refused, before anything is touched, when the backup's `manifest.json` names another Odoo version than the instance's. What comes from the other machine is checked before anything is touched: a file that is no backup fails the job, also in a schedule, with the instance and its database intact |
+| Restore | ✓ (admin) | ✓ (admin) | for a type that can restore, an admin who logs in: a popup asks for a zip from this computer (uploaded into the instance's backups through a `.part` file; refused when it is not a zip, or a file of that name is there, or less than 1 GiB would stay free) or one of the instance's backups, with the choices of Copy from link and, for a production, its database name typed. Refused before anything is touched when the zip has no `dump.sql`. Then as Copy from link: stop, `click-odoo-restoredb --copy --force [--neutralize]`, the passwords, `click-odoo-update`, start. Odoo unpacks the zip before loading it: OmniaCLI gives `click-odoo-restoredb` a `TMPDIR` on the disk of the backups, a folder `.restore-…` (mode 700) beside the zip, not `/tmp` on the system's disk; with `run_as`, the private folder in `/var/tmp` where the zip is staged. Removed at the end, failed or not. A zip without `manifest.json` (an Odoo.sh one) is not compared with the instance's Odoo version: the job warns. Not on native Odoo 20 and later (click-odoo-restoredb refuses it). An admin's because a `dump.sql` goes through `psql`, whose `\!` runs commands as the instance's user |
 | Log | ✓ | ✓ | `tail -F` of the Odoo log in the browser, with an "errors only" filter; of a compose instance, `docker compose logs` of its service (see below) |
 
 The two pip buttons are also next to the **Venv bin** field of the server
@@ -175,12 +201,33 @@ prepared before Test & activate. The job's log opens in a new tab.
   OmniaCLI user and makes it live only when no check fails: Odoo config,
   addons path, log file, click-odoo scripts and an `import click_odoo, odoo`
   with the instance's python, the database (connected with the Odoo config's
-  credentials), odoo-bin, every repository (branch, no local change, remote
+  credentials: a database that does not exist yet, or an empty one, is only
+  a warning, it is **Start** and **Restart** that refuse it until a backup is
+  restored), odoo-bin, every repository (branch, no local change, remote
   reachable), the service and `sudo -n -l` for its restart command, separate
   folders and databases for production and test, the backup folder. Saving
   a live server runs the same checks: if they fail nothing is saved and it
   stays live. `omniacli check-config` runs them from the command line.
-- **Shell** (developers and admins, a button on each instance): a page with
+- **Kind of machine**: `machine: server` or `machine: development` in the
+  main configuration, which root writes and the service only reads. Without
+  that line a service with `OMNIACLI_USER` is a development machine, any other
+  a server; upgrades do not add the line, so an installation upgraded from an
+  earlier version without `OMNIACLI_USER` becomes a server and loses Shell and
+  Claude until root adds `machine: development`. On a server nobody, admins
+  included, opens a shell of OmniaCLI's own user: no **Shell**, no **Claude**,
+  and **psql** only where it runs as another user (`run_as`, Docker). The page
+  and the WebSocket refuse them too, also through a link: the machine the
+  shell would run on decides. The kind is on the Options page and in
+  OmniaCLI's log at every start. On a development machine nothing changes.
+  Closing the shells does not close what runs as that user by itself, so on a
+  server the checks warn (**Isolation**): Odoo with restart type `process` or
+  a module update without `run_as` run a module's code as that user, and a
+  repository the `run_as` user may write lets it plant a hook or a git option
+  that git runs as that user at the next pull. The warning prints the `chown`
+  and `chmod`. It reads owner, group and mode of the repository, its git folder,
+  `hooks` and `config`: not ACLs, not submodules.
+- **Shell** (developers and admins, a button on each instance, development
+  machines only): a page with
   a terminal (xterm.js) running a login shell of the user OmniaCLI runs as
   (`omniacli`, or the one of `OMNIACLI_USER`; bash when its own shell is
   `nologin`), in the instance's first repository. It runs on a
@@ -193,6 +240,16 @@ prepared before Test & activate. The job's log opens in a new tab.
   **A−** and **A+** change the text size for that page, **Full screen**
   fills the screen with the terminal (Esc leaves it); the size it opens
   with is on the Options page.
+  **Files dropped on the terminal** (shell, Claude, psql; up to 100 MiB
+  each) are uploaded into `~/.omniacli-drops/<server>/<role>/` in the home
+  of that system user, and their paths are typed in the terminal, quoted,
+  as a local terminal does: Claude reads a mail (`.eml`) or a spreadsheet
+  from there. A file keeps its name (`name-1.ext` when it is taken), the
+  files older than 7 days go at the next upload, every upload is in the
+  access log. The upload follows the shell's rules: who may open it, where
+  it opens, through a link to the linked server. A mail dragged straight
+  from a mail program may reach the browser as a link, not as a file: save
+  it as `.eml`, then drop that.
 - **Options** (admins, `/options`): the options of the whole instance, in
   `options.yaml` next to the servers file (`options_file` in the main
   configuration): the text size every console opens with (8-40 pixels,
@@ -226,12 +283,14 @@ prepared before Test & activate. The job's log opens in a new tab.
   makes Odoo set `web.base.url` to the tunnel's address, unless the
   instance has the system parameter `web.base.url.freeze`. Both instances
   need a version with tunnels.
-- **Claude** (same roles, a button on an instance with a **Claude folder**
-  in the server form): the same shell, opened in that folder, that runs
+- **Claude** (same roles, development machines only, a button on an instance
+  with a **Claude folder** in the server form): the same shell, opened in that folder, that runs
   `claude` first (found by the login shell's `PATH`; Claude Code's installer
   puts it in `~/.local/bin`) and stays open when it ends. Claude Code must be
   installed and logged in for the user OmniaCLI runs as.
-- **psql** (same roles, Odoo instances): the same page running `psql` on
+- **psql** (same roles, Odoo instances; on a server only with `run_as`, and
+  on Docker instances, where it runs as `postgres` in the database's
+  container): the same page running `psql` on
   the instance's database, connected as Odoo connects (`db_host`,
   `db_port`, `db_user`, `db_password` of its Odoo config, given in the
   `PG*` environment, not on the command line); it ends when psql ends.
@@ -406,7 +465,9 @@ configs and logs, its files in `/var/lib/omniacli` (given to that user, and
 kept so by upgrades). The sudoers lines name that user
 (`devuser ALL=(root) NOPASSWD: ...`). Not root. Remove the line and run
 `dpkg-reconfigure` again to go back to `omniacli`. On a server keep
-`omniacli`, with `run_as` for the programs of an Odoo venv.
+`omniacli`, with `run_as` for the programs of an Odoo venv: `OMNIACLI_USER`
+makes the machine a development one, with no restriction on the shells, unless
+the main configuration says `machine: server`.
 
 ### Build and test the package
 
@@ -519,6 +580,7 @@ Every user has a role:
 | `user` | watch: servers, load, logs, jobs, the backup list; and restart, start and stop Odoo |
 | `developer` | also act on the servers: pull, update, backup and the download of a backup, pip, the shell, Claude |
 | `admin` | everything: also the configuration pages (servers, users, links, schedules) and the merge of test into production |
+| `workspace` | none of the above on the machine: the servers of its workspaces only, with its role in each (see Workspaces) |
 
 ```yaml
 auth:
@@ -546,12 +608,22 @@ server form, with example data only.
 The **Access log** (Users page, admins) lists the logins with date, time and
 address: a user's login is the login form; a link or an MCP token, which send
 their token with every request, log in with their first request after 30
-minutes without requests from the same address. Logouts, every wrong password
-or token, and the logins refused for too many failures are listed, and so is
-every call to `/mcp`, with its JSON-RPC method and tool, and every shell
-opened and closed. It is kept in
-`access.jsonl` in the logs folder next to `jobs_dir` (`/var/lib/omniacli/logs`
-for the package); past 5 MiB it moves to `access.jsonl.1`.
+minutes without requests from the same address. Logouts are listed, and so
+is every call to `/mcp`, with its JSON-RPC method and tool, every shell opened
+and closed, every **action** of whoever passed the login (what changes
+something: the request, its answer and the name, role, host, server or kind it
+names, never a password or a token; the routes that only poll or check are
+left out) and every **download** of a backup. It is kept in `access.jsonl` in
+the logs folder next to `jobs_dir` (`/var/lib/omniacli/logs` for the package).
+
+Wrong passwords and tokens, and the logins refused for too many failures, need
+no login, so they have a file of their own, `access-failed.jsonl`, and cannot
+push out the rest: of them at most 10 a minute from an address and 300 from all
+addresses are written, the others counted in one entry at the end of the
+minute. Past 5 MiB a file moves to `<file>.1`, and so on up to `<file>.10`.
+
+These files are written by OmniaCLI's user, so whoever has a shell as that user
+can change them: to keep them out of reach, send them to another machine.
 
 The **Log** page (admins) shows OmniaCLI's own log: the requests it serves,
 its calls to the links, its errors, with the follow and errors-only switches
@@ -717,18 +789,410 @@ The routes, for links in the puller only (a JSON `{"error": ...}` otherwise):
 
 ### Groups
 
-With many servers, **Edit groups** on the Dashboard (admins) puts them
-under headings, in the order you choose. A member is `srv` (a server of this
-instance), `*` (all of them), `customer/srv` (a server of a link) or
-`customer/*` (all the servers of a link); a server shows under the first
-group that has it, the rest under "Other servers". The filter finds a server
-by its group name too. The groups are this instance's own: a linked
-instance's pages do not show them.
+Every list of things (the Dashboard's Servers, Workspaces and Linked, and
+the Workspaces, Settings › Servers, Users, Links, Pullers, Schedules and
+Plugins pages) is one list widget (`templates/_list.html`): its search finds
+every word typed, in any case, in the browser (`?q=` fills it). Grouping is
+an option of the widget, offered by the Dashboard's **Servers** and
+**Linked**: **Edit groups** (admins, `/groups`) puts their items under
+headings and subheadings, four levels at most, in the order you choose. A
+member is a name of the list (`srv`, `cliente`) or a pattern of names
+(`acme-*`, `*`, `?` one character); an item shows under the first group
+that has it, itself or in a subgroup, then under the first of its subgroups
+that has it, the rest under "Others". The search finds an item by its groups
+too, and each viewer's folded groups are kept in its browser. A file of an
+older OmniaCLI (one list for this instance's and the links' servers) is
+read as the groups of both: `srv` and `*` the servers', `customer/*` the
+link `customer`; a single server of a link (`customer/srv`) is dropped, the
+linked servers being on their own Dashboard now. The groups are this
+instance's own: a linked instance's pages do not show them.
 
 The other instance must be reachable from yours: through an HTTPS reverse
 proxy, a VPN, or an SSH tunnel (`http://` is accepted for a tunnel or a VPN,
 but then the token travels in clear). Both instances need a version with
 links (the Test link button says so).
+
+### Links through SSH
+
+A customer's server that shows only SSH (and Odoo) still has its OmniaCLI
+reached: give the link an **SSH server** (the **SSH…** button of its row).
+OmniaCLI keeps an `ssh -L` open to it while it runs, restarts it when it
+drops (after 5 s, then up to 60 s), and sends everything of the link through
+it: pages, API, WebSockets, tunnels, copies. The URL is then `http://` as that
+server reaches OmniaCLI, `http://127.0.0.1:8090` for the package's default
+there; SSH encrypts it. The row shows the tunnel's state and why it is down;
+**Test link** says it too.
+
+- **The key**: OmniaCLI has an ed25519 key of its own (**Make the key** on the
+  Links page), in `ssh/` next to the links file, readable by OmniaCLI's user
+  only.
+- **The server's key**: **Fetch host key** reads it; compare its fingerprint
+  with `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` run on that server
+  before saving. ssh accepts only that key, and reads no configuration,
+  agent or `known_hosts` of OmniaCLI's user.
+- **On the customer's server**, as root: a user for OmniaCLI alone
+  (`omniacli-link` by default) and, in its `~/.ssh/authorized_keys`, the line
+  the Links page prints, which allows that one forward and nothing else (no
+  command, shell or file transfer):
+
+  ```
+  restrict,port-forwarding,permitopen="127.0.0.1:8090",command="/bin/false" ssh-ed25519 AAAA… omniacli@host
+  ```
+
+  Better also the `Match User` block the page prints, at the end of
+  `/etc/ssh/sshd_config` (then `sshd -t && systemctl reload ssh`): the line
+  alone still lets the key open a port on that server's loopback that leads
+  back to this machine (`ssh -R`); the block refuses it. Both tried on
+  OpenSSH 9.2. In the line, `permitlisten="none"` is not accepted there: the
+  whole key is refused.
+- ssh ends with OmniaCLI, also when OmniaCLI is killed.
+
+### Git credentials
+
+On a machine whose working copies already have their git user (an ssh key,
+saved credentials of someone), OmniaCLI can use its own instead: **Settings ›
+Git credentials** (`/credentials`, the machine's admins) gives each server, and
+each workspace (also on the workspace's page, by its admins), a list of
+`host + user + token` (github.com, bitbucket.org, a GitLab). A server's
+credential wins over its workspace's for the same host; a host without one is
+reached as before, as the machine's git user.
+
+Every git command OmniaCLI runs on a repository of that server (pull, fetch,
+merge, push, submodules, the branches of the form, the checks) then gets
+`-c credential.helper=` (the machine's helpers off), `-c
+credential.helper=store --file=<the server's file>`, and for each host
+`-c url.https://<host>/.insteadOf=git@<host>:` and `ssh://git@<host>/`: a
+working copy with an ssh remote is reached over https with the token, its
+`.git/config` untouched, and no token is written in a repository (so a
+container that mounts it never reads it). The credentials are kept in
+`credentials.yaml` next to the servers file and the files git reads in
+`credentials/`, readable by OmniaCLI's user only; a token is never shown
+again (changing a credential with the token left empty keeps it).
+
+### Workspaces
+
+A **workspace** is a customer's closed part of the machine: its servers and
+its users. Two classes of users:
+
+| Class | Who | Sees and does |
+|---|---|---|
+| the machine's | the roles `user`, `developer`, `admin` (Users page) | everything their role allows, as before; workspaces change nothing for them |
+| a workspace's | role **`workspace`** (Users page) | only the servers of the workspaces it is a member of, each with **its role there** (`user`, `developer` or `admin`, with the meanings above) |
+
+The machine's admins make the workspaces (**Settings › Workspaces**,
+`/workspaces`): name (`a-z 0-9 -`, it becomes part of URLs and folders),
+label, domain, storage, limits, servers and members. A server is in one
+workspace at most, and so is a domain. Saved in `workspaces.yaml` next to the
+servers file (`workspaces_file` in the main configuration); the storages a
+workspace may live in are listed by root in the main configuration, each a
+name (`a-z 0-9 -`, 32 at most) and its folder:
+
+```yaml
+workspaces:
+  storage:
+    default: /srv/omniacli/default_workspace
+    disk2: /media/disk2/omniacli
+```
+
+A workspace names its storage, and so does every path of root's (below):
+**a new disk changes the folder only**. Stop the storage's workspaces, copy
+its folder on the new disk keeping the workspaces' disks sparse
+(`rsync -aHS` or `cp -a --sparse=always`), change its folder in
+`workspaces.storage`, its name as it is, and restart the machine (or stop
+and start the storage's unit): it is bound from its new folder, and the
+workspaces, their instances and docker find everything where it was. A list
+of folders without names (the format of before) is refused: OmniaCLI starts,
+says so on Settings › Workspaces, and no workspace with a storage can be
+used until each has a name.
+
+A workspace whose storage is no longer listed there still loads: OmniaCLI
+starts, says so in its log and on both workspace pages, and the workspace
+cannot be used (no instance is created, a save keeping that storage is
+refused) until an admin picks a listed one on Settings › Workspaces or lists
+it again.
+
+Without `workspaces.storage` there is one, `default`, in
+`/srv/omniacli/default_workspace`, made (root's) by the package when the
+workspaces are allowed (`OMNIACLI_WORKSPACES`, below); `storage: {}` is none. A folder holds all the
+workspaces placed there: `.disks/<workspace>.img` and `<workspace>/`.
+
+**The storages are bound on a path of root's.** A storage folder must be
+root's and written by nobody else, but the folders above it may be anyone's
+(a disk of a user, with its other folders). Root acts on a storage only
+through `/var/lib/omniacli-storage/<name>` (`config.bound_root`), where its
+unit `omniacli-storage-<name>.service` binds it (written by the root helper's
+`storage-setup`, which the package runs and every action of the helper does
+first), at every boot from the folder `workspaces.storage` names then,
+before the workspaces' disks and docker: a bind holds the folder, not its
+path, so renaming a folder above the storage changes nothing for root, and
+the path of root's cannot be moved. At a boot the path counts again, so the
+identity of the folder bound (device and inode) and its path are kept (in
+`/var/lib/omniacli-storage/.ids/`): another folder at the same path is not
+bound, the path beneath is immutable, and nothing of the workspaces starts on
+it (tried: a container restarted by docker fails to create its mount instead
+of writing there); a folder changed in the main configuration (root's) is the
+new disk, taken and kept. A storage moved on purpose at the same path is
+taken again by root by hand: `omniacli workspace-helper storage-reset
+<name>`. The units of storages no longer listed (and the mount units of
+OmniaCLI 2026.1.36 and before) are taken away by `storage-setup` when nothing
+of theirs is mounted. The sudoers lines of the compose helper name the paths
+of root's.
+
+**The space of the disks.** A workspace's disk takes room on the real disk
+only as it is used, so the room free now is not all there is to give. Next to
+`disk_gb` the page shows, for the chosen storage, the real disk's size and
+room free, what the workspaces' disks there were promised and what they take,
+and what this workspace may have: by default no more than the room free less
+what the other workspaces on the same real disk were promised and do not take
+yet, so every GB promised is there and a full workspace stops itself only.
+**force** lets an admin promise more (two new workspaces of 100 GB taking 20
+GB each leave 160 GB free: a third of 100 GB fits now), knowing that the real
+disk must get room before they fill it; even forced, a disk is made or grown
+only if it fits whole in the room free at that moment (the root helper checks
+it), and never smaller than it is. A storage folder on the same real disk as
+another counts with it. Read by the root helper's `space` (the images are
+root's only): when sudo refuses it, the page says how to allow the helpers
+(`OMNIACLI_WORKSPACES=1`, below).
+
+The domain gives the instances their names on the internet (Domains of a
+workspace, below); the storage and the limits of disk and instances apply to
+the instances created from templates (below), and so do those of CPU and
+memory: `cpus` cores and `memory_gb` GB (no swap) for all the workspace's
+containers together, one systemd slice `omniacli_<workspace>.slice` written
+by the root helper's `limits` when an instance is created and when the
+limits change (a job; the containers running take them). A domain may not be under another workspace's
+(`shop.acme.it` under `acme.it`): their names would meet.
+
+#### Instances created from templates
+
+The admins of a workspace create its instances on its page (**New
+instance**): a name (`a-z 0-9 -`; the server is `<workspace>-<name>`), a
+template and the fields it asks. A job then:
+
+1. makes or grows the workspace's **virtual disk**: `<storage>/.disks/<workspace>.img`,
+   an ext4 image of the workspace's disk limit (`disk_gb`) that takes room
+   on the real disk as it is used, mounted on `<storage>/<workspace>` by a
+   systemd mount unit at every boot, with docker started after it (a
+   drop-in of `docker.service`); the folder beneath is immutable (`chattr
+   +i`), so nothing is written there while the disk is not mounted. A full
+   disk stops its workspace only;
+2. makes production and test, each a compose project
+   `<storage>/<workspace>/<name>/<role>` of root's: the template's
+   `compose.yaml`, `.env` (the checked fields, the ports on `127.0.0.1`,
+   a database password of its own, the project's name), `config/odoo.conf`
+   (the image's addons, `proxy_mode`, `dbfilter` on the instance's database,
+   `list_db = False`), the filestore and the database as folders of the
+   instance (on its disk), `addons/` of the role for the customer's
+   repositories, and `<name>/instance.json` (the template and the database);
+3. creates each database (`odoo -i <modules>`, in a container of its own)
+   and starts both; a step that fails removes what was made;
+4. adds the server, of type `docker`, to the workspace.
+
+The job, and that of **Remove** below, is the workspace's: its users see it on
+the Jobs page and its own page also when the creation failed (the server
+then leaves the workspace) or after the removal.
+
+**The customer's modules**: on the same page, **Add repository** on an
+instance takes an `https://` address (no user or token in it: those are the
+workspace's git credentials, above), a branch for production and one for
+test, and a name. A job clones it, with its submodules and those
+credentials, into `production/addons/<name>` and `test/addons/<name>` (folders
+of OmniaCLI's user, mounted read only into the containers, so no token and no
+`.git` the customer could change), has the root helper's `conf` write each
+role's `odoo.conf` again with `/mnt/customer-addons/<name>` in its addons path
+(the admin password kept), adds the repository to the server and restarts
+both; its modules are then installed from Odoo's Apps. Pull, update and the
+merge of test into production then work as for every server. **×** takes it
+out of both the same way and deletes the clones. A step that fails puts the
+`odoo.conf` back and deletes what was cloned.
+
+**Odoo parameters**: each role of an instance has, on the same page, the
+Odoo options its template lets the workspace's admins change, with their
+bounds (`odooplm-20`: `workers`, `max_cron_threads`, the `limit_time_*` and
+`limit_memory_*`, `limit_request`, `db_maxconn`, the SMTP server and
+`email_from`; the defaults are Odoo 20's), and a **debug log** switch
+(`log_level = debug`). The machine's admins may set other bounds for a
+workspace (**Bounds of the Odoo parameters** on Settings › Workspaces, one
+`name min max` per line). Saved, the values are checked (`workers ×
+limit_memory_hard` may not exceed the workspace's `memory_gb`: the kernel
+would kill Odoo instead of Odoo stopping one request), the root helper's
+`conf` writes the role's `odoo.conf` again (what OmniaCLI needs, the
+database, the addons, the admin password, is never among them) and keeps
+them in `<role>/omniacli.json`, the role is restarted and the workspace's
+names published again (with workers the websocket goes to Odoo's 8072). A
+password left empty keeps the one saved; with `workers = 0` Odoo does not
+apply `limit_time_cpu`. The SMTP password is in `odoo.conf`, which is
+readable by everyone on the machine (`0644`).
+
+A new database has the user **admin** with password **admin**: change it
+at the first login. **Remove** on the same page takes down both projects,
+deletes their databases, files and folders, then the server.
+
+A template is a folder (`templates/<name>/` in this repository, installed
+by the package in `/usr/share/omniacli/templates`, root's): `template.json`
+(what it is and the fields it asks, each with its choices or pattern),
+`compose.yaml` (only `${...}` of its fields and of what OmniaCLI makes) and
+`odoo.conf.in`. Root runs it, so what its `compose.yaml` may hold is a closed
+list (`stacktemplates.check_compose`): the services' keys of a list (no
+`privileged`, `devices`, `network_mode`, `pid`, `build`,
+`env_file`...), no top-level key but `name` and `services`, ports
+`127.0.0.1:${VARIABLE}:<port>` only, every service in the workspace's
+slice (`cgroup_parent: ${SLICE}`), with `security_opt:
+[no-new-privileges:true]`, `cap_drop: [ALL]` and a `pids_limit` up to 4096
+(`cap_add` only `CHOWN`, `SETUID`, `SETGID`, `DAC_OVERRIDE`, `FOWNER`, for an
+entrypoint that starts as root), `read_only: true` (a `tmpfs` only with its
+size: Odoo's `/tmp` is on the workspace's disk, so a backup needs the free space
+of its zip there), mounts of the instance's own folders
+only (`./…` and `../…`, never out of it), the configuration and the
+customer's addons read only, logging `json-file` with `max-size` and
+`max-file`. The first template is `odooplm-20` (the DockerOdooPLM image of
+Odoo 20, PostgreSQL 17). Its database's superuser is `postgres`, with a
+password Odoo does not know, and Odoo connects as `odoo`, without superuser;
+the top of the workspace's disk is `0750`, for root and OmniaCLI's group.
+
+The root helper, `omniacli workspace-helper disk|limits|create|remove|web|owncert|firewall|template-install|conf|space`
+(`workspacehelper.py`), takes names only (workspace, instance, template), a
+storage of `workspaces.storage` of the main configuration, which only root
+writes, a template of the package's folder, and refuses a folder or a
+template the caller could change. The databases go through the compose
+helper (`init`). With `OMNIACLI_WORKSPACES=1` in `/etc/default/omniacli`
+(then `sudo dpkg-reconfigure omniacli`) the package writes their sudoers
+lines in `/etc/sudoers.d/omniacli-workspaces`, one for the workspace helper
+and one for the compose helper per storage:
+
+```
+omniacli ALL=(root) NOPASSWD: /opt/omniacli/venv/bin/omniacli workspace-helper *
+omniacli ALL=(root) NOPASSWD: /opt/omniacli/venv/bin/omniacli compose-helper /var/lib/omniacli-storage/default/* *
+```
+
+Without it, nothing is granted: give it only where workspaces are wanted,
+since root runs what these helpers make.
+
+#### Templates published for download
+
+New templates and new versions come from the download server as the
+plugins do (`templatestore.py`), next to the plugins' index:
+`omniacli-templates.json` and one archive per template,
+`omniacli-template-<name>.tar.gz` (its three files, made by `omniacli
+template-pack`, which checks them first), each with its signed manifest,
+whose version is the template's. **Settings › Workspaces › Templates**
+(the machine's admins) lists the templates here (the package's, the
+downloaded ones, the one used) and, with **Look for published templates**,
+those published, with their signed version; **Install** runs a job: the
+archive downloaded into `templates/<name>/` next to the jobs and checked
+against its signed manifest, then the root helper's `template-install`
+copies it into a folder of root's, checks it again with
+`plugins.public_key` of the main configuration, unpacks its three files
+(nothing else is taken), loads it (the compose rules) and puts it in
+`/var/lib/omniacli-templates/<name>`, root's. Of a template there and in the
+package the **higher version** is used; the instances made before keep their
+own files. OmniaConfigurator3's `Setup/release.py` (target `templates`)
+publishes them.
+
+#### The network of the workspaces' containers
+
+A workspace's containers reach the internet (pip, git over https, DNS) and
+nothing else: not this machine, not the LAN, not the other containers of
+the machine. Every project of a workspace has a network of its own, a /24
+of one pool (`workspaces.network` in the main configuration,
+`10.213.0.0/16` when not set; `SUBNET` in its `.env`, required by the
+compose rules as the template's only network), which may not overlap a
+network of this machine. The root helper's `firewall` makes two chains for
+the pool:
+
+- `OMNIACLI-WS-FWD`, jumped from `DOCKER-USER`: the replies pass, what goes
+  to the pool itself is left to docker's rules (which keep its networks
+  apart), what goes to a private address (`10/8`, `172.16/12`,
+  `192.168/16`, `169.254/16`, `100.64/10`) is dropped;
+- `OMNIACLI-WS-IN`, jumped first from `INPUT`: the replies pass (nginx
+  reaches Odoo through docker's proxy on `127.0.0.1`, the answer comes in
+  from the container), anything else from the pool to this machine is
+  dropped.
+
+The first instance turns it on (`firewall on`): the rules, and the unit
+`omniacli-workspaces-firewall.service`, which applies them again at every
+boot before docker (`firewall apply`). `firewall off` removes both. IPv4
+only: the projects' networks have no IPv6.
+
+#### Domains of a workspace
+
+The workspace's domain (set by the machine's admins) gives its instances
+their names; the workspace's admins choose the rest on its page (**Names**):
+
+| Name | Goes to |
+|---|---|
+| `<domain>`, `test.<domain>` | production and test of the **main instance** (none chosen: these names go nowhere) |
+| `<instance>.<domain>`, `<instance>.test.<domain>` | production and test of every instance |
+| `<sub>.<domain>`, `<sub>.test.<domain>` | a **subdomain**: production and test of the instance it is given to |
+
+A subdomain is one label (`a-z 0-9 -`), never `test` nor an instance's name;
+an instance may not be named `test` or as a subdomain. **Save and publish**
+runs a job: the root helper's `web` writes the workspace's nginx site,
+`/etc/nginx/conf.d/omniacli-<workspace>.conf`, from the names and the ports
+it reads itself from the instances on the disk (`.env`); a name another site
+of nginx answers on (`nginx -T`: the same name, or a wildcard of it) is
+refused; `nginx -t`, or the site before is put back; then nginx is reloaded.
+Port 80 answers the challenges of Let's Encrypt (from
+`/var/lib/omniacli-acme`) and sends the rest to https; 443 proxies to the
+instance on `127.0.0.1` (the headers of `proxy_mode`, `/websocket` upgraded:
+to the http port when `workers` is 0, as in the template, to the websocket
+port otherwise). Once, the helper adds `/etc/nginx/conf.d/omniacli.conf`
+with `server_names_hash_bucket_size 256` (nginx's 64 does not hold these
+names), unless the machine's nginx sets it already. The job runs again when
+an instance is created or removed and when the domain changes; **Publish
+again** after the DNS records are made.
+
+The certificate, one for all the names of the workspace:
+
+- **Let's Encrypt** (the default): `certbot certonly --webroot --cert-name
+  omniacli-<workspace>`, renewed by certbot's own timer, nginx reloaded by
+  its deploy hook. Every name needs a DNS record pointing to this machine,
+  and port 80 must be open to the internet. Until the certificate is there,
+  port 80 answers 503 and there is no https. Optional, in the main
+  configuration: `workspaces.acme_email`, the account's address (Let's
+  Encrypt no longer mails about expiring certificates; without it the
+  account has none).
+- **The customer's own**: the certificate with its chain and its private key
+  (PEM, no passphrase), pasted on the page: they reach the helper's
+  `owncert` on its standard input (never as arguments, which `ps` shows),
+  which checks with openssl that the key is the certificate's and that it
+  has not expired, and keeps them in `/etc/omniacli/certs/<workspace>/`,
+  root's only. The names it covers are shown once it is uploaded;
+  renewing it is the customer's.
+
+A workspace without a domain or without instances has no site, and its
+certificate of Let's Encrypt is deleted. nginx and certbot are the
+machine's (`apt install nginx certbot`): the package does not install them.
+
+A user of workspaces reaches, of a server of its workspaces: the server
+page, its log, start, stop, restart, and with its role there pull, update,
+backup and its download, the plugin's actions, the merge; its jobs; the
+Dashboard with its servers only; its account. **Nothing else**: not the
+servers of other workspaces (403), not this machine's load and disks, the
+configuration, the links and tunnels, the copy from a link, the schedules,
+the plugins, the options, OmniaCLI's log, the help, and **no console** (the
+shell, Claude and psql pages are shells of this machine). The check is made
+once for every request, before its route (`in_workspaces` in `app.py`): a
+user of workspaces reaches only the routes listed in `WORKSPACE_ROUTES`, and
+of a plugin's own routes those of an instance; a route added later is closed
+to them until it is listed (a test goes through every route).
+
+On its Dashboard, in place of This machine, a user of workspaces sees the
+load of each of its workspaces (`/api/workspaces/<name>/load`, its members
+only): CPU in cores and memory against the workspace's limits, the traffic
+of its projects' networks (received, sent), the last hour sampled every 5 s,
+and its disk, used against `disk_gb`. Not the machine's load, nor the room
+of the real disk under it: those stay the machine's admins'.
+
+The admins of a workspace manage its users (the workspace's name in the
+menu, `/workspaces/<name>`): a user they create is a user of workspaces only,
+of theirs; they change the role of its users, the password of a user of
+theirs only (a user also of another workspace, or of the machine, gets its
+password from the machine's admins), and remove users from it (a user of
+that workspace only is deleted). Nobody changes their own role or removes
+themselves. Deleting a server takes it out of its workspace, renaming keeps
+it there, and a new server is in no workspace, whatever a workspace still
+names.
 
 ### Scheduled actions
 
@@ -742,7 +1206,8 @@ this order:
    something new came. With the copy it does not restart: the restore does.
 2. **Copy from link**: a new backup of an instance of a linked OmniaCLI,
    downloaded and restored here as the Copy from link button does, with the
-   same choices (without filestore, neutralize, passwords set to `admin`,
+   same choices (without filestore, without binary columns: the ticks of
+   the last Backup dialog there, neutralize, passwords set to `admin`,
    only load the database; a schedule saved before the passwords choice
    existed keeps the passwords). With *only load* the instance is neither
    updated nor restarted, after a pull too. *Backups kept here* (default
@@ -800,8 +1265,9 @@ The user that runs OmniaCLI needs:
 
   A backup made or restored as that user passes through a folder in
   `/var/tmp` that only that user can enter (so `/var/tmp` needs the room for
-  one more copy of it), and a backup ends up in the backup folder owned by
-  OmniaCLI's user, mode 640. Not with restart type `process`: OmniaCLI stops
+  one more copy of it, and a restore for the backup unpacked there too:
+  `TMPDIR` goes past sudo with `SETENV`), and a backup ends up in the backup
+  folder owned by OmniaCLI's user, mode 600. Not with restart type `process`: OmniaCLI stops
   its own Odoo with a signal, which it may not send to another user's
   process.
 - the right to restart the services without a password. With `sudo: true`
@@ -898,9 +1364,9 @@ as its arguments, never in a script's text:
 | `version <odoo service>` | `odoo --version` |
 | `dump <odoo service> <db> [--no-filestore]` | `odoo db dump` into a file of the container, then to the output: to the output itself, Odoo 19 and 20 ignore `--no-filestore` (`odoo/cli/db.py`) |
 | `load <odoo service> <db> [--neutralize]` | in a container of its own of the service (`run --rm`, which starts the database it depends on: the service may be stopped), the zip read from the input into a file, `odoo db load --force` |
-| `update <odoo service> <db>` | `click-odoo-update`: in a container of its own of the service (`run --rm --no-deps`), OmniaCLI's tools mounted read only |
-| `update <odoo service> <db> --modules a,b` | `odoo -u a,b --stop-after-init --no-http` in the service's container |
-| `psql <database service> <db>` | `psql` on the caller's terminal (the web shell) |
+| `update <odoo service> <db>` | `click-odoo-update`: in a container of its own of the service (`run --rm --no-deps`), OmniaCLI's tools mounted read only; on a neutralized database the crons that were off are off again afterwards |
+| `update <odoo service> <db> --modules a,b` | `odoo -u a,b --stop-after-init --no-http` in the service's container, with the same care for the crons |
+| `psql <database service> <db>` | `psql` on the caller's terminal (the web shell), as the image's `postgres`, else the container's own user: never root, its `\!` runs commands; a service that only has root is refused |
 
 The zip goes through the helper's input and output: the helper never opens a
 file the caller names. The database connection is the one the official
@@ -1085,6 +1551,7 @@ servers:
 | Pull image | `docker compose pull`, then `up -d`: a newer image (a new DockerOdooPLM build) |
 | Backup | `odoo db dump`, `<db>_<time>.zip` (`_nofilestore` without filestore: from Odoo 19, Odoo 18 refuses it) |
 | Restore | refused for a backup of another Odoo version; stop, `odoo db load --force` (neutralized by default) in a container of its own, update of the changed modules, start |
+| Copy production to test | a new backup of production (kept with its backups), stop test, `odoo db load --force --neutralize` into the test database (a new `database.uuid`), update of the changed modules, start test. The dialog asks test's filestore: **shared with production** (the default: the backup without filestore, then the compose helper's `link-filestore` makes test's filestore of hard links to production's files; Odoo 19 and later), **a copy** of production's, or **none**. Refused when production and test run different Odoo versions; a step that fails leaves test stopped |
 | Log | `docker compose logs` of the Odoo service |
 | psql | `psql` in the database service |
 
@@ -1092,8 +1559,17 @@ The repositories are the addons folders the project mounts into the
 container (`./addons-extra` of DockerOdooPLM): OmniaCLI pulls them on the
 machine, and the container sees the new code.
 
-Not in it yet: Copy production to test, setting every password to admin, a
-filestore shared with production, discover, the CPU and memory charts.
+`link-filestore` (compose helper): the source project is checked as the
+project is (safe from the caller), Odoo's data folder (`/var/lib/odoo`) of
+both must be a folder of this machine (a bind mount, not a named volume),
+both of the same user, not root; that user makes the links
+(`link_filestore.py check` then `merge`, its text given to Python, so the
+user need not reach OmniaCLI's folder), never root: the containers, which
+run the customer's code, write in the filestores. Production and test on
+one filesystem (a workspace's instance always is: its disk).
+
+Not in it yet: setting every password to admin, discover, the CPU and
+memory charts.
 
 OmniaCLI's tools (click-odoo-contrib and what it needs, pure Python, pinned
 in `packaging/debian/requirements/tools.txt`) are installed by the package's
@@ -1202,7 +1678,7 @@ provides: OmniaCLI installed by hand on Python 3.9 runs without it.
 | `read_log` | the last lines of an instance's log, optionally only ERROR/CRITICAL with their tracebacks |
 | `list_jobs`, `get_job` | the jobs, filtered by server and text, and a job's log |
 | `update_test` | **the only action on Odoo**: git pull + update of the changed modules + restart of the **test** instance |
-| `backup_test` | a backup (database and filestore) of the **test** instance; `options: {"no_filestore": true}` for the database only |
+| `backup_test` | a backup (database and filestore) of the **test** instance; `options: {"no_filestore": true}` for the database only, `{"no_binaries": true}` with the binary columns emptied (those ticked in the instance's last Backup dialog, or `"binary_columns": ["table.column", ...]`) |
 | `backup` | (admin token) a backup of any instance, **production** too; the same `options` |
 | `list_backups` | (admin token) an instance's backups, each with its download path |
 | `read_server` | (admin token) a server's whole configuration, active or draft |
@@ -1314,6 +1790,11 @@ server {
         proxy_buffering off;
         proxy_read_timeout 3600s;
         proxy_send_timeout 3600s;
+
+        # uploads (restore from a file, files dropped on a terminal): nginx's
+        # default stops a body over 1 MiB with 413
+        client_max_body_size 0;
+        proxy_request_buffering off;
     }
 }
 ```
@@ -1324,7 +1805,8 @@ same `location` ("directive is duplicate"). And `Host` once: two
 400.
 
 The networks in `allow` are those of the clients, not the server's: a PC
-outside them gets 403.
+outside them gets 403. A client on a VPN arrives with the VPN's address, not
+its LAN one: the 403 lines of `/var/log/nginx/access.log` show which.
 
 #### The certificate
 
@@ -1413,12 +1895,27 @@ A plugin may also give:
   (`static_dir`, at `/x/<plugin>/static/`);
 - **`dev_setup()`** and **`mcp_help`**: its part of the MCP tool `dev_setup`
   and of the MCP instructions;
-- **`backup_fields()`**: the choices of a backup (Odoo: without filestore),
-  given to **`backup()`** as options; a checkbox not posted is off, and off
-  is the backup made without any choice;
+- **`backup_fields()`**: the choices of a backup (Odoo: without filestore,
+  without binary columns), given to **`backup()`** as options; a checkbox
+  not posted is off, and off is the backup made without any choice. Kinds
+  `checkbox`, `text`, `number` and `checklist`; `shown_with` shows a field
+  while that checkbox is ticked. A `checklist` takes its rows from
+  **`backup_choices(instance, key)`** (`{"rows": [{value, label, size,
+  detail}], "total"}`), and `threshold` names the number field (MB) from
+  which a row is ticked by default. Only the Backup dialog shows the fields
+  that are not checkboxes; it remembers its choice per instance, and the
+  backups without a dialog get a checklist the caller does not give from it
+  (`plugin_api.backup_into`, which a plugin's own backups call too);
+- **`backup_estimate()`** and **`restore_room()`**: the weight of a backup
+  before it is made and the folders a restore writes to, for the room
+  widget of the dialogs (`templates/_room.html`, `restoreroom.py`);
 - **`restore()`** and **`restore_fields()`**: load a backup zip into an
   instance, with the choices asked first (Odoo: neutralize). The core's
-  *Copy from link* is offered only for a type that has it.
+  *Copy from link* and *Restore* are offered only for a type that has it.
+- **`backup_problem()`**: why a file chosen by a person cannot be restored
+  (Odoo: no `dump.sql`), asked before anything is touched.
+- **`before_start()`**: called before every start and restart; raise
+  `JobFailed` when the instance has nothing to run on (Odoo: no database yet).
 - **`script_runner()`** and **`script_env()`**: how a scheduled action runs a
   Python script on an instance (the python, the system user, the
   environment) and the `OMNIACLI_*` variables it adds (Odoo: the venv's

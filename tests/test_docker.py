@@ -182,7 +182,7 @@ async def test_restore(helper, tmp_path):
 async def test_the_actions(helper):
     calls, answers = helper
     inst = _server().test
-    update, pull = inst.plugin.actions()
+    copy, update, pull = inst.plugin.actions()
     params = update.prepare(inst, {"modules": "web, plm_box", "restart": "on"})
     assert params == {"modules": ["web", "plm_box"], "restart": True}
     assert update.title_of(inst, params) == "Update web, plm_box on s/test + restart"
@@ -196,3 +196,95 @@ async def test_the_actions(helper):
     calls.clear()
     await pull.run(job(), inst, {})
     assert calls == [["pull"]]
+
+
+def _two_roles():
+    data = {"type": "docker", **{role: {"restart": {"type": "compose", "service": f"/srv/x/{role}"},
+                                        "repositories": [], "database": "main"}
+                                 for role in ("production", "test")}}
+    return parse_servers({"s": data})["s"]
+
+
+@pytest.fixture
+def copy_steps(monkeypatch, tmp_path):
+    """The steps of the copy, recorded: (project, action, arguments)."""
+    steps, versions = [], {"/srv/x/production": 20, "/srv/x/test": 20}
+
+    async def helper(job, instance, action, *args, stdin=None, **kw):
+        steps.append((instance.restart.service, action, *args))
+
+    async def major(instance):
+        return versions[instance.restart.service]
+
+    async def backup(self, job, instance, dest_dir, options=None):
+        steps.append((instance.restart.service, "backup", bool((options or {}).get("no_filestore"))))
+        return _zip(dest_dir / "main_x.zip")
+
+    async def stop(job, instance):
+        steps.append((instance.restart.service, "stop"))
+
+    async def start(job, instance):
+        steps.append((instance.restart.service, "start"))
+    monkeypatch.setattr(plugin_module, "_helper", helper)
+    monkeypatch.setattr(plugin_module, "instance_major", major)
+    monkeypatch.setattr(plugin_module.DockerPlugin, "backup", backup)
+    monkeypatch.setattr(plugin_module, "stop", stop)
+    monkeypatch.setattr(plugin_module, "start", start)
+
+    class Host:
+        def backup_folder(self, instance):
+            return tmp_path / "backups" / instance.key.replace("/", "_")
+    return steps, versions, Host()
+
+
+async def test_copy_production_to_test(copy_steps, monkeypatch):
+    steps, versions, host = copy_steps
+    srv = _two_roles()
+    plugin = srv.test.plugin
+    # the plugin of the registry: the app of another test may have given it its host
+    monkeypatch.setattr(plugin, "_host", None)
+    copy = plugin.actions()[0]
+    assert copy.id == "copy-production" and copy.scope == "server" and copy.applies_to(srv)
+    with pytest.raises(JobFailed, match="no host"):
+        await copy.run(job(), srv, {"filestore": "share"})
+    assert plugin.router(host) is None
+    params = copy.prepare(srv, {})
+    assert params == {"filestore": "share"} and copy.title_of(srv, params) == "Copy production to test s (filestore: share)"
+    await copy.run(job(), srv, params)
+    p, t = "/srv/x/production", "/srv/x/test"
+    assert steps == [(p, "backup", True), (t, "stop"), (t, "load", "odoo", "main", "--neutralize"),
+                     (t, "link-filestore", "odoo", "main", p, "main"), (t, "update", "odoo", "main"), (t, "start")]
+    steps.clear()
+    await copy.run(job(), srv, copy.prepare(srv, {"filestore": "copy"}))
+    assert steps[0] == (p, "backup", False) and not [s for s in steps if s[1] == "link-filestore"]
+    steps.clear()
+    await copy.run(job(), srv, copy.prepare(srv, {"filestore": "none"}))
+    assert steps[0] == (p, "backup", True) and not [s for s in steps if s[1] == "link-filestore"]
+    # Odoo 18 dumps no database without its filestore: only a copy
+    versions.update({p: 18, t: 18})
+    steps.clear()
+    with pytest.raises(JobFailed, match="Odoo 18 cannot back up"):
+        await copy.run(job(), srv, {"filestore": "share"})
+    assert steps == []
+    versions[t] = 20
+    with pytest.raises(JobFailed, match="production runs Odoo 18, test Odoo 20"):
+        await copy.run(job(), srv, {"filestore": "copy"})
+    with pytest.raises(ActionRefused, match="one of share, copy, none"):
+        copy.prepare(srv, {"filestore": "all"})
+
+
+async def test_copy_leaves_test_stopped_when_a_step_fails(copy_steps, monkeypatch):
+    steps, versions, host = copy_steps
+    srv = _two_roles()
+    copy = srv.test.plugin.actions()[0]
+    monkeypatch.setattr(srv.test.plugin, "_host", host)
+
+    async def helper(job, instance, action, *args, **kw):
+        steps.append((instance.restart.service, action))
+        if action == "link-filestore":
+            raise JobFailed("not the same filesystem")
+    monkeypatch.setattr(plugin_module, "_helper", helper)
+    j = job()
+    with pytest.raises(JobFailed, match="same filesystem"):
+        await copy.run(j, srv, {"filestore": "share"})
+    assert steps[-1] == ("/srv/x/test", "link-filestore") and "left stopped" in j.lines[-1]

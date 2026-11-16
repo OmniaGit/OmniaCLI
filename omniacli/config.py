@@ -4,13 +4,15 @@
 
 from __future__ import annotations
 
+import base64
 import datetime
+import hashlib
 import ipaddress
 import os
 import re
 import shutil
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -18,8 +20,13 @@ from urllib.parse import urlsplit
 import yaml
 
 from .auth import ROLES as ACCESS_ROLES
+from .auth import WORKSPACE_ROLE
+from . import listgroups
 
 ROLES = ("production", "test")
+# the roles a user may have on the machine: the access roles, or none but
+# those of its workspaces
+USER_ROLES = (*ACCESS_ROLES, WORKSPACE_ROLE)
 # an MCP token saved without a role, as before tokens had one: what such a
 # token could do then (read, update_test, backup_test, download backups)
 TOKEN_DEFAULT_ROLE = "developer"
@@ -37,6 +44,13 @@ SERVER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 USER_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]*\$?")
 
 
+# the kinds of machine: on a development machine nothing is restricted, on a
+# server nobody gets a shell of OmniaCLI's own user (parse_machine)
+MACHINE_SERVER = "server"
+MACHINE_DEVELOPMENT = "development"
+MACHINE_KINDS = (MACHINE_SERVER, MACHINE_DEVELOPMENT)
+
+
 class ConfigError(Exception):
     pass
 
@@ -47,6 +61,13 @@ class Repository:
     path: Path
     branch: str
     remote: str = "origin"
+    # the -c options of the server's git credentials (gitcredentials.bind),
+    # given to every git command on it; not saved
+    git_options: tuple = field(default=(), compare=False, repr=False)
+
+    def git(self, *args: str) -> list[str]:
+        """A git command on this repository, with its server's credentials."""
+        return ["git", *self.git_options, *args]
 
 
 @dataclass
@@ -313,9 +334,9 @@ class Settings:
     # the other OmniaCLI instances this one operates (Links page)
     links_file: Path | None = None
     link_targets: dict[str, LinkTarget] = field(default_factory=dict)
-    # how the Dashboard groups this instance's and the links' servers
+    # how the Dashboard's lists group their items (listgroups.py): {list: groups}
     groups_file: Path | None = None
-    groups: list[ServerGroup] = field(default_factory=list)
+    groups: dict[str, list] = field(default_factory=dict)
     # the scheduled actions (schedules.py) and the scripts they may run
     schedules_file: Path | None = None
     scripts_dir: Path | None = None
@@ -335,9 +356,29 @@ class Settings:
     connections: dict[str, PullerConnection] = field(default_factory=dict)
     # the plugins published for download (main configuration, plugins:)
     plugin_source: PluginSource = field(default_factory=lambda: PluginSource())
+    # the customers' workspaces (workspaces.yaml, Workspaces page), and the
+    # folders they may live in (main configuration, workspaces.storage)
+    workspaces_file: Path | None = None
+    # the git credentials of servers and workspaces (gitcredentials.py)
+    credentials_file: Path | None = None
+    workspaces: dict[str, Workspace] = field(default_factory=dict)
+    # {name: folder}; storage_error: why there are none usable (a list of before)
+    storage_roots: dict[str, str] = field(default_factory=dict)
+    storage_error: str = ""
+    machine: str = MACHINE_SERVER
     token_roles: dict[str, str] = field(default_factory=dict)
     fixed: Access = field(default_factory=Access)
     web: Access = field(default_factory=Access)
+
+    def storage_problem(self, ws: Workspace) -> str | None:
+        """Why ws cannot use its storage, None when it can (or has none yet)."""
+        if ws.storage and self.storage_error:
+            return f"{self.storage_error} (in the main configuration; the machine's admins set it)"
+        if ws.storage and ws.storage not in self.storage_roots:
+            return (f"the storage {ws.storage} of workspace {ws.name} is not one of workspaces.storage of the "
+                    f"main configuration ({', '.join(self.storage_roots) or 'none'}): the machine's admins pick "
+                    f"another on Settings › Workspaces, or list it again")
+        return None
 
     def set_web_access(self, web: Access) -> None:
         """Make web current: the fixed credentials win a name clash."""
@@ -371,6 +412,15 @@ class Settings:
         """The instances of the active servers."""
         return [i for s in self.active_servers() for i in s.instances.values()]
 
+    def workspace_of(self, server: str) -> str | None:
+        """The workspace server is in, None: none."""
+        return next((ws.name for ws in self.workspaces.values() if server in ws.servers), None)
+
+    def memberships(self, user: str) -> tuple[tuple[str, str], ...]:
+        """((workspace, role), ...) of user, by workspace name."""
+        return tuple((ws.name, ws.members[user]) for ws in sorted(self.workspaces.values(), key=lambda w: w.name)
+                     if user in ws.members)
+
 
 def _require(data: dict, key: str, where: str):
     if key not in data or data[key] in (None, ""):
@@ -387,10 +437,13 @@ def _parse_time(value, where: str) -> datetime.time:
 
 def _parse_auto_update(data: dict | None, where: str) -> AutoUpdate:
     data = data or {}
-    auto = AutoUpdate(
-        enabled=bool(data.get("enabled", False)),
-        interval_minutes=int(data.get("interval_minutes", 10)),
-    )
+    # the web form sends an empty field as "": the same as no value, the default
+    interval = data.get("interval_minutes")
+    try:
+        interval = 10 if interval in (None, "") else int(interval)
+    except (TypeError, ValueError):
+        raise ConfigError(f"{where}: interval_minutes {interval!r} is not a number") from None
+    auto = AutoUpdate(enabled=bool(data.get("enabled", False)), interval_minutes=interval)
     if auto.interval_minutes < 1:
         raise ConfigError(f"{where}: interval_minutes must be >= 1")
     auto.window_start, auto.window_end = _parse_window(data.get("window"), where)
@@ -690,10 +743,10 @@ def save_servers(path: Path, servers: dict[str, Server]) -> None:
 _TOKEN_HASH = re.compile(r"sha256\$[0-9a-f]{64}")
 
 
-def _access_role(where: str, value) -> str:
+def _access_role(where: str, value, roles: tuple[str, ...] = ACCESS_ROLES) -> str:
     role = str(value or "")
-    if role not in ACCESS_ROLES:
-        raise ConfigError(f"{where}: role must be one of {', '.join(ACCESS_ROLES)}, not {role!r}")
+    if role not in roles:
+        raise ConfigError(f"{where}: role must be one of {', '.join(roles)}, not {role!r}")
     return role
 
 
@@ -705,7 +758,7 @@ def parse_auth(auth: dict, where: str = "auth", need_user: bool = True) -> Acces
         name = str(name)
         if isinstance(value, dict):
             users[name] = str(value.get("password") or "")
-            roles[name] = _access_role(f"{where}.users.{name}", value.get("role"))
+            roles[name] = _access_role(f"{where}.users.{name}", value.get("role"), USER_ROLES)
         else:
             # the format before roles: such a user is an admin
             users[name], roles[name] = str(value), "admin"
@@ -762,18 +815,97 @@ def save_access(path: Path, access: Access) -> None:
     os.replace(tmp, path)
 
 
+# an SSH host key as a known_hosts line has it, without the host: type and key
+SSH_HOST_KEY = re.compile(r"(ssh-ed25519|ecdsa-sha2-nistp(256|384|521)|ssh-rsa) [A-Za-z0-9+/]+={0,2}")
+SSH_HOST = re.compile(r"[A-Za-z0-9][A-Za-z0-9.-]{0,252}|\[?[0-9A-Fa-f:]+\]?")
+SSH_USER = re.compile(r"[a-z_][a-z0-9_.-]{0,31}")
+
+
+@dataclass
+class SshRoute:
+    """The SSH server a link goes through: OmniaCLI keeps ssh -L open to it
+    (sshlinks.py) and reaches the link's URL from there."""
+
+    host: str
+    user: str
+    host_key: str  # the server's key, "<type> <base64>": no other is accepted
+    port: int = 22
+
+    def to_dict(self) -> dict:
+        return {"host": self.host, "port": self.port, "user": self.user, "host_key": self.host_key}
+
+
 @dataclass
 class LinkTarget:
     name: str
-    url: str  # the other instance's base URL, https://… (http only through a tunnel)
+    # the other instance's base URL, https://…; with ssh, http:// as the SSH
+    # server reaches it (http://127.0.0.1:8090: the tunnel carries it encrypted)
+    url: str
     token: str  # in clear: it is sent with every request
     ca_file: str = ""  # a CA bundle for a certificate of the customer's own CA
+    ssh: SshRoute | None = None
+    # with ssh: the port of this machine its tunnel listens on (sshlinks.py)
+    local_port: int = field(default=0, compare=False, repr=False)
+
+    @property
+    def address(self) -> str:
+        """Where the requests go: the URL, or with ssh the tunnel's port here."""
+        if self.ssh is None:
+            return self.url
+        path = urlsplit(self.url).path.rstrip("/")
+        return f"http://127.0.0.1:{self.local_port or 9}{path}"
+
+    @property
+    def remote(self) -> tuple[str, int]:
+        """With ssh: host and port the SSH server forwards to (permitopen)."""
+        parts = urlsplit(self.url)
+        return parts.hostname or "", parts.port or 80
 
     def to_dict(self) -> dict:
         data = {"url": self.url, "token": self.token}
         if self.ca_file:
             data["ca_file"] = self.ca_file
+        if self.ssh is not None:
+            data["ssh"] = self.ssh.to_dict()
         return data
+
+
+def check_ssh_address(where: str, host, port) -> tuple[str, int]:
+    """An SSH server's host and port (22 when empty): a name or an address,
+    never something ssh would take as an option."""
+    host = str(host or "").strip()
+    if not SSH_HOST.fullmatch(host):
+        raise ConfigError(f"{where}.ssh.host: {host!r} is not a host name or an IP address")
+    port = port or 22
+    if isinstance(port, bool) or not str(port).isdigit() or not 1 <= int(port) <= 65535:
+        raise ConfigError(f"{where}.ssh.port: {port!r} is not a port")
+    return host, int(port)
+
+
+def parse_ssh_route(where: str, data) -> SshRoute | None:
+    """A link's ssh: host, port, user and the host key; empty is no SSH."""
+    if not data:
+        return None
+    if not isinstance(data, dict):
+        raise ConfigError(f"{where}.ssh must be a mapping")
+    host, port = check_ssh_address(where, data.get("host"), data.get("port"))
+    user = str(data.get("user") or "").strip()
+    if not SSH_USER.fullmatch(user):
+        raise ConfigError(f"{where}.ssh.user: {user!r} is not a user name")
+    host_key = " ".join(str(data.get("host_key") or "").split()[:2])
+    if not SSH_HOST_KEY.fullmatch(host_key):
+        raise ConfigError(f"{where}.ssh.host_key: the server's key is missing (Fetch host key)")
+    try:
+        # the key names its own type first
+        raw = base64.b64decode(host_key.split()[1], validate=True)
+        ok = raw[4:4 + int.from_bytes(raw[:4], "big")].decode() == host_key.split()[0]
+        # an ed25519 key is its type and 32 bytes
+        ok = ok and (host_key.split()[0] != "ssh-ed25519" or len(raw) == 51)
+    except (ValueError, UnicodeDecodeError):
+        ok = False
+    if not ok:
+        raise ConfigError(f"{where}.ssh.host_key: not a key of type {host_key.split()[0]}")
+    return SshRoute(host.strip("[]"), user, host_key, port)
 
 
 def parse_link(name: str, data: dict) -> LinkTarget:
@@ -789,7 +921,12 @@ def parse_link(name: str, data: dict) -> LinkTarget:
     ca_file = str(data.get("ca_file") or "").strip()
     if ca_file and not Path(ca_file).is_file():
         raise ConfigError(f"links.{name}: ca_file {ca_file} is not a file")
-    return LinkTarget(name, url, token, ca_file)
+    ssh = parse_ssh_route(f"links.{name}", data.get("ssh"))
+    if ssh is not None and parts.scheme != "http":
+        # the tunnel ends on this machine: a certificate would not match it
+        raise ConfigError(f"links.{name}: through SSH the url is http://, as the SSH server reaches OmniaCLI "
+                          "(http://127.0.0.1:8090); SSH encrypts it")
+    return LinkTarget(name, url, token, ca_file, ssh)
 
 
 def load_links(path: Path) -> dict[str, LinkTarget]:
@@ -818,68 +955,283 @@ def save_links(path: Path, links: dict[str, LinkTarget]) -> None:
     os.replace(tmp, path)
 
 
-_MEMBER_PART = r"(?:\*|[A-Za-z0-9][A-Za-z0-9._-]*)"
-_GROUP_MEMBER = re.compile(rf"{_MEMBER_PART}(?:/{_MEMBER_PART})?")
+def load_groups(path: Path) -> dict[str, list]:
+    """The groups of the Dashboard's lists (listgroups.py); none yet is none."""
+    try:
+        return listgroups.load(path)
+    except listgroups.GroupsError as exc:
+        raise ConfigError(str(exc)) from exc
+
+
+# a workspace's name is part of URLs, of folders and of systemd unit names
+WORKSPACE_NAME = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?")
+# the domain production answers on (test: test.<domain>)
+DOMAIN_NAME = re.compile(r"(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}")
+# the users of a workspace: names as the Users page makes them
+MEMBER_NAME = re.compile(r"[A-Za-z0-9._@-]{1,64}")
+# what a workspace may use; a limit not set is no limit
+WORKSPACE_LIMITS = ("disk_gb", "cpus", "memory_gb", "instances")
+# a subdomain of a workspace's domain (and of test.<domain>): one label
+SUBDOMAIN = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
+# the label of the test names, never an instance's or a subdomain's
+TEST_LABEL = "test"
+# where the certificate of a workspace's names comes from
+CERTIFICATES = ("letsencrypt", "own")
 
 
 @dataclass
-class ServerGroup:
-    """A heading of the Dashboard. A member is a server of this instance
-    (srv, or * for all of them) or of a link (customer/srv, customer/*)."""
+class Workspace:
+    """A customer's closed part of the machine: its servers, and the users
+    who see them, each with its role there. Set by the users of the machine
+    (classes of users: README, Workspaces)."""
 
     name: str
-    members: list[str] = field(default_factory=list)
+    label: str = ""
+    domain: str = ""
+    # one of the storage roots of the main configuration (workspaces.storage)
+    storage: str = ""
+    limits: dict[str, float] = field(default_factory=dict)
+    servers: list[str] = field(default_factory=list)
+    members: dict[str, str] = field(default_factory=dict)  # {user name: role}
+    # the names (README, Domains of a workspace): the instance on <domain>
+    # and test.<domain>, the subdomains {<sub>: instance}, the certificate
+    main: str = ""
+    subdomains: dict[str, str] = field(default_factory=dict)
+    certificate: str = "letsencrypt"
+    # the bounds of the editable Odoo parameters for this workspace, set by
+    # the machine's admins over the template's: {name: [min, max]}
+    parameter_bounds: dict[str, list[int]] = field(default_factory=dict)
 
-    def contains(self, link: str, server: str) -> bool:
-        for member in self.members:
-            where, _, name = member.rpartition("/")
-            if where in ("*", link) if link else not where:
-                if name in ("*", server):
-                    return True
-        return False
+    def instances(self) -> list[str]:
+        """The instances of the workspace: its servers <name>-<instance>."""
+        prefix = f"{self.name}-"
+        return [s[len(prefix):] for s in self.servers if s.startswith(prefix) and len(s) > len(prefix)]
+
+    def to_dict(self) -> dict:
+        data: dict[str, Any] = {"label": self.label}
+        if self.domain:
+            data["domain"] = self.domain
+        if self.storage:
+            data["storage"] = self.storage
+        if self.limits:
+            data["limits"] = dict(self.limits)
+        data["servers"] = list(self.servers)
+        data["members"] = dict(self.members)
+        if self.main:
+            data["main"] = self.main
+        if self.subdomains:
+            data["subdomains"] = dict(self.subdomains)
+        if self.certificate != "letsencrypt":
+            data["certificate"] = self.certificate
+        if self.parameter_bounds:
+            data["parameter_bounds"] = {k: list(v) for k, v in self.parameter_bounds.items()}
+        return data
 
 
-def parse_groups(data) -> list[ServerGroup]:
-    if not isinstance(data, list):
-        raise ConfigError("groups must be a list of {name, members}")
-    groups, seen = [], set()
-    for item in data:
-        item = item if isinstance(item, dict) else {}
-        name = str(item.get("name") or "").strip()
-        if not name or len(name) > 64:
-            raise ConfigError("a group needs a name of at most 64 characters")
-        if name in seen:
-            raise ConfigError(f"two groups are named {name}")
-        seen.add(name)
-        members = [str(m).strip() for m in item.get("members") or [] if str(m).strip()]
-        bad = [m for m in members if not _GROUP_MEMBER.fullmatch(m)]
-        if bad:
-            raise ConfigError(f"group {name}: {', '.join(bad)} is not a server, link/server, link/* or *")
-        groups.append(ServerGroup(name, list(dict.fromkeys(members))))
-    return groups
+def parse_workspace(name: str, data: dict, storage_roots=()) -> Workspace:
+    where = f"workspaces.{name}"
+    if not WORKSPACE_NAME.fullmatch(name):
+        raise ConfigError(f"{where}: a name is 1-32 lower case letters, digits and -, "
+                          "not starting or ending with -")
+    data = data if isinstance(data, dict) else {}
+    label = str(data.get("label") or "").strip()
+    if len(label) > 100:
+        raise ConfigError(f"{where}.label: at most 100 characters")
+    domain = str(data.get("domain") or "").strip().lower()
+    if domain and not DOMAIN_NAME.fullmatch(domain):
+        raise ConfigError(f"{where}.domain: {domain!r} is not a domain name")
+    # kept even when it is no storage root any more (taken out of the main
+    # configuration): the workspace is then unusable until an admin picks
+    # another (Settings.storage_problem), OmniaCLI still starts
+    storage = str(data.get("storage") or "").strip()
+    limits = {}
+    for key, value in (data.get("limits") or {}).items():
+        if key not in WORKSPACE_LIMITS:
+            raise ConfigError(f"{where}.limits: {key} is not one of {', '.join(WORKSPACE_LIMITS)}")
+        if value in (None, ""):
+            continue
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            raise ConfigError(f"{where}.limits.{key}: {value!r} is not a number") from None
+        if number <= 0 or (key == "instances" and not number.is_integer()):
+            raise ConfigError(f"{where}.limits.{key}: {value!r} is not a positive "
+                              + ("whole number" if key == "instances" else "number"))
+        limits[key] = int(number) if number.is_integer() else number
+    servers = [str(s).strip() for s in data.get("servers") or [] if str(s).strip()]
+    bad = [s for s in servers if not SERVER_NAME.fullmatch(s)]
+    if bad:
+        raise ConfigError(f"{where}.servers: {', '.join(bad)} is not a server name")
+    members = {}
+    for user, role in (data.get("members") or {}).items():
+        user = str(user)
+        if not MEMBER_NAME.fullmatch(user):
+            raise ConfigError(f"{where}.members: {user!r} is not a user name")
+        members[user] = _access_role(f"{where}.members.{user}", role)
+    ws = Workspace(name, label, domain, storage, limits, list(dict.fromkeys(servers)), members)
+    instances = ws.instances()
+    main = str(data.get("main") or "").strip()
+    if main and main not in instances:
+        raise ConfigError(f"{where}.main: {main} is not an instance of the workspace")
+    subdomains = {}
+    for sub, instance in (data.get("subdomains") or {}).items():
+        sub, instance = str(sub).strip().lower(), str(instance or "").strip()
+        if not SUBDOMAIN.fullmatch(sub) or sub == TEST_LABEL:
+            raise ConfigError(f"{where}.subdomains: {sub!r} is not a subdomain (one label a-z 0-9 -, not {TEST_LABEL})")
+        if sub in instances:
+            raise ConfigError(f"{where}.subdomains: {sub} is the name of an instance already")
+        if instance not in instances:
+            raise ConfigError(f"{where}.subdomains.{sub}: {instance!r} is not an instance of the workspace")
+        subdomains[sub] = instance
+    certificate = str(data.get("certificate") or "letsencrypt")
+    if certificate not in CERTIFICATES:
+        raise ConfigError(f"{where}.certificate: one of {', '.join(CERTIFICATES)}, not {certificate!r}")
+    bounds = {}
+    for key, value in (data.get("parameter_bounds") or {}).items():
+        try:
+            low, high = (int(v) for v in value)
+        except (TypeError, ValueError):
+            raise ConfigError(f"{where}.parameter_bounds.{key}: [min, max], two whole numbers") from None
+        if not re.fullmatch(r"[a-z_]{1,40}", str(key)) or low > high:
+            raise ConfigError(f"{where}.parameter_bounds.{key}: a parameter name and min <= max")
+        bounds[str(key)] = [low, high]
+    return replace(ws, main=main, subdomains=subdomains, certificate=certificate, parameter_bounds=bounds)
 
 
-def load_groups(path: Path) -> list[ServerGroup]:
-    """The groups file; none yet is no groups."""
+def parse_workspaces(data, storage_roots=()) -> dict[str, Workspace]:
+    if not isinstance(data, dict):
+        raise ConfigError("workspaces must be a mapping {name: workspace}")
+    found = {str(name): parse_workspace(str(name), value, storage_roots) for name, value in data.items()}
+    # a server is in one workspace at most, and so is a domain
+    owner: dict[str, str] = {}
+    for ws in found.values():
+        for srv in ws.servers:
+            if srv in owner:
+                raise ConfigError(f"server {srv} is in two workspaces: {owner[srv]} and {ws.name}")
+            owner[srv] = ws.name
+    domains: dict[str, str] = {}
+    for ws in found.values():
+        if ws.domain and ws.domain in domains:
+            raise ConfigError(f"domain {ws.domain} is in two workspaces: {domains[ws.domain]} and {ws.name}")
+        domains[ws.domain] = ws.name
+    # every name of a workspace is under its domain: no domain under another's
+    for domain, ws_name in domains.items():
+        for other, other_ws in domains.items():
+            if domain and other and domain != other and domain.endswith("." + other):
+                raise ConfigError(f"domain {domain} of workspace {ws_name} is under {other} of workspace {other_ws}")
+    return found
+
+
+def web_names(domain: str, instances, main: str = "", subdomains: dict[str, str] | None = None) -> list[dict]:
+    """The names each instance and role of a workspace answers on:
+    [{instance, role, names}], production first. The main instance takes
+    <domain> and test.<domain>; every instance <instance>.<domain> and
+    <instance>.test.<domain>; a subdomain <sub>.<domain> and <sub>.test.<domain>."""
+    found = []
+    for instance in instances:
+        subs = [sub for sub, target in (subdomains or {}).items() if target == instance]
+        for role, base in (("production", domain), ("test", f"{TEST_LABEL}.{domain}")):
+            names = ([base] if instance == main else []) + [f"{label}.{base}" for label in (instance, *subs)]
+            long = [n for n in names if len(n) > 253]
+            if long:
+                raise ConfigError(f"{long[0]} is longer than a domain name may be (253)")
+            found.append({"instance": instance, "role": role, "names": names})
+    return found
+
+
+def load_workspaces(path: Path, storage_roots=()) -> dict[str, Workspace]:
+    """The workspaces file; none yet is no workspaces."""
     if not path.exists():
-        return []
+        return {}
     try:
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     except (OSError, yaml.YAMLError) as exc:
         raise ConfigError(f"cannot read {path}: {exc}") from exc
     try:
-        return parse_groups(data.get("groups") or [])
+        return parse_workspaces(data.get("workspaces") or {}, storage_roots)
     except ConfigError as exc:
         raise ConfigError(f"{path}: {exc}") from exc
 
 
-def save_groups(path: Path, groups: list[ServerGroup]) -> None:
-    text = yaml.safe_dump({"groups": [{"name": g.name, "members": g.members} for g in groups]},
+def save_workspaces(path: Path, workspaces: dict[str, Workspace]) -> None:
+    text = yaml.safe_dump({"workspaces": {n: ws.to_dict() for n, ws in workspaces.items()}},
                           sort_keys=False, allow_unicode=True)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(text, encoding="utf-8")
     os.replace(tmp, path)
+
+
+def parse_machine(value, service_user: str | None = None) -> str:
+    """The kind of this machine: machine of the main configuration (root
+    writes it, the service only reads it); without it development for a
+    service run as another user (OMNIACLI_USER of /etc/default/omniacli, which
+    root writes too), otherwise server, the restricted one."""
+    if value is not None:
+        if value not in MACHINE_KINDS:
+            raise ConfigError(f"machine: {value!r} is not one of {', '.join(MACHINE_KINDS)}")
+        return value
+    # empty or omniacli: the package's own user, as postinst takes them
+    return MACHINE_DEVELOPMENT if service_user and service_user != "omniacli" else MACHINE_SERVER
+
+
+# the storage the workspaces live in when the main configuration lists none
+# (workspaces.storage missing): root's, made by the package (postinst) when
+# the workspaces are allowed
+DEFAULT_STORAGE = "/srv/omniacli/default_workspace"
+DEFAULT_STORAGE_NAME = "default"
+# a storage's name: what the workspaces and every path of root's use, so its
+# folder may change (a new disk) and the name stays
+STORAGE_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")
+
+
+# where the root helper binds each folder of workspaces.storage (a systemd
+# bind mount, README, Workspaces): root uses only these paths, which nobody
+# else can move, so the folders above a storage may be anyone's
+STORAGE_BASE = "/var/lib/omniacli-storage"
+
+
+def bound_root(storage: str) -> str:
+    """The root path the storage named storage is bound on: its name, which a
+    new folder of it (another disk) keeps."""
+    return f"{STORAGE_BASE}/{storage}"
+
+
+def parse_storage_roots(data) -> dict[str, str]:
+    """workspaces.storage of the main configuration: {name: folder}, the
+    storages a workspace may live in, each a name (a-z 0-9 -) and an
+    absolute, real path (no symbolic links). Missing (or null): the default
+    one, {default: DEFAULT_STORAGE}; empty: none. A list of folders (the
+    format of before, no names) is refused: StorageListError."""
+    data = data if isinstance(data, dict) else {}
+    value = data.get("storage")
+    if value is None:
+        return {DEFAULT_STORAGE_NAME: DEFAULT_STORAGE}
+    if isinstance(value, list):
+        raise StorageListError(
+            "workspaces.storage is a list of folders: give each a name (name: folder), as "
+            f"{DEFAULT_STORAGE_NAME}: {DEFAULT_STORAGE}")
+    if not isinstance(value, dict):
+        raise ConfigError("workspaces.storage must be {name: folder}")
+    roots, folders = {}, {}
+    for name, folder in value.items():
+        name = str(name).strip()
+        if not STORAGE_NAME.fullmatch(name):
+            raise ConfigError(f"workspaces.storage: {name!r} is not a storage name (a-z 0-9 -, 32 at most)")
+        root = str(folder or "").strip().rstrip("/")
+        # in a sudoers line too (packaging: postinst): no space, no wildcard
+        if not re.fullmatch(r"(/[A-Za-z0-9._-]+)+", root) or "/../" in root + "/" or "/./" in root + "/":
+            raise ConfigError(f"workspaces.storage.{name}: {folder!r} is not an absolute path of letters, digits "
+                              "and . _ -")
+        if root in folders:
+            raise ConfigError(f"workspaces.storage: {name} and {folders[root]} are the same folder {root}")
+        roots[name], folders[root] = root, name
+    return roots
+
+
+class StorageListError(ConfigError):
+    """workspaces.storage in the format of before: OmniaCLI still starts, its
+    workspaces unusable until the storages have names."""
 
 
 # the text size of the shell pages, in pixels
@@ -1280,6 +1632,13 @@ def parse_settings(data: dict, base_dir: Path = Path(".")) -> Settings:
     scripts_dir = Path(data.get("scripts_dir") or servers_file.parent / "scripts")
     if not scripts_dir.is_absolute():
         scripts_dir = base_dir / scripts_dir
+    workspaces_file = Path(data.get("workspaces_file") or servers_file.parent / "workspaces.yaml")
+    if not workspaces_file.is_absolute():
+        workspaces_file = base_dir / workspaces_file
+    try:
+        storage_roots, storage_error = parse_storage_roots(data.get("workspaces")), ""
+    except StorageListError as exc:
+        storage_roots, storage_error = {}, str(exc)
     jobs_dir = Path(_require(data, "jobs_dir", "root"))
     settings = Settings(
         users={},
@@ -1303,6 +1662,12 @@ def parse_settings(data: dict, base_dir: Path = Path(".")) -> Settings:
         connections_file=connections_file,
         connections=load_connections(connections_file),
         plugin_source=parse_plugin_source(data.get("plugins")),
+        workspaces_file=workspaces_file,
+        workspaces=load_workspaces(workspaces_file, storage_roots),
+        credentials_file=servers_file.parent / "credentials.yaml",
+        storage_roots=storage_roots,
+        storage_error=storage_error,
+        machine=parse_machine(data.get("machine"), os.environ.get("OMNIACLI_USER")),
         fixed=fixed,
     )
     settings.set_web_access(load_access(users_file))

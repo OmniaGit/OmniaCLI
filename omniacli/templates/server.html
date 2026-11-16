@@ -88,6 +88,13 @@
       {% set package_note = ("\n\nA new " ~ inst.package.name ~ " is installed with its own scripts: they may stop and "
                              "start the service " ~ inst.restart.service ~ " by themselves, also if it is stopped now.")
                             if inst.package else "" %}
+      {% if pull_choices[inst.key] %}
+      {# more than one thing to pull: the pull dialog chooses which (_pull_dialog.html) #}
+      <button type="button" {{ off }} data-pull='{{ dict(pull_choices[inst.key], url=base ~ "/pull", title=pull_label ~ " " ~ inst.key, note=package_note | trim) | tojson }}'
+              title="Choose the repositories to pull">{{ icon("github") }}{{ pull_label }}</button>
+      <button type="button" {{ off }} data-pull='{{ dict(pull_choices[inst.key], url=base ~ "/pull-restart", title="Pull, deploy and restart " ~ inst.key, note=package_note | trim) | tojson }}'
+              title="Choose the repositories to pull, then deploy and restart">{{ icon("github") }}{{ pull_label }} + restart</button>
+      {% else %}
       <form method="post" action="{{ base }}/pull"
             {% if inst.package %}onsubmit='return confirm({{ (pull_label ~ " " ~ inst.key ~ "?" ~ package_note) | tojson }})'{% endif %}>
         <button {{ off }}{% if inst.package %} title="Also installs the package {{ inst.package.name }} when a newer signed version is published"{% endif %}>{{ icon("github") }}{{ pull_label }}</button></form>
@@ -95,10 +102,11 @@
             onsubmit='return confirm({{ ("Pull, deploy and restart " ~ inst.key ~ "?" ~ package_note) | tojson }})'>
         <button {{ off }}>{{ icon("github") }}{{ pull_label }} + restart</button></form>
       {% endif %}
+      {% endif %}
       {% for b in buttons[inst.key].git %}{{ action_button(b, off) }}{% endfor %}
       </div>
       {% endif %}
-      {% if (can_act and inst.plugin.has_backup) or buttons[inst.key].backup or from_link[inst.key] %}
+      {% if (can_act and inst.plugin.has_backup) or buttons[inst.key].backup or from_link[inst.key] or restore_file[inst.key] %}
       <div class="action-group">
       {% if can_act and inst.plugin.has_backup %}
       {# the choices of the backup (Odoo: without filestore) in its dialog #}
@@ -112,20 +120,31 @@
       <button type="button" {{ off }} data-from-link='{{ from_link[inst.key] | tojson }}' data-key="{{ inst.key }}"
               title="Back up {{ from_link[inst.key].label }}, download it and restore it into {{ inst.key }}">{{ icon("download") }}Copy from link</button>
       {% endif %}
+      {% if restore_file[inst.key] %}
+      <button type="button" {{ off }} data-restore-file='{{ restore_file[inst.key] | tojson }}' data-key="{{ inst.key }}"
+              title="Restore a backup into {{ inst.key }}: a zip from this computer, or one of its backups">{{ icon("backup") }}Restore</button>
+      {% endif %}
       {% for b in buttons[inst.key].backup %}{{ action_button(b, off) }}{% endfor %}
       </div>
       {% endif %}
-      {% if can_act %}
-      {# a login shell on the server, in a new tab #}
+      {% if can_act and not scoped %}
+      {# a login shell on the server, in a new tab (not for a user of
+         workspaces: a shell of this machine); on a server nothing that runs
+         as OmniaCLI's own user #}
+      {% set show_psql = inst.plugin.db_shell(inst) and (own_user_shells or not inst.plugin.db_shell_as_service(inst)) %}
+      {% if own_user_shells or show_psql %}
       <div class="action-group">
+      {% if own_user_shells %}
       <a class="button" href="{{ base }}/shell" target="_blank" rel="noopener" title="A shell of the user running OmniaCLI, in {{ inst.repositories[0].path if inst.repositories else 'its home' }}">{{ icon("terminal") }}Shell</a>
       {% if inst.claude_dir %}
       <a class="button" href="{{ base }}/claude" target="_blank" rel="noopener" title="A shell of the user running OmniaCLI in {{ inst.claude_dir }}, running claude">{{ icon("terminal") }}Claude</a>
       {% endif %}
-      {% if inst.plugin.db_shell(inst) %}
+      {% endif %}
+      {% if show_psql %}
       <a class="button" href="{{ base }}/psql" target="_blank" rel="noopener" title="psql on {{ inst.plugin.describe(inst).database or 'the database' }}, as the instance connects to it">{{ icon("terminal") }}psql</a>
       {% endif %}
       </div>
+      {% endif %}
       {% endif %}
       {# the plugin's own groups #}
       {% for group, found in buttons[inst.key].items() if group not in core_groups and found %}
@@ -224,7 +243,8 @@
 
 {% for dialog in dialogs %}{% include dialog %}{% endfor %}
 {% if from_link %}{% include "_from_link_dialog.html" %}{% endif %}
-{% if can_act %}{% include "_backup_dialog.html" %}{% endif %}
+{% if can_act %}{% include "_backup_dialog.html" %}{% include "_pull_dialog.html" %}{% endif %}
+{% if restore_file %}{% include "_restore_dialog.html" %}{% endif %}
 {% include "_charts.html" %}
 {{ console_script() }}
 <script>
@@ -234,8 +254,11 @@
   let since = 0;
   async function refresh() {
     let data;
-    try { data = await (await fetch(`{{ prefix }}/api/metrics?server={{ server.name | urlencode }}&since=${since}`)).json(); }
-    catch (e) { return; }
+    try {
+      const resp = await fetch(`{{ prefix }}/api/metrics?server={{ server.name | urlencode }}&since=${since}`);
+      if (!resp.ok) return;  // a refusal (an expired login: OmniaLogin leaves the page)
+      data = await resp.json();
+    } catch (e) { return; }
     for (const panel of panels) {
       const info = data.instances[panel.dataset.key];
       if (!info) continue;

@@ -3,7 +3,7 @@
 {% block title %}Account · OmniaCLI{% endblock %}
 {% block content %}
 <h1>{{ name }}</h1>
-<p class="muted">Role: <strong>{{ role }}</strong>.</p>
+<p class="muted">Role: <strong>{{ role }}</strong>.{% for ws, ws_role in workspaces %}{% if loop.first %} Workspaces:{% endif %} <strong>{{ ws }}</strong> ({{ ws_role }}){{ "," if not loop.last }}{% endfor %}</p>
 {% if fixed %}
 <p>Your user is set in the main configuration file: its password is changed there (<span class="mono">omniacli hash-password</span>).</p>
 {% else %}

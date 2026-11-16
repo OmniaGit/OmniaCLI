@@ -48,7 +48,23 @@ command of the caller's, and runs docker with an environment of its own:
                                          (TOOLS) mounted read only
     update <odoo service> <db> --modules a,b
                                          odoo -u a,b --stop-after-init
-    psql <database service> <db>         psql, on the caller's terminal
+    psql <database service> <db>         psql, on the caller's terminal, as the
+                                         image's postgres (never root: its \\!
+                                         runs commands)
+    init <odoo service> <db> <modules> [<language>]
+                                         odoo -d <db> -i <modules>
+                                         --stop-after-init, without demo data,
+                                         in a container of its own: a new
+                                         database (a workspace's instance)
+    link-filestore <odoo service> <db> <source project> <source db>
+                                         the filestore of db made of hard
+                                         links to the source's files (copy
+                                         of production to test): the source
+                                         is checked as the project is, both
+                                         data folders bind mounted on
+                                         /var/lib/odoo and of the same user,
+                                         who links (link_filestore.py merge),
+                                         never root: the containers write there
 
 A database name is [A-Za-z0-9_.-], a module [a-z0-9_]; a service must be one
 of the project's. They reach the container's shell as its arguments, never
@@ -58,6 +74,7 @@ entrypoint makes, from HOST, PORT, USER and PASSWORD (or PASSWORD_FILE).
 
 from __future__ import annotations
 
+import json
 import os
 import pwd
 import re
@@ -86,9 +103,10 @@ ACTIONS = {
     "pull": [["pull"], ["up", "-d"]],
 }
 # the actions that take arguments (commands())
-WITH_ARGUMENTS = ("logs", "version", "port", "dump", "load", "update", "psql")
+WITH_ARGUMENTS = ("logs", "version", "port", "dump", "load", "update", "psql", "init", "link-filestore")
 DATABASE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,62}")
 MODULE = re.compile(r"[a-z0-9][a-z0-9_]{0,99}")
+LANGUAGE = re.compile(r"[a-z]{2,3}_[A-Z]{2}")
 # where click-odoo-contrib and what it needs are, next to this venv, which
 # only root writes (the helper itself is there): pure Python, mounted read
 # only into a container of the Odoo service for click-odoo-update
@@ -108,6 +126,23 @@ ODOO_DB = (
     'export PGHOST="${PGHOST:-$HOST}" PGPORT="${PGPORT:-$PORT}" PGUSER="${PGUSER:-$USER}" '
     'PGPASSWORD="${PGPASSWORD:-$PASSWORD}"; '
 )
+# around a module update, as omniacli/odoo/cron_guard.py does outside
+# containers: on a neutralized database, a cron that was off stays off (the
+# update switches on those whose XML says active=True outside noupdate). The
+# list is "=" and ids, nothing for another database; only integers reach the SQL.
+CRONS_BEFORE = (
+    'on="$(psql -d "$1" -Atc "SELECT CASE WHEN EXISTS (SELECT 1 FROM ir_config_parameter '
+    "WHERE key = 'database.is_neutralized') THEN '=' || coalesce((SELECT string_agg(id::text, ',') "
+    "FROM ir_cron WHERE active), '') END\")\" || { echo \"WARNING: the active crons of $1 are not known: "
+    'if it is neutralized, the update may switch some on" >&2; on=; }; '
+)
+CRONS_AFTER = (
+    'code=$?; case "$on" in =*) ids="${on#=}"; psql -d "$1" -v ON_ERROR_STOP=1 -Atc '
+    '"WITH off AS (UPDATE ir_cron SET active = false WHERE active AND id NOT IN (-1${ids:+,$ids}) RETURNING id) '
+    "SELECT 'Neutralized database: cron switched off again: ' || coalesce(d.module || '.' || d.name, 'id ' || off.id) "
+    "FROM off LEFT JOIN ir_model_data d ON d.model = 'ir.cron' AND d.res_id = off.id\" || code=1;; esac; "
+    'exit $code'
+)
 # the scripts the Odoo actions run in the container, the database as $1
 # (never in the script's text): dump writes the zip to the output, load
 # reads it from the input
@@ -123,9 +158,9 @@ SCRIPTS = {
                       'cat > "$f"; odoo db load --force "$1" "$f"',
     "load-neutralize": ODOO_DB + 'f="$(mktemp /tmp/omniacli-load-XXXXXX.zip)"; trap \'rm -f "$f"\' EXIT; '
                                  'cat > "$f"; odoo db load --force --neutralize "$1" "$f"',
-    "update": ODOO_DB + f'export PYTHONPATH={TOOLS_MOUNT}; '
-                        f'exec python3 {TOOLS_MOUNT}/bin/click-odoo-update -d "$1"',
-    "update-modules": ODOO_DB + 'exec odoo -d "$1" -u "$2" --stop-after-init --no-http',
+    "update": ODOO_DB + CRONS_BEFORE + f'export PYTHONPATH={TOOLS_MOUNT}; '
+                        f'python3 {TOOLS_MOUNT}/bin/click-odoo-update -d "$1"; ' + CRONS_AFTER,
+    "update-modules": ODOO_DB + CRONS_BEFORE + 'odoo -d "$1" -u "$2" --stop-after-init --no-http; ' + CRONS_AFTER,
     "psql": 'exec psql -U "${POSTGRES_USER:-postgres}" "$1"',
 }
 _ENV_LINE = re.compile(r"\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=")
@@ -134,6 +169,10 @@ _ENV_LINE = re.compile(r"\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=")
 LOGS = ["logs", "--no-color", "--no-log-prefix", "--timestamps"]
 MAX_TAIL = 10000
 SINCE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?Z")
+# link-filestore: Odoo's data folder in its container (the images' data_dir),
+# and the script that links, run as the owner of the filestore (never root)
+ODOO_DATA = "/var/lib/odoo"
+LINK_SCRIPT = Path(__file__).parent / "odoo" / "link_filestore.py"
 
 
 class HelperError(Exception):
@@ -250,11 +289,27 @@ def _database(name: str) -> str:
     return name
 
 
-def _script(service_name: str, script: str, *args: str) -> list[str]:
+def _script(service_name: str, script: str, *args: str, options: tuple[str, ...] = ("-T",)) -> list[str]:
     """exec in the service's container (-T: no terminal, the output as it
     is), the script's arguments apart from its text."""
-    tty = [] if script == "psql" else ["-T"]
-    return ["exec", *tty, service_name, "sh", "-c", SCRIPTS[script], "sh", *args]
+    return ["exec", *options, service_name, "sh", "-c", SCRIPTS[script], "sh", *args]
+
+
+def psql_options(project: Path, service_name: str) -> tuple[str, ...]:
+    """Who psql runs as: its \\! runs any command as that user, so never root,
+    which on an image without a USER (postgres:17) is what exec gives: the
+    image's postgres, else the container's own user. Root's only: refused."""
+    done = subprocess.run(compose(project, "exec", "-T", service_name, "sh", "-c", "id -u; id -u postgres || true"),
+                          env=ENV, cwd=project, capture_output=True, text=True)
+    if done.returncode:
+        raise HelperError(f"cannot ask {service_name} who it runs as: {done.stderr.strip()}")
+    ids = done.stdout.split()
+    if len(ids) > 1:
+        return ("--user", "postgres")
+    if ids and ids[0] != "0":
+        return ()
+    raise HelperError(f"{service_name} runs as root and has no user postgres: "
+                      "psql is not opened, its \\! would run as root")
 
 
 def commands(project: Path, action: str, args: list[str]) -> list[list[str]]:
@@ -304,11 +359,25 @@ def commands(project: Path, action: str, args: list[str]) -> list[list[str]]:
                 raise HelperError(f"{args[3]!r} is not a list of module names")
             return [_script(service(project, args[0]), "update-modules", _database(args[1]), ",".join(modules))]
         raise HelperError("usage: update <service> <database> [--modules a,b]")
+    if action == "init":
+        # init <odoo service> <database> <modules> [<language>]: a new database,
+        # in a container of its own (the image's entrypoint gives the connection)
+        if len(args) not in (3, 4):
+            raise HelperError("usage: init <service> <database> <modules> [<language>]")
+        modules = args[2].split(",")
+        if not all(MODULE.fullmatch(m) for m in modules):
+            raise HelperError(f"{args[2]!r} is not a list of module names")
+        if args[3:] and not LANGUAGE.fullmatch(args[3]):
+            raise HelperError(f"{args[3]!r} is not a language, as it_IT")
+        return [["run", "--rm", "-T", service(project, args[0]), "odoo", "-d", _database(args[1]),
+                 "-i", ",".join(modules), "--stop-after-init", "--without-demo=all", "--no-http",
+                 *(["--load-language", args[3]] if args[3:] else [])]]
     if action == "psql":
         # psql <database service> <database>: on a terminal, the web shell's
         if len(args) != 2:
             raise HelperError("usage: psql <service> <database>")
-        return [_script(service(project, args[0]), "psql", _database(args[1]))]
+        name = service(project, args[0])
+        return [_script(name, "psql", _database(args[1]), options=psql_options(project, name))]
     if action == "logs":
         # logs <service> --tail <N> | --since <time>
         if len(args) != 3 or args[1] not in ("--tail", "--since"):
@@ -319,6 +388,72 @@ def commands(project: Path, action: str, args: list[str]) -> list[list[str]]:
             raise HelperError("--since takes a UTC time, as 2026-10-28T16:48:50.380582551Z")
         return [[*LOGS, args[1], args[2], service(project, args[0])]]
     raise HelperError(f"unknown action {action!r}: {', '.join([*ACTIONS, *WITH_ARGUMENTS])}")
+
+
+def data_folder(project: Path, service_name: str) -> Path:
+    """The folder of this machine bind mounted on Odoo's data folder."""
+    done = subprocess.run(compose(project, "config", "--format", "json"), env=ENV, cwd=project,
+                          capture_output=True, text=True)
+    if done.returncode:
+        raise HelperError(f"docker compose cannot read {project}: {done.stderr.strip()}")
+    for mount in json.loads(done.stdout)["services"][service_name].get("volumes") or []:
+        if mount.get("target") == ODOO_DATA:
+            if mount.get("type") != "bind":
+                raise HelperError(f"{project}: {ODOO_DATA} of {service_name} is a {mount.get('type')}, "
+                                  "not a folder of this machine: its filestore is not linked")
+            return Path(mount["source"])
+    raise HelperError(f"{project}: nothing is mounted on {ODOO_DATA} of {service_name}")
+
+
+def as_owner(cmd: list[str], uid: int, gid: int, extra_groups: tuple[int, ...] = ()) -> subprocess.CompletedProcess:
+    return subprocess.run(cmd, env=ENV, cwd="/", user=uid, group=gid, extra_groups=list(extra_groups),
+                          capture_output=True, text=True)
+
+
+def closed_groups(path: Path) -> tuple[int, ...]:
+    """The groups that open the way to path where the others may not pass (a
+    workspace's disk): the image's user is no member, and only OmniaCLI's own
+    script runs with them."""
+    found = {st.st_gid for st in map(os.lstat, path.parents) if st.st_gid and not st.st_mode & stat.S_IXOTH}
+    return tuple(sorted(found))
+
+
+def link_filestore(project: Path, args: list[str], uid: int, groups: list[int]) -> int:
+    """link-filestore <odoo service> <database> <source project> <source
+    database>: the filestore of database becomes hard links to the files of
+    the source's (the copy of production to test). Linked by the owner of
+    the source's filestore, not by root: the containers write there."""
+    if len(args) != 4:
+        raise HelperError("usage: link-filestore <service> <database> <source project> <source database>")
+    service_name, database, source, source_db = args[0], _database(args[1]), Path(args[2]), _database(args[3])
+    if source == project:
+        raise HelperError("the source is the project itself")
+    found = problems(source, uid, groups)
+    if found:
+        raise HelperError(f"{source} is not safe from the user:\n  " + "\n  ".join(found))
+    service(project, service_name)
+    service(source, service_name)
+    source_data, data = data_folder(source, service_name), data_folder(project, service_name)
+    try:
+        store = (source_data / "filestore").lstat()
+        target = data.lstat()
+    except OSError as exc:
+        raise HelperError(f"{exc.filename}: {exc.strerror}") from None
+    if not stat.S_ISDIR(store.st_mode) or not stat.S_ISDIR(target.st_mode):
+        raise HelperError(f"{source_data / 'filestore'} and {data} must be folders")
+    if store.st_uid == 0 or (target.st_uid, target.st_gid) != (store.st_uid, store.st_gid):
+        raise HelperError(f"{source_data / 'filestore'} and {data} are not of the same user (not root)")
+    src, dst = str(source_data / "filestore" / source_db), str(data / "filestore" / database)
+    # the script's text, read here: the owner need not reach OmniaCLI's folder
+    code = LINK_SCRIPT.read_text(encoding="utf-8")
+    for mode in ("check", "merge"):
+        done = as_owner([sys.executable, "-I", "-c", code, mode, src, dst], store.st_uid, store.st_gid,
+                        closed_groups(source_data) + closed_groups(data))
+        print(done.stdout.strip() or "", end="\n" if done.stdout.strip() else "")
+        if done.returncode:
+            print(done.stderr.strip(), file=sys.stderr)
+            return done.returncode
+    return 0
 
 
 def run(argv: list[str]) -> int:
@@ -332,6 +467,8 @@ def run(argv: list[str]) -> int:
     found = problems(project, uid, groups)
     if found:
         raise HelperError(f"{project} is not safe from user {name}:\n  " + "\n  ".join(found))
+    if action == "link-filestore":
+        return link_filestore(project, args, uid, groups)
     for cmd in commands(project, action, args):
         code = subprocess.run(compose(project, *cmd), env=ENV, cwd=project).returncode
         if code:

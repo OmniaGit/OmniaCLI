@@ -1,0 +1,73 @@
+{# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C · SPDX-License-Identifier: AGPL-3.0-or-later -#}
+{# The checklist widget: a "Select all" box over a list of rows, each a tick,
+   a label and a detail. One for every list of ticks of a dialog (the pull
+   dialog's repositories, the backup dialog's binary columns): include it
+   once in the page, then
+
+     const list = omniaChecklist(holder, {name, onchange});
+     list.setRows([{value, label, detail, detailClass, checked}]);
+     list.values();            // the values ticked
+     list.all();               // every value
+     list.check(value, on);    list.detail(value, text, className);
+
+   name: the name of the rows' checkboxes, posted by their form (empty: not
+   posted); onchange(list): after every change of a tick. A detail is shown
+   as given, after the label (" · 3 new commits"). -#}
+<script>
+window.omniaChecklist = window.omniaChecklist || function (holder, {name = "", onchange = null} = {}) {
+  holder.replaceChildren();
+  const allLabel = document.createElement("label");
+  allLabel.style.cssText = "display: block; margin-bottom: 4px";
+  const allBox = document.createElement("input");
+  allBox.type = "checkbox";
+  const strong = document.createElement("strong");
+  strong.textContent = "Select all";
+  allLabel.append(allBox, " ", strong);
+  const rowsBox = document.createElement("div");
+  rowsBox.style.cssText = "max-height: 45vh; overflow-y: auto";
+  holder.append(allLabel, rowsBox);
+
+  const boxes = () => [...rowsBox.querySelectorAll("input[type=checkbox]")];
+  const box = (value) => boxes().find((b) => b.value === value);
+  const list = {
+    boxes,
+    sync() {
+      const all = boxes(), ticked = all.filter((b) => b.checked).length;
+      allBox.checked = all.length > 0 && ticked === all.length;
+      allBox.indeterminate = ticked > 0 && ticked < all.length;
+      allLabel.hidden = all.length === 0;
+      if (onchange) onchange(list);
+    },
+    add(row) {
+      const label = document.createElement("label");
+      label.style.display = "block";
+      const tick = document.createElement("input");
+      tick.type = "checkbox"; tick.value = row.value; tick.checked = !!row.checked;
+      if (name) tick.name = name;
+      const text = document.createElement("span");
+      text.className = "mono"; text.textContent = " " + (row.label ?? row.value);
+      const detail = document.createElement("span");
+      detail.className = row.detailClass ?? "muted"; detail.dataset.detail = row.value;
+      detail.textContent = row.detail || "";
+      label.append(tick, text, detail);
+      rowsBox.append(label);
+    },
+    setRows(rows) {
+      rowsBox.replaceChildren();
+      for (const row of rows) list.add(row);
+      list.sync();
+    },
+    check(value, on) { const b = box(value); if (b) b.checked = on; list.sync(); },
+    detail(value, text, className = "muted") {
+      const d = rowsBox.querySelector(`[data-detail="${CSS.escape(value)}"]`);
+      if (d) { d.className = className; d.textContent = text || ""; }
+    },
+    values: () => boxes().filter((b) => b.checked).map((b) => b.value),
+    all: () => boxes().map((b) => b.value),
+  };
+  allBox.onchange = () => { for (const b of boxes()) b.checked = allBox.checked; list.sync(); };
+  rowsBox.onchange = () => list.sync();
+  list.sync();
+  return list;
+};
+</script>

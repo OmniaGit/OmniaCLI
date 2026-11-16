@@ -200,7 +200,9 @@ it has, at least one.</p>
   <li><strong>Save, test &amp; activate</strong> (or <strong>Test &amp; activate</strong> on the Servers page) runs the
     checks: config and paths readable, click-odoo scripts in the venv and Odoo importable, the database reachable,
     every repository on its branch without local changes, the service found, sudo allowed, production and test on
-    separate databases and working copies, the backup folder writable. If they all pass, the server goes live; the dialog lists each check.</li>
+    separate databases and working copies, the backup folder writable. If they all pass, the server goes live; the dialog lists each check.
+    A database that does not exist yet, or an empty one, is only a warning: <strong>Start</strong> and <strong>Restart</strong> refuse it until a
+    backup is restored with <strong>Restore</strong> (admin): a zip from this computer, or one of the instance's backups; a production needs its database name typed.</li>
   <li>On a live server, <strong>Test &amp; save</strong> saves the change only if every check passes, otherwise the
     server stays as it was; <strong>Save as draft</strong> takes it offline.</li>
   <li>A server with a running job cannot be edited or deleted. Every save keeps the previous servers file as
@@ -232,7 +234,7 @@ fields.</p>
     <span class="mono">/opt/odoo/venvs/odoo18/bin</span>. OmniaCLI runs <span class="mono">click-odoo-update</span> and
     <span class="mono">click-odoo-backupdb</span> from it; <strong>pip requirements</strong> and <strong>pip
     click-odoo</strong> install into it.</td></tr>
-  <tr><td>Claude folder</td><td>optional: a folder of this computer. The instance's page then has a <strong>Claude</strong>
+  <tr><td>Claude folder</td><td>optional, development machines only: a folder of this computer. The instance's page then has a <strong>Claude</strong>
     button: a shell of the user running OmniaCLI in that folder, that runs <span class="mono">claude</span> first and
     stays open after it. Claude Code must be installed and logged in for that user.</td></tr>
   <tr><td>Run as</td><td>the system user of the Odoo service (often <span class="mono">odoo</span>). The venv's
@@ -276,6 +278,10 @@ fields.</p>
     <span class="mono">git pull --ff-only &lt;remote&gt; &lt;branch&gt;</span>, and it is refused when the working copy is
     on another branch.</td></tr>
 </table>
+<p>With more than one repository (or a package), <strong>Git pull</strong> and <strong>Git pull + restart</strong> open a
+dialog that lists them with the commits each would bring (a <span class="mono">git fetch</span>), ticked when there are
+some: <strong>Pull selected</strong> pulls the ticked ones, <strong>Pull all</strong> every one. The auto update, the
+schedules and <span class="mono">update_test</span> always pull every repository.</p>
 <p>A working copy with uncommitted changes is refused by a pull, except on a <strong>test instance without auto
 update</strong>: there someone may be working, so the changes are kept (and git refuses to overwrite them).</p>
 
@@ -351,7 +357,8 @@ the new container's. Limit it in the compose file:</p>
   <tr><td>dump</td><td><span class="mono">odoo db dump</span> (with or without filestore), the zip to the output</td></tr>
   <tr><td>load</td><td>the zip from the input, <span class="mono">odoo db load --force</span>, neutralized or not</td></tr>
   <tr><td>update</td><td><span class="mono">click-odoo-update</span> in a container of its own with OmniaCLI's tools
-    mounted read only, or <span class="mono">odoo -u</span> of the modules named</td></tr>
+    mounted read only, or <span class="mono">odoo -u</span> of the modules named; on a neutralized database the
+    scheduled actions that were off are off again afterwards</td></tr>
   <tr><td>psql</td><td><span class="mono">psql</span> in the database service, for the web shell</td></tr>
 </table>
 <p>The database connection is the one the official Odoo image's entrypoint makes, from the container's
@@ -374,7 +381,13 @@ its <span class="mono">PG*</span> variables. Check a sudoers file with
 <span class="mono">sudo visudo -cf /etc/sudoers.d/omniacli</span>.</p>
 <p>On a development workstation, whose repositories and configs belong to you, the whole service may run as your
 user: <span class="mono">OMNIACLI_USER=&lt;user&gt;</span> in <span class="mono">/etc/default/omniacli</span>, then
-<span class="mono">sudo dpkg-reconfigure omniacli</span>. The sudoers lines then name that user.</p>
+<span class="mono">sudo dpkg-reconfigure omniacli</span>. The sudoers lines then name that user, and the machine counts
+as a development one.</p>
+<p><strong>Kind of machine.</strong> On a <em>server</em> nobody opens a shell of OmniaCLI's own user: no Shell, no
+Claude, and psql only where it runs as another user (Run as, Docker). On a <em>development</em> machine nothing is
+restricted. Root sets it with <span class="mono">machine: server</span> or <span class="mono">machine: development</span>
+in the main configuration, then restarts OmniaCLI. Without that line a machine with
+<span class="mono">OMNIACLI_USER</span> is a development one, any other a server. The Options page shows it.</p>
 
 <h3>Typical configurations</h3>
 <ul>

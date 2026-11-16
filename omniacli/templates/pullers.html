@@ -5,6 +5,8 @@
 {{ crumbs([("Dashboard", "/"), ("Pullers", None)]) }}
 {% endblock %}
 {% block content %}
+{% from "_list.html" import list_search, item %}
+{% include "_list.html" %}
 <h1>Pullers</h1>
 <p class="muted">This instance relays between an OmniaCLI that cannot be reached (the <strong>producer</strong>) and the OmniaCLI that operate it (the <strong>consumers</strong>): both link out to here, with an incoming link of the <a href="{{ prefix }}/users">Users</a> page (the role <strong>user</strong> is enough).
 The producer takes the consumers' commands and leaves its reports and backups here; with a key, which only the two ends hold, this instance cannot read nor change them.
@@ -14,10 +16,11 @@ Saved in <span class="mono">{{ pullers_file }}</span>.</p>
 <h2>Relayed here</h2>
 <div class="panel">
   <div class="scroll">
-  <table>
+  {{ list_search("pullers", "Search puller, producer, consumer…") }}
+  <table data-list="pullers">
     <tr><th>Puller</th><th>Producer</th><th>Consumers</th><th>Hours kept</th><th>Largest file, MiB</th><th>Now</th><th></th></tr>
     {% for p in pullers %}
-    <tr data-puller="{{ p.puller }}">
+    <tr data-puller="{{ p.puller }}" {{ item(p.puller ~ " " ~ p.producer.link ~ " " ~ (p.consumers | map(attribute='link') | join(" "))) }}>
       <td><strong>{{ p.puller }}</strong>
         {% if p.missing %}<br><span class="error">no incoming link {{ p.missing | join(", ") }}</span>{% endif %}</td>
       <td><select class="producer" aria-label="Producer of {{ p.puller }}">
@@ -65,10 +68,11 @@ Saved in <span class="mono">{{ publications_file }}</span>, readable by its owne
 </div>
 <div class="panel">
   <div class="scroll">
-  <table>
+  {{ list_search("publications", "Search instance, relay link, puller…") }}
+  <table data-list="publications">
     <tr><th>Instance</th><th>Relay link</th><th>Puller</th><th>Key</th><th>Commands and their hours</th><th>Now</th><th></th></tr>
     {% for p in publications %}
-    <tr data-publication="{{ p.instance }}">
+    <tr data-publication="{{ p.instance }}" {{ item(p.instance ~ " " ~ p.link ~ " " ~ (p.puller or "")) }}>
       <td><strong>{{ p.instance }}</strong>{% if not p.live %}<br><span class="error">not live: nothing is sent</span>{% endif %}</td>
       <td><select class="link" aria-label="Relay link of {{ p.instance }}">
         {% for l in link_targets %}<option {% if l == p.link %}selected{% endif %}>{{ l }}</option>{% endfor %}
@@ -114,10 +118,11 @@ Give the key the producer's publication has (none: in clear). In a server's form
 Saved in <span class="mono">{{ connections_file }}</span>, readable by its owner only: it holds the keys.</p>
 <div class="panel">
   <div class="scroll">
-  <table>
+  {{ list_search("connections", "Search connection, relay link, puller…") }}
+  <table data-list="connections">
     <tr><th>Connection</th><th>Relay link</th><th>Puller</th><th>Key</th><th>Now</th><th></th></tr>
     {% for c in connections %}
-    <tr data-connection="{{ c.name }}">
+    <tr data-connection="{{ c.name }}" {{ item(c.name ~ " " ~ c.link ~ " " ~ c.puller) }}>
       <td><strong><a href="{{ prefix }}/pullers/connections/{{ c.name }}">{{ c.name }}</a></strong></td>
       <td><select class="link" aria-label="Relay link of {{ c.name }}">
         {% for l in link_targets %}<option {% if l == c.link %}selected{% endif %}>{{ l }}</option>{% endfor %}
@@ -253,5 +258,9 @@ Saved in <span class="mono">{{ connections_file }}</span>, readable by its owner
     if (await post("save", body)) location.reload();
   };
 })();
+</script>
+<script>
+  // the lists' search (_list.html)
+  for (const id of ["pullers", "publications", "connections"]) OmniaList.attach(document.querySelector(`[data-list="${id}"]`));
 </script>
 {% endblock %}

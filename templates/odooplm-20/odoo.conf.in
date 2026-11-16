@@ -1,0 +1,11 @@
+[options]
+; written by OmniaCLI from its template odooplm-20: changed here, it is
+; written again at the next change of the instance's parameters
+addons_path = {{ADDONS_PATH}}
+data_dir = /var/lib/odoo
+http_interface = 0.0.0.0
+proxy_mode = True
+db_name = {{DB_NAME}}
+dbfilter = ^{{DB_NAME}}$
+list_db = False
+admin_passwd = {{ADMIN_PASSWD}}

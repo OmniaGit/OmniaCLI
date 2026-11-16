@@ -25,29 +25,30 @@ class LinkClients:
 
     def __init__(self, transport: httpx.AsyncBaseTransport | None = None):
         self.transport = transport
-        self._clients: dict[str, tuple[LinkTarget, httpx.AsyncClient]] = {}
+        self._clients: dict[str, tuple[LinkTarget, str, httpx.AsyncClient]] = {}
 
     def client(self, link: LinkTarget) -> httpx.AsyncClient:
         known = self._clients.get(link.name)
-        if known and known[0] == link:
-            return known[1]
+        # the address too: an SSH tunnel's port may change
+        if known and known[0] == link and known[1] == link.address:
+            return known[2]
         if known:
-            asyncio.get_running_loop().create_task(known[1].aclose())
+            asyncio.get_running_loop().create_task(known[2].aclose())
         verify: ssl.SSLContext | bool = True
         if link.ca_file:
             verify = ssl.create_default_context(cafile=link.ca_file)
         client = httpx.AsyncClient(
-            base_url=link.url,
+            base_url=link.address,
             transport=self.transport,
             verify=verify,
             timeout=httpx.Timeout(READ_TIMEOUT, connect=CONNECT_TIMEOUT),
             follow_redirects=False,
         )
-        self._clients[link.name] = (link, client)
+        self._clients[link.name] = (link, link.address, client)
         return client
 
     async def close(self) -> None:
-        for _, client in self._clients.values():
+        for _, _, client in self._clients.values():
             await client.aclose()
         self._clients = {}
 
@@ -65,7 +66,7 @@ def link_headers(link: LinkTarget, user: str, role: str) -> dict[str, str]:
 
 def websocket_url(link: LinkTarget, path: str) -> str:
     """The other instance's ws(s):// URL of path."""
-    scheme, rest = link.url.split("://", 1)
+    scheme, rest = link.address.split("://", 1)
     return ("wss" if scheme == "https" else "ws") + "://" + rest + "/" + path.lstrip("/")
 
 
@@ -77,7 +78,7 @@ async def proxy_websocket(websocket, link: LinkTarget, path: str, headers: dict[
     from websockets.exceptions import ConnectionClosed
 
     ssl_context = None
-    if link.url.startswith("https://"):
+    if link.address.startswith("https://"):
         ssl_context = ssl.create_default_context(cafile=link.ca_file or None)
     async with connect(websocket_url(link, path), additional_headers=headers, ssl=ssl_context,
                        open_timeout=CONNECT_TIMEOUT, max_size=None) as remote:

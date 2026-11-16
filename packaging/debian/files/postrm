@@ -5,9 +5,12 @@ set -e
 
 case "$1" in
     remove)
+        # the workspaces' helpers are gone with the venv
+        rm -f /etc/sudoers.d/omniacli-workspaces
         rm -rf /opt/omniacli/venv /opt/omniacli/venv.old /opt/omniacli/python /opt/omniacli/python.old /opt/omniacli/.python.*
         ;;
     purge)
+        rm -f /etc/sudoers.d/omniacli-workspaces
         rm -rf /opt/omniacli/venv /opt/omniacli/venv.old /opt/omniacli/python /opt/omniacli/python.old /opt/omniacli/.python.*
         rm -f /etc/omniacli/omniacli.yaml /etc/omniacli/initial-admin-password
         rm -f /etc/systemd/system/omniacli.service.d/omniacli-user.conf
@@ -17,7 +20,10 @@ case "$1" in
         # backups stay
         rm -rf /var/lib/omniacli/jobs /var/lib/omniacli/logs /var/lib/omniacli/scripts \
             /var/lib/omniacli/pullers /var/lib/omniacli/publications /var/lib/omniacli/connections \
-            /var/lib/omniacli/packages /var/lib/omniacli/plugins
+            /var/lib/omniacli/packages /var/lib/omniacli/plugins /var/lib/omniacli/templates
+        # the templates installed from the download server (the instances
+        # made from them keep their own files)
+        rm -rf /var/lib/omniacli-templates
         rm -f /var/lib/omniacli/servers.yaml /var/lib/omniacli/servers.yaml.bak \
             /var/lib/omniacli/servers.yaml.tmp \
             /var/lib/omniacli/users.yaml /var/lib/omniacli/users.yaml.tmp \

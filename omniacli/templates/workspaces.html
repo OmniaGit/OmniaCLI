@@ -1,0 +1,268 @@
+{# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C · SPDX-License-Identifier: AGPL-3.0-or-later -#}
+{% extends "base.html" %}
+{% block title %}Workspaces · OmniaCLI{% endblock %}
+{% block crumbs %}{% from "_crumbs.html" import crumbs with context %}
+{{ crumbs([("Dashboard", "/"), ("Workspaces", None)]) }}
+{% endblock %}
+{% block content %}
+{% from "_load.html" import machine_row %}
+{% from "_list.html" import list_search %}
+{% include "_charts.html" %}
+{% include "_disk.html" %}
+{% include "_load.html" %}
+{% include "_list.html" %}
+<h1>Workspaces</h1>
+<div id="error" class="banner" hidden></div>
+{% if storage_error %}<div class="banner">No workspace can be used: {{ storage_error }}, in <span class="mono">{{ system_config }}</span> (root's); then, as root, <span class="mono">dpkg-reconfigure omniacli</span>.</div>{% endif %}
+{# the list: one line each, its load and its disk; a click opens its form #}
+<div class="list-only">
+  <div class="actions" style="margin: 0 0 8px; align-items: center">
+    <button type="button" id="add">New workspace</button>
+    <span id="machine-load" style="margin-left: 12px">{{ machine_row("", "this machine") }}</span>
+  </div>
+  {{ list_search("workspaces", "Search workspace, domain, storage, server…", request.query_params.get("q", "")) }}
+  {% include "_workspaces_list.html" %}
+  <p class="muted">A workspace is a customer's closed part of this machine: its servers, and its users, each with
+  its role there (<strong>user</strong>, <strong>developer</strong>, <strong>admin</strong>, as on the Users page).
+  A user of role <strong>workspace</strong> (Users page) sees only the servers of its workspaces, none of this
+  machine's pages, consoles, links and configuration; the admins of a workspace manage its users. A server is in one
+  workspace at most. Saved in <span class="mono">{{ workspaces_file }}</span>. CPU and memory are those of its
+  containers together (its systemd slice), against its limits.</p>
+</div>
+<div id="edit-view" hidden>
+  <p><a href="{{ prefix }}/workspaces">← All workspaces</a></p>
+  <div id="workspaces"></div>
+</div>
+<div class="list-only">
+<h2 style="margin-top: 24px">Known now</h2>
+<p class="muted">Servers: {% for s in servers %}<span class="mono">{{ s }}</span>{% if not loop.last %}, {% endif %}{% else %}none{% endfor %}.<br>
+Users of workspaces: {% for u in users if user_roles[u] == "workspace" %}<span class="mono">{{ u }}</span>{% if not loop.last %}, {% endif %}{% else %}none (create them on the Users page with role workspace, or let a workspace's admin create them){% endfor %}.</p>
+<h2 style="margin-top: 24px">Templates</h2>
+<p class="muted">What new instances are made from: the package's, and those downloaded from
+<span class="mono">{{ templates_index }}</span> (signed, checked with <span class="mono">plugins.public_key</span>
+of the main configuration). Of the two, the higher version is used; the instances made before keep their files.</p>
+<div class="panel">
+  <div class="scroll">
+  <table id="templates">
+    <tr><th>Template</th><th>Package</th><th>Downloaded</th><th>Used</th><th>Published</th><th></th></tr>
+    {% for t in templates %}
+    <tr data-template="{{ t.name }}"><td><strong>{{ t.name }}</strong><br><span class="muted">{{ t.label }}</span></td>
+      <td class="mono">{{ t.package or "" }}</td><td class="mono">{{ t.downloaded or "" }}</td>
+      <td class="mono">{{ t.used }}</td><td class="mono published"></td><td class="install"></td></tr>
+    {% else %}
+    <tr><td colspan="6" class="muted">No template here.</td></tr>
+    {% endfor %}
+  </table>
+  </div>
+  <div class="actions"><button type="button" id="look-templates">Look for published templates</button></div>
+</div>
+</div>
+<template id="ws-template">
+  <fieldset class="group-box">
+    <legend><input type="text" class="name mono" placeholder="name: a-z 0-9 -" aria-label="Workspace name"></legend>
+    <div class="form-grid">
+      <label>Label</label>
+      <input type="text" class="label" placeholder="ACME S.p.A." aria-label="Label">
+      <label>Domain</label>
+      <input type="text" class="domain mono" placeholder="acme.example.com (test: test.acme.example.com)" aria-label="Domain">
+      <label>Storage</label>
+      <div>
+      {% if storage_roots %}<select class="storage" aria-label="Storage">{% for r, folder in storage_roots.items() %}<option value="{{ r }}">{{ r }} ({{ folder }})</option>{% endfor %}</select>
+      {% else %}<input type="text" class="storage mono" placeholder="no workspaces.storage in the main configuration" disabled aria-label="Storage">{% endif %}
+      <details class="muted" style="margin-top: 4px"><summary>Add a storage (another real disk)</summary>
+        <ol style="margin: 4px 0; padding-left: 20px">
+          <li>As root, make on the disk a folder of root's that nobody else may write (letters, digits and
+            <span class="mono">. _ -</span>, no symbolic link). The folders above it may be anyone's: OmniaCLI
+            binds it on a path of root's and checks at every boot that it is still the same folder:
+            <pre class="mono">install -d -o root -g root -m 755 /media/disk2/omniacli</pre></li>
+          <li>Add it to <span class="mono">workspaces.storage</span> in <span class="mono">{{ system_config }}</span>
+            (root's) with a name (a-z 0-9 -), which the workspaces use. The storages listed replace the default,
+            so keep those already used:
+            <pre class="mono">workspaces:
+  storage:
+{% for r, folder in storage_roots.items() %}    {{ r }}: {{ folder }}
+{% endfor %}    disk2: /media/disk2/omniacli</pre></li>
+          <li>A new disk for a storage: stop its workspaces, copy its folder on the new disk keeping the
+            sparse disks sparse (<span class="mono">rsync -aHS</span>, or <span class="mono">cp -a --sparse=always</span>),
+            change only its folder in <span class="mono">workspaces.storage</span>, its name as it is, and restart
+            the machine: the storage is bound from its new folder.</li>
+          <li>As root, <span class="mono">dpkg-reconfigure omniacli</span>: it writes the sudoers line of the new
+            folder (with <span class="mono">OMNIACLI_WORKSPACES=1</span> in <span class="mono">/etc/default/omniacli</span>),
+            binds it and restarts OmniaCLI, which then offers it here.</li>
+        </ol>
+      </details>
+      </div>
+      {% for key in limits %}<label>{{ key }}</label>
+      <input type="number" min="0" step="any" class="limit mono" data-limit="{{ key }}" placeholder="no limit" aria-label="{{ key }}">{% endfor %}
+      <label>Room on the real disk</label>
+      <div><div class="real-disk"></div><span class="space muted">reading the room of the disks…</span><br>
+        <label><input type="checkbox" class="force-disk"> force: promise more than the disk has room for
+        (the disk must still fit in what is free now)</label></div>
+      <label>Servers, one per line</label>
+      <textarea class="servers mono" rows="3" aria-label="Servers"></textarea>
+      <label>Users, one per line: <span class="mono">name role</span></label>
+      <textarea class="members mono" rows="3" placeholder="mario admin" aria-label="Users"></textarea>
+      <label>Bounds of the Odoo parameters, one per line: <span class="mono">name min max</span> (empty: the template's)</label>
+      <textarea class="bounds mono" rows="2" placeholder="workers 0 16" aria-label="Bounds of the Odoo parameters"></textarea>
+    </div>
+    <div class="actions" style="margin: 8px 0 0">
+      <button type="button" class="save">Save</button>
+      <a class="button users-link">Users of the workspace</a>
+      <button type="button" class="danger remove">Delete</button>
+    </div>
+  </fieldset>
+</template>
+<script>
+(function () {
+  const list = document.getElementById("workspaces"), template = document.getElementById("ws-template");
+  const errorBox = document.getElementById("error");
+  async function post(url, body) {
+    errorBox.hidden = true;
+    const resp = await fetch("{{ prefix }}/api/workspaces/" + url, {method: "POST",
+      headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      errorBox.textContent = data.error || data.detail || ("Error " + resp.status);
+      errorBox.hidden = false;
+      window.scrollTo(0, 0);
+      return null;
+    }
+    return data;
+  }
+  // the room of the disks (root helper): {roots: {root: {workspace or "": room}}}
+  const gb = (bytes) => (bytes / 1073741824).toFixed(1) + " GB";
+  const space = fetch("{{ prefix }}/api/workspaces/space").then(async (resp) => {
+    const data = await resp.json().catch(() => ({}));
+    return resp.ok ? data : {error: data.error || data.detail || ("Error " + resp.status)};
+  }).catch((e) => ({error: String(e)}));
+  async function showSpace(box, name) {
+    const out = box.querySelector(".space"), storage = box.querySelector(".storage");
+    const disk = box.querySelector('.limit[data-limit="disk_gb"]');
+    const data = await space;
+    out.className = "space muted";
+    const real = box.querySelector(".real-disk");
+    real.replaceChildren();
+    if (data.error) { out.textContent = data.error; return; }
+    if (storage.disabled) { out.textContent = "no storage"; return; }
+    const r = ((data.roots || {})[storage.value] || {})[name];
+    if (!r) { out.textContent = storage.value + " is not there yet (the package makes it when the workspaces are allowed)"; return; }
+    OmniaDisk.render(real, OmniaDisk.realDisk(data, storage.value));
+    let text = `Workspaces' disks there: ${gb(r.promised)} promised, `
+      + `${gb(r.used)} used` + (r.own_used ? ` (${gb(r.own_used)} by this one)` : "") + `. This workspace: up to `
+      + `${gb(r.allowed)} without the room promised to the others, ${gb(r.physical)} forced.`;
+    const wanted = disk.value === "" ? 0 : Number(disk.value) * 1073741824;
+    if (wanted > r.physical) { text += " The disk asked does not fit."; out.className = "space error"; }
+    else if (wanted > r.allowed) { text += " The disk asked takes the others' room: force it."; out.className = "space error"; }
+    out.textContent = text;
+  }
+  function addWorkspace(ws, isNew) {
+    const box = template.content.firstElementChild.cloneNode(true);
+    const field = (cls) => box.querySelector("." + cls);
+    const refresh = () => showSpace(box, isNew ? "" : ws.name);
+    field("name").value = ws.name || "";
+    field("name").disabled = !isNew;
+    field("label").value = ws.label || "";
+    field("domain").value = ws.domain || "";
+    if (ws.storage && field("storage").tagName === "SELECT") {
+      // a storage taken out of the main configuration: shown, so it is not changed unseen
+      if (![...field("storage").options].some((o) => o.value === ws.storage)) {
+        const gone = document.createElement("option");
+        gone.value = ws.storage; gone.textContent = ws.storage + " (not in workspaces.storage: pick another)";
+        field("storage").appendChild(gone);
+      }
+      field("storage").value = ws.storage;
+    }
+    if (ws.storage_problem) {
+      const warn = document.createElement("div");
+      warn.className = "banner"; warn.textContent = "This workspace cannot be used: " + ws.storage_problem + ".";
+      box.insertBefore(warn, box.querySelector(".form-grid"));
+    }
+    for (const input of box.querySelectorAll(".limit")) input.value = (ws.limits || {})[input.dataset.limit] ?? "";
+    field("servers").value = (ws.servers || []).join("\n");
+    field("members").value = Object.entries(ws.members || {}).map(([n, r]) => `${n} ${r}`).join("\n");
+    field("bounds").value = Object.entries(ws.parameter_bounds || {}).map(([n, [a, b]]) => `${n} ${a} ${b}`).join("\n");
+    if (isNew) field("users-link").remove(); else field("users-link").href = "{{ prefix }}/workspaces/" + encodeURIComponent(ws.name);
+    field("storage").addEventListener("change", refresh);
+    box.querySelector('.limit[data-limit="disk_gb"]').addEventListener("input", refresh);
+    refresh();
+    field("save").onclick = async () => {
+      const members = {};
+      for (const line of field("members").value.split("\n").map((l) => l.trim()).filter(Boolean)) {
+        const [name, role] = line.split(/\s+/);
+        members[name] = role || "user";
+      }
+      const limits = {};
+      for (const input of box.querySelectorAll(".limit")) if (input.value !== "") limits[input.dataset.limit] = input.value;
+      const parameter_bounds = {};
+      for (const line of field("bounds").value.split("\n").map((l) => l.trim()).filter(Boolean)) {
+        const [name, low, high] = line.split(/\s+/);
+        parameter_bounds[name] = [low, high];
+      }
+      const storage = field("storage").disabled ? "" : field("storage").value;
+      const body = {name: field("name").value.trim(), new: isNew, label: field("label").value.trim(),
+                    domain: field("domain").value.trim(), storage, limits, members, parameter_bounds,
+                    force_disk: field("force-disk").checked,
+                    servers: field("servers").value.split("\n").map((l) => l.trim()).filter(Boolean)};
+      if (await post("save", body)) location.href = "{{ prefix }}/workspaces";
+    };
+    field("remove").onclick = async () => {
+      if (isNew) { location.href = "{{ prefix }}/workspaces"; return; }
+      if (!confirm(`Delete workspace ${ws.name}? Its servers stay; its users no longer see them.`)) return;
+      if (await post("delete", {name: ws.name})) location.href = "{{ prefix }}/workspaces";
+    };
+    list.appendChild(box);
+    return box;
+  }
+  const table = document.getElementById("templates");
+  document.getElementById("look-templates").onclick = async () => {
+    errorBox.hidden = true;
+    const resp = await fetch("{{ prefix }}/api/templates/available");
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) { errorBox.textContent = data.error || data.detail || ("Error " + resp.status); errorBox.hidden = false; return; }
+    for (const t of data.templates) {
+      let row = table.querySelector(`tr[data-template="${CSS.escape(t.name)}"]`);
+      if (!row) {
+        row = table.insertRow(-1);
+        row.dataset.template = t.name;
+        for (let i = 0; i < 6; i++) row.insertCell();
+        row.cells[0].innerHTML = "<strong></strong><br><span class=\"muted\"></span>";
+        row.cells[0].querySelector("strong").textContent = t.name;
+        row.cells[0].querySelector("span").textContent = t.label;
+        row.cells[4].className = "mono published"; row.cells[5].className = "install";
+      }
+      row.querySelector(".published").textContent = t.error ? "error: " + t.error : t.version;
+      const cell = row.querySelector(".install");
+      cell.textContent = "";
+      if (!t.error) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = t.used === t.version ? "Install again" : "Install";
+        button.onclick = async () => {
+          const r = await fetch(`{{ prefix }}/api/templates/${encodeURIComponent(t.name)}/install`, {method: "POST"});
+          const d = await r.json().catch(() => ({}));
+          if (!r.ok) { errorBox.textContent = d.error || d.detail || ("Error " + r.status); errorBox.hidden = false; return; }
+          location.href = "{{ prefix }}/jobs/" + d.job;
+        };
+        cell.appendChild(button);
+      }
+    }
+  };
+  const all = {{ workspaces | tojson }};
+  const params = new URLSearchParams(location.search);
+  // the form of one workspace (?edit=<name>) or of a new one (?new): the list hidden
+  function editMode(box) {
+    for (const el of document.querySelectorAll(".list-only")) el.hidden = true;
+    document.getElementById("edit-view").hidden = false;
+    return box;
+  }
+  const editing = all.find((w) => w.name === params.get("edit"));
+  if (editing) editMode(addWorkspace(editing, false));
+  else if (params.has("new")) editMode(addWorkspace({}, true)).querySelector(".name").focus();
+  document.getElementById("add").onclick = () => { location.href = "{{ prefix }}/workspaces?new=1"; };
+  if (!editing && !params.has("new")) {
+    OmniaLoad.watch(document.querySelector("#machine-load .machine-row"));
+    OmniaList.attach(document.querySelector('[data-list="workspaces"]'));
+  }
+})();
+</script>
+{% endblock %}

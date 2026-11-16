@@ -31,7 +31,7 @@ from omniacli.config import (
 from omniacli.pullcrypto import new_key
 from omniacli.schedules import parse_schedule, schedule_to_dict
 
-from .conftest import PASSWORD, BasicAsSession
+from .conftest import PASSWORD, BasicAsSession, fake_backups_are
 from .test_pullers import API_TOKEN, DEV_TOKEN, HOST, Internet, relay_settings
 
 KEY = new_key()
@@ -82,6 +82,7 @@ async def here(env, tmp_path, monkeypatch):
     monkeypatch.setattr(publisher, "WAIT", 1)
     monkeypatch.setattr(consumer, "WAIT", 1)
     monkeypatch.setattr(consumer, "POLL_EVERY", 0.05)
+    env["backup_content"] = fake_backups_are(env["settings"].instance("srv", "test").options.venv_bin)
     relay_app = create_app(relay_settings(tmp_path, {"api-prod": {"producer": "api", "consumers": ["dev"]}}))
     settings = env["settings"]
     settings.link_targets = {"vps-api": parse_link("vps-api", {"url": f"https://{HOST}", "token": API_TOKEN}),
@@ -168,6 +169,16 @@ async def test_the_load_is_kept_on_file_and_served(here):
     assert not old.exists() and day_file.exists()
 
 
+async def test_what_is_no_backup_from_the_puller_is_refused(here, env):
+    (env["settings"].instance("srv", "test").options.venv_bin / "backup-content").write_bytes(b"not a zip")
+    await until(lambda: _with_report(here))
+    resp = await here.post("/servers/srv/test/from-link", headers=as_user("dev", post=True), json={"backup": ""})
+    assert resp.status_code == 200, resp.text
+    job = await wait_job(here, resp.json()["job"])
+    assert job["status"] == "failed" and "nothing restored, srv/test not touched" in job["error"]
+    assert not [c for c in env["calls"].read_text().splitlines() if c.startswith(("stop", "restore", "start"))]
+
+
 async def test_copy_from_the_puller_into_test(here, env):
     await until(lambda: _with_report(here))
     page = (await here.get("/servers/srv?view=test", headers=as_user("dev"))).text
@@ -186,7 +197,7 @@ async def test_copy_from_the_puller_into_test(here, env):
     assert "--no-filestore DB_production" in backup and "DB_test" in restore
     folder = here.settings.backup_dir / "srv" / "test"
     [local] = [p for p in folder.iterdir() if p.name.startswith("api-prod_")]
-    assert local.read_bytes() == b"dump\n" and local.name in restore
+    assert local.read_bytes() == env["backup_content"] and local.name in restore
     # the file went from the relay, and nothing encrypted is left here
     assert not list((here.relay_app.state.pullers.folder / "api-prod" / "files").iterdir())
     assert not [p for p in folder.iterdir() if p.name.endswith(".enc") or p.name.startswith(".")]
@@ -198,6 +209,19 @@ async def test_copy_from_the_puller_into_test(here, env):
     assert lines["lines"] and lines["next"] == len(lines["lines"])
     assert (await here.get(f"/api/connections/api-prod/jobs/{remote['id']}?since={lines['next']}",
                            headers=as_user("viewer"))).json()["lines"] == []
+
+
+async def test_a_scheduled_copy_from_the_puller_refuses_what_is_no_backup(here, env):
+    (env["settings"].instance("srv", "test").options.venv_bin / "backup-content").write_bytes(b"not a zip")
+    await until(lambda: _with_report(here))
+    resp = await here.post("/api/schedules/save", headers=as_user("admin", post=True), json={
+        "name": "nightly", "new": True,
+        "schedule": {"instance": "srv/test", "cron": "0 2 * * *", "copy": {"puller": "api-prod", "keep_backups": 1}}})
+    assert resp.status_code == 200, resp.text
+    resp = await here.post("/api/schedules/nightly/run", headers=as_user("admin", post=True))
+    job = await wait_job(here, resp.json()["job"])
+    assert job["status"] == "failed" and "nothing restored, srv/test not touched" in job["error"]
+    assert not [c for c in env["calls"].read_text().splitlines() if c.startswith(("stop", "restore", "start"))]
 
 
 async def test_a_scheduled_copy_from_the_puller(here, env):

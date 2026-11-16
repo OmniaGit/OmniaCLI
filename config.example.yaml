@@ -10,6 +10,12 @@ auth:
   # links:
   #   omniasolutions: {token: "sha256$<hash>", role: developer}
 
+# server: nobody opens a shell of OmniaCLI's own user here (no Shell, no Claude,
+# psql only where it runs as another user). development: nothing is restricted.
+# Without this line: development with OMNIACLI_USER in /etc/default/omniacli,
+# otherwise server. Started from the sources, set it for the shells.
+# machine: development
+
 # backups go to <backup_dir>/<server>/<production|test>/<database>_<timestamp>.zip
 backup_dir: /var/backups/omniacli
 # one JSON file per job (log and result), the last 500 are kept

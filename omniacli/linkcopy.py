@@ -21,6 +21,7 @@ import httpx
 
 from .config import LinkSource, LinkTarget
 from .jobs import Job, JobFailed
+from . import private
 from .links import describe_error
 
 POLL_EVERY = 2.0  # seconds between two looks at the job there
@@ -115,7 +116,7 @@ async def _download(job: Job, client: httpx.AsyncClient, link: LinkTarget, heade
             free = shutil.disk_usage(dest.parent).free
             if length and length > free:
                 raise JobFailed(f"{name} is {length >> 20} MiB, {dest.parent} has {free >> 20} MiB free")
-            with open(part, "wb") as fh:
+            with private.new_file(part) as fh:
                 async for chunk in resp.aiter_bytes(CHUNK):
                     fh.write(chunk)
                     size += len(chunk)
@@ -142,7 +143,7 @@ async def fetch_backup(job: Job, client: httpx.AsyncClient, link: LinkTarget, he
     name = backup or await _remote_backup(job, client, link, headers, src, options or {})
     if not BACKUP_NAME.fullmatch(name):
         raise JobFailed(f"{name!r} is not the name of a backup zip")
-    folder.mkdir(parents=True, exist_ok=True)
+    private.backup_folder(folder)
     dest = folder / f"{link.name}_{name}"
     progress["step"] = "download"
     await _download(job, client, link, headers, src, name, dest, progress)

@@ -256,7 +256,7 @@ echo dump > "$last"
     dest = await ops.backup(job(), prod, env["settings"].backup_dir)
     assert dest.parent == env["settings"].backup_dir / "srv" / "production" and dest.read_text() == "dump\n"
     assert seen.read_text() == "700\n"
-    assert stat.S_IMODE(dest.stat().st_mode) == 0o640
+    assert stat.S_IMODE(dest.stat().st_mode) == 0o600
     assert not dest.with_name(dest.name + ".part").exists()
     sudo = fake_sudo.read_text()
     assert "sudo -n -u odoo " in sudo and f"{staging}/omniacli-backup-" in sudo
@@ -362,7 +362,8 @@ async def test_process_start_restart_stop(tmp_path):
                               "-c", str(instance.options.odoo_config)])
     try:
         await asyncio.sleep(0.2)
-        with pytest.raises(JobFailed, match=f"did not start it \\(pid {other.pid}\\)"):
+        with pytest.raises(JobFailed, match=f"did not start it: pid {other.pid}, user .*, since .*, started by "
+                                            f".*\\. .*To go on: .*\"kill {other.pid}\" as .*then Restart"):
             await ops.restart(job(), instance)
         assert other.poll() is None and ops.managed_pid(instance) == second
     finally:
@@ -436,7 +437,7 @@ async def test_process_stop(tmp_path, monkeypatch):
     assert ops.managed_pid(instance) is None and not group_alive(instance, pid)
 
     # the auto update leaves a stopped Odoo stopped, a manual pull + restart starts it
-    async def pulled(job, instance):
+    async def pulled(job, instance, only=None):
         return True
 
     async def no_update(job, instance, force=False):
@@ -555,3 +556,76 @@ async def test_remote_branches(tmp_path):
     assert data["branches"] == ["main", "test"] and "not reachable" in data["note"]
     assert "error" in await ops.remote_branches(tmp_path / "missing", "origin")
     assert "error" in await ops.remote_branches(tmp_path, "origin")
+
+
+async def test_update_keeps_crons_off_on_a_neutralized_database(env):
+    """before lists the active crons, after gets that list; another database
+    (the fake prints no list) has no after."""
+    test = env["settings"].instance("srv", "test")
+    await odoo_ops.update_modules(job(), test)
+    assert " cron_guard.py before" in env["calls"].read_text()
+    assert "cron_guard.py after" not in env["calls"].read_text()
+
+    click_odoo = test.options.venv_bin / "click-odoo"
+    click_odoo.write_text(click_odoo.read_text() + 'case "$*" in\n'
+                          '*" before") echo some log; echo OMNIACLI_ACTIVE_CRONS=1,7;;\n'
+                          '*" after "*) echo "switched off again: website.website_visitor_cron";;\nesac\n')
+    done = job()
+    await odoo_ops.update_modules(done, test)
+    assert " cron_guard.py after 1,7" in env["calls"].read_text()
+    assert any("cron switched off again: website.website_visitor_cron" in line for line in done.lines)
+
+
+async def test_update_that_fails_still_switches_crons_off(env):
+    test = env["settings"].instance("srv", "test")
+    venv = test.options.venv_bin
+    click_odoo = venv / "click-odoo"
+    click_odoo.write_text(click_odoo.read_text() + 'case "$*" in *" before") echo OMNIACLI_ACTIVE_CRONS=1;; esac\n')
+    (venv / "click-odoo-update").write_text("#!/bin/sh\nexit 3\n")
+    with pytest.raises(JobFailed):
+        await odoo_ops.update_modules(job(), test)
+    assert "cron_guard.py after 1" in env["calls"].read_text()
+
+
+async def test_update_goes_on_when_the_crons_are_not_known(env):
+    test = env["settings"].instance("srv", "test")
+    (test.options.venv_bin / "click-odoo").write_text("#!/bin/sh\necho no way >&2\nexit 2\n")
+    done = job()
+    await odoo_ops.update_modules(done, test)
+    assert "update -c" in env["calls"].read_text()
+    assert any("WARNING: the active crons" in line for line in done.lines)
+
+
+async def test_crons_not_switched_off_fail_the_update(env):
+    test = env["settings"].instance("srv", "test")
+    (test.options.venv_bin / "click-odoo").write_text(
+        '#!/bin/sh\ncase "$*" in *" before") echo OMNIACLI_ACTIVE_CRONS=1; exit 0;; esac\necho locked; exit 1\n')
+    with pytest.raises(JobFailed, match="could not be switched off"):
+        await odoo_ops.update_modules(job(), test)
+
+
+async def test_pull_only_the_chosen_repositories(env):
+    """The pull dialog's choice: only the ticked repositories move; the
+    preview counts what each would bring."""
+    test = env["settings"].instance("srv", "test")
+    odoo_sha = push_change(env, "odoo", "test", "only_a.txt")
+    addons_before = head(test.repository("addons").path)
+    push_change(env, "addons", "test", "only_b.txt")
+    rows = {r["name"]: r for r in await ops.pull_preview(test)}
+    assert rows["odoo"]["pending"] == 1 and rows["addons"]["pending"] == 1
+    assert rows["odoo"]["branch"] == "test" and rows["odoo"]["error"] is None
+    j = job()
+    assert await ops.pull(j, test, only={"odoo"})
+    assert head(test.repository("odoo").path) == odoo_sha
+    assert head(test.repository("addons").path) == addons_before
+    assert "not pulled (not chosen): addons" in "\n".join(j.lines)
+    rows = {r["name"]: r for r in await ops.pull_preview(test)}
+    assert rows["odoo"]["pending"] == 0 and rows["addons"]["pending"] == 1
+
+
+async def test_pull_preview_says_a_missing_copy(env):
+    test = env["settings"].instance("srv", "test")
+    sh("rm", "-rf", str(test.repository("addons").path))
+    rows = {r["name"]: r for r in await ops.pull_preview(test)}
+    assert rows["addons"]["pending"] is None and "does not exist" in rows["addons"]["error"]
+    assert rows["odoo"]["pending"] == 0

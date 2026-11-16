@@ -1,22 +1,48 @@
 {# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C · SPDX-License-Identifier: AGPL-3.0-or-later -#}
 {# Backup: drawn once on the server page, it opens for the buttons
    data-backup (the backup's URL, ?download=1 to download it after) with
-   the type's choices of a backup, and posts them. -#}
+   the type's choices of a backup, and posts them.
+
+   On opening it reads /api/servers/<server>/<role>/backup/estimate (what
+   the backup would hold, the rows of its checklists and the instance's
+   last choice, backupchoices.py) and .../restore/room (the disks of a
+   restore into the same instance), shown by the room widget (_room.html):
+   the weight of the backup and whether it fits here.
+
+   It opens with the last choice. A field with shown_with shows while that
+   checkbox is ticked. A checklist field (the binary columns of Odoo) shows
+   its rows with the checklist widget: ticked those ticked last time,
+   unticked those shown last time and left unticked, the others ticked when
+   their size reaches the threshold field (a change of the threshold ticks
+   every row by it). It posts the ticked values joined by commas, the rows
+   shown (<key>__shown) and remember=1: the choice kept for next time. -#}
 {% from "_icons.html" import icon %}
+{% include "_checklist.html" %}
+{% include "_room.html" %}
 <dialog id="backup-dialog">
   <form method="post" id="backup-form">
     <h2 id="backup-title" style="margin-bottom: 4px"></h2>
     <p class="muted" id="backup-sub" style="margin-top: 0"></p>
+    <input type="hidden" name="remember" value="1">
     {% for f in backup_fields %}
+    <div {% if f.shown_with %}data-shown-with="{{ f.shown_with }}" style="margin-left: 22px"{% endif %}>
     {% if f.kind == "checkbox" %}
-    <label style="display: block; margin-top: 6px"><input type="checkbox" name="{{ f.key }}" {{ "checked" if f.default }}> {{ f.label }}</label>
+    <label style="display: block; margin-top: 6px"><input type="checkbox" name="{{ f.key }}" data-default="{{ 1 if f.default else 0 }}" {{ "checked" if f.default }}> {{ f.label }}</label>
+    {% elif f.kind == "checklist" %}
+    <p style="margin: 6px 0 2px">{{ f.label }} <span class="muted" data-checklist-state="{{ f.key }}"></span></p>
+    <input type="hidden" name="{{ f.key }}">
+    <input type="hidden" name="{{ f.key }}__shown">
+    <div data-checklist="{{ f.key }}" data-threshold="{{ f.threshold }}"></div>
     {% else %}
-    <label style="display: block; margin-top: 6px">{{ f.label }} <input type="text" name="{{ f.key }}" value="{{ f.default or '' }}" placeholder="{{ f.placeholder }}"></label>
+    <label style="display: block; margin-top: 6px">{{ f.label }} <input type="{{ 'number' if f.kind == 'number' else 'text' }}" {% if f.kind == "number" %}min="0" step="any" style="width: 7em"{% endif %} name="{{ f.key }}" data-default="{{ f.default if f.default is not none else '' }}" value="{{ f.default if f.default is not none else '' }}" placeholder="{{ f.placeholder }}"></label>
     {% endif %}
     {% if f.help %}<p class="muted" style="margin: 2px 0 0 22px; font-size: 13px">{{ f.help }}</p>{% endif %}
+    </div>
     {% endfor %}
+    <div id="backup-room"></div>
+    <p class="muted" id="backup-remembered" style="font-size: 13px" hidden></p>
     <div class="actions">
-      <button type="submit">{{ icon("backup") }}Back up</button>
+      <button type="submit" id="backup-submit">{{ icon("backup") }}Back up</button>
       <button type="button" id="backup-cancel">Cancel</button>
     </div>
   </form>
@@ -25,16 +51,135 @@
 (function () {
   const dialog = document.getElementById("backup-dialog");
   const form = document.getElementById("backup-form");
+  const MB = 1048576;
+  let opened = 0;           // an answer for a dialog opened again since is dropped
+  let estimate = null;      // the estimate's answer, null until it comes
+  let remembered = {values: {}, shown: {}};
+  const lists = {};         // key: {list, rows, loaded, threshold}
+  const input = (key) => form.elements.namedItem(key);
+  const room = omniaRoom(document.getElementById("backup-room"));
+
+  for (const holder of form.querySelectorAll("[data-checklist]")) {
+    const key = holder.dataset.checklist;
+    lists[key] = {rows: [], loaded: false, threshold: holder.dataset.threshold};
+    lists[key].list = omniaChecklist(holder, {onchange: () => updateRoom()});
+  }
+  function updateRoom() {
+    if (!estimate || estimate.error) return;
+    const filesOff = estimate.files_off && input(estimate.files_off);
+    const listOn = estimate.list_on && input(estimate.list_on);
+    const entry = estimate.list && lists[estimate.list];
+    let ticked = 0;
+    if (entry && entry.loaded && (!listOn || listOn.checked)) {
+      const values = new Set(entry.list.values());
+      ticked = entry.rows.filter((r) => values.has(r.value)).reduce((s, r) => s + (r.size || 0), 0);
+    }
+    room.update({files: !(filesOff && filesOff.checked), ticked, zip: true});
+  }
+  function showFields() {
+    for (const part of form.querySelectorAll("[data-shown-with]")) {
+      const box = input(part.dataset.shownWith);
+      part.hidden = !(box && box.checked);
+    }
+  }
+  const limit = (entry) => {
+    const field = entry.threshold && input(entry.threshold);
+    const mb = field ? parseFloat(field.value) : NaN;
+    return isNaN(mb) || mb < 0 ? null : mb * MB;
+  };
+  function tickBySize(key) {
+    const entry = lists[key], bytes = limit(entry);
+    for (const row of entry.rows) entry.list.check(row.value, bytes !== null && row.size >= bytes);
+  }
+  function fillList(key) {
+    // the rows from the estimate: ticked as the rule above says
+    const entry = lists[key];
+    const state = form.querySelector(`[data-checklist-state="${CSS.escape(key)}"]`);
+    if (estimate === null) { state.textContent = "· reading the database…"; state.className = "muted"; return; }
+    if (estimate.error) { state.textContent = "· " + estimate.error; state.className = "error"; return; }
+    entry.rows = (estimate.lists || {})[key] || [];
+    entry.loaded = true;
+    const chosen = new Set(remembered.values[key] || []), shown = new Set(remembered.shown[key] || []);
+    const bytes = limit(entry);
+    entry.list.setRows(entry.rows.map((row) => ({
+      value: row.value, label: row.label, detail: row.detail ? " · " + row.detail : "",
+      checked: chosen.has(row.value) || (!shown.has(row.value) && bytes !== null && row.size >= bytes),
+    })));
+    state.textContent = entry.rows.length ? "" : "· none holds data"; state.className = "muted";
+  }
+  form.addEventListener("change", (ev) => {
+    if (ev.target.type === "checkbox" && form.querySelector(`[data-shown-with="${CSS.escape(ev.target.name)}"]`)) {
+      showFields();
+    }
+    for (const [key, entry] of Object.entries(lists)) {
+      if (entry.threshold && ev.target.name === entry.threshold) tickBySize(key);
+    }
+    updateRoom();
+  });
+  form.addEventListener("submit", () => {
+    for (const [key, entry] of Object.entries(lists)) {
+      // not loaded (the database not read): not posted, so the backup
+      // takes the last choice
+      input(key).disabled = !entry.loaded;
+      input(key + "__shown").disabled = !entry.loaded;
+      input(key).value = entry.list.values().join(",");
+      input(key + "__shown").value = entry.list.all().join(",");
+    }
+  });
   document.getElementById("backup-cancel").onclick = () => dialog.close();
+
+  function fill(values) {
+    for (const el of form.querySelectorAll("[data-default]")) {
+      const key = el.name, has = Object.prototype.hasOwnProperty.call(values, key);
+      if (el.type === "checkbox") el.checked = has ? !!values[key] : el.dataset.default === "1";
+      else el.value = has && values[key] !== null ? values[key] : el.dataset.default;
+    }
+  }
+  async function json(url) {
+    try {
+      const resp = await fetch(url, {headers: {Accept: "application/json"}});
+      const data = await resp.json().catch(() => null);
+      if (!resp.ok) return {error: (data && (data.error || data.detail)) || "HTTP " + resp.status};
+      return data || {error: "no answer"};
+    } catch (e) { return {error: e.message}; }
+  }
   for (const button of document.querySelectorAll("[data-backup]")) {
-    button.onclick = () => {
+    button.onclick = async () => {
       const download = button.dataset.download === "1";
+      const mine = ++opened;
       form.action = button.dataset.backup + (download ? "?download=1" : "");
-      form.reset();
+      const [server, role] = button.dataset.key.split("/");
+      const api = `{{ prefix }}/api/servers/${encodeURIComponent(server)}/${encodeURIComponent(role)}`;
+      remembered = {values: {}, shown: {}};
+      estimate = null;
+      for (const entry of Object.values(lists)) { entry.loaded = false; entry.rows = []; entry.list.setRows([]); }
+      fill({});
+      showFields();
+      for (const key of Object.keys(lists)) fillList(key);
+      room.reset(true);
+      const note = document.getElementById("backup-remembered");
+      note.hidden = true;
       document.getElementById("backup-title").textContent = `Backup ${button.dataset.key}` + (download ? " + download" : "");
       document.getElementById("backup-sub").textContent = download
         ? "The zip is downloaded when the backup is ready." : "The zip stays in the instance's backups.";
       dialog.showModal();
+      json(`${api}/restore/room`).then((data) => {
+        if (mine === opened) room.room(data, `a restore into ${button.dataset.key} on this machine`);
+      });
+      const data = await json(`${api}/backup/estimate`);
+      if (mine !== opened) return;
+      estimate = data;
+      if (data.remembered && data.remembered.saved) {
+        remembered = data.remembered;
+        fill(remembered.values || {});
+        note.textContent = `The choices of the last backup (${remembered.saved.replace("T", " ")}`
+          + (remembered.user ? `, ${remembered.user}` : "") + ").";
+        note.hidden = false;
+      }
+      showFields();
+      for (const key of Object.keys(lists)) fillList(key);
+      room.estimate(data.error ? {error: data.error} : data);
+      updateRoom();
     };
   }
 })();

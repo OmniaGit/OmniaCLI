@@ -4,7 +4,10 @@ import asyncio
 import base64
 import dataclasses
 import datetime
+import json
 import re
+import sys
+from pathlib import Path
 
 import httpx
 import pytest
@@ -220,7 +223,7 @@ async def test_config_clone_rename_delete(client, env):
     # active through the checks (here made to pass)
     import omniacli.checks as checks
 
-    async def all_ok(server, backup_dir):
+    async def all_ok(server, backup_dir, machine="server"):
         return [checks.Check("server", "fake", True, "ok")]
     original_check, checks.check_server = checks.check_server, all_ok
     try:
@@ -310,6 +313,70 @@ async def test_list_addons(env):
     assert odoo_ops.odoo_major(odoo_ops.find_odoo_bin(test)) == 18
 
 
+async def test_manifest_versions(env):
+    test = make_addons(env)
+    addons = odoo_ops.list_addons(test)
+    paths = {a["name"]: Path(a["path"]) for a in addons}
+    (paths["in_repo"] / "__manifest__.py").write_text("{'name': 'x', 'version': '1.4'}")
+    assert odoo_ops.manifest_versions(addons) == {"in_repo": "1.4", "outside": None}
+    (paths["outside"] / "__manifest__.py").write_text("{'version': broken")
+    assert odoo_ops.manifest_versions(addons) == {"in_repo": "1.4"}
+
+
+def test_module_versions_compare(monkeypatch):
+    """The installed version against the manifest's, made canonical by Odoo."""
+    import types
+
+    from omniacli.odoo import binary_dump
+
+    module = types.ModuleType("odoo.modules.module")
+    module.adapt_version = lambda v: v if v.startswith("19.0.") else "19.0." + v
+    parse = types.ModuleType("odoo.tools.parse_version")
+    parse.parse_version = lambda v: tuple(int(x) for x in v.split("."))
+    monkeypatch.setitem(sys.modules, "odoo.modules.module", module)
+    monkeypatch.setitem(sys.modules, "odoo.tools.parse_version", parse)
+
+    class Cursor:
+        def execute(self, query):
+            pass
+
+        def fetchall(self):
+            return [("base", "installed", "19.0.1.3"), ("sale", "to upgrade", "19.0.1.2"),
+                    ("crm", "uninstalled", None), ("gone", "installed", "19.0.1.0")]
+
+    got = binary_dump.module_versions(Cursor(), None, {"base": "1.3", "sale": "1.10", "crm": None,
+                                                       "extra": "19.0.2.0"})
+    assert got["base"] == {"state": "installed", "installed": "19.0.1.3", "available": "19.0.1.3",
+                           "newer": False}
+    assert got["sale"]["newer"] and got["sale"]["available"] == "19.0.1.10"
+    assert got["crm"] == {"state": "uninstalled", "installed": None, "available": "19.0.1.0", "newer": False}
+    assert got["gone"]["available"] is None and not got["gone"]["newer"]
+    assert got["extra"]["state"] is None and got["extra"]["installed"] is None
+
+
+async def test_addon_versions_endpoint(client, env, monkeypatch):
+    make_addons(env)
+    asked = []
+
+    async def fake(instance, mode, mark, input=None, timeout=600):
+        asked.append((mode, json.loads(input)))
+        return {"in_repo": {"state": "installed", "installed": "18.0.1.0", "available": "18.0.1.1",
+                            "newer": True}}
+
+    monkeypatch.setattr(odoo_ops, "_binary_dump", fake)
+    url = "/x/odoo/servers/srv/test/addons/versions"
+    data = (await client.get(url, headers={"Authorization": AUTH})).json()
+    assert data["modules"]["in_repo"]["newer"]
+    assert asked == [("modules", {"in_repo": None, "outside": None})]
+
+    async def failing(*args, **kwargs):
+        raise odoo_ops.JobFailed("db1 cannot be read (modules): no PostgreSQL")
+
+    monkeypatch.setattr(odoo_ops, "_binary_dump", failing)
+    resp = await client.get(url, headers={"Authorization": AUTH})
+    assert resp.status_code == 502 and "no PostgreSQL" in resp.json()["error"]
+
+
 async def test_update_popup_actions(client, env):
     make_addons(env)
     test = env["settings"].instance("srv", "test")
@@ -328,7 +395,7 @@ async def test_update_popup_actions(client, env):
     job = await wait_job(client, resp.json()["job"])
     assert job["status"] == "success", job
     assert any("odoo log line" in line for line in job["lines"])
-    calls = env["calls"].read_text().splitlines()
+    calls = [c for c in env["calls"].read_text().splitlines() if "cron_guard.py" not in c]
     assert calls[0].startswith("odoo-bin -c ") and "-d DB_test -u in_repo,base --stop-after-init --workers=0 --logfile=" in calls[0]
     assert calls[1] == "restart odoo-test"
 
@@ -418,11 +485,19 @@ async def test_metrics_api(client, env):
     point = data["instances"]["srv/test"]["points"][-1]
     assert set(point) == {"t", "cpu", "mem", "procs"}
     machine = data["machine"][-1]
-    assert set(machine) == {"t", "cpu", "rx", "tx"} and 0 <= machine["cpu"] <= 100
+    # the shares: PostgreSQL's (None where there is none), the instances measured
+    assert set(machine) - {"instances"} == {"t", "cpu", "pg", "rx", "tx"} and 0 <= machine["cpu"] <= 100
     only = (await client.get("/api/metrics?machine_only=1", headers={"Authorization": AUTH})).json()
     assert only["instances"] == {} and only["machine"]
     page = (await client.get("/", headers={"Authorization": AUTH})).text
-    assert 'class="panel machine-panel" data-link=""' in page
+    # this machine: one row at the top, before Servers; a click opens its whole load (the panel, hidden)
+    top = page.index('<div class="machine-top-row" role="button"')
+    assert top < page.index('<span class="machine-row" data-link="">') < page.index('data-fold="servers"')
+    assert top < page.index('<div id="machine-detail" hidden>') < page.index(
+        '<section class="panel machine-panel" data-link="">') < page.index('data-fold="servers"')
+    assert 'data-fold="machine"' not in page and 'localStorage.getItem(key) === "open"' in page
+    # open, the row's charts hidden: the panel shows the same load
+    assert 'row.querySelector(".machine-row").hidden = open;' in page and '<span class="muted machine-top-close" hidden>Close</span>' in page
 
 
 def test_machine_counters(tmp_path):
@@ -447,7 +522,7 @@ def test_machine_counters(tmp_path):
 
 
 def test_disk_mounts(tmp_path):
-    from omniacli.disks import _holder, mounts
+    from omniacli.disks import holder, mounts
 
     table = tmp_path / "mounts"
     table.write_text(
@@ -461,9 +536,9 @@ def test_disk_mounts(tmp_path):
     found = mounts(table)
     assert found == [("/dev/sda1", "/", "ext4"), ("/dev/sdb1", "/srv/bound", "ext4")]
     points = ["/", "/media/My Disk", "/srv/bound"]
-    assert _holder("/media/My Disk/backups/x.zip", points) == "/media/My Disk"
-    assert _holder("/media/My Diskette/x", points) == "/"
-    assert _holder("/srv/bound", points) == "/srv/bound"
+    assert holder("/media/My Disk/backups/x.zip", points) == "/media/My Disk"
+    assert holder("/media/My Diskette/x", points) == "/"
+    assert holder("/srv/bound", points) == "/srv/bound"
 
 
 async def test_disks_api(client, env, monkeypatch):
@@ -482,7 +557,7 @@ async def test_disks_api(client, env, monkeypatch):
     assert "backups" in root["holds"] and "srv/test log" in root["holds"]
     assert found[1]["holds"] == ["OmniaCLI jobs"]
     page = await client.get("/", headers={"Authorization": AUTH})
-    assert 'class="disk-list"' in page.text and "/api/disks" in page.text
+    assert 'class="load-disks"' in page.text and "/api/disks" in page.text
 
 
 LOGIN_HEADERS = {"Origin": f"http://{HOST}", "Content-Type": "application/x-www-form-urlencoded"}
@@ -512,6 +587,78 @@ async def test_access_log(client, env):
     page = await client.get("/access")
     assert page.status_code == 200 and "Failed login" in page.text
     assert "Failed login" not in (await client.get("/access?q=nothing-matches")).text
+
+
+async def test_failures_cannot_push_out_the_access_log(tmp_path, monkeypatch):
+    from omniacli import accesslog
+
+    monkeypatch.setattr(accesslog, "MAX_BYTES", 300)
+    log = accesslog.AccessLog(tmp_path / "access.jsonl")
+    log.record("login", "user", "someone", "10.0.0.1", "login form")
+    for n in range(1000):
+        log.record("failed", "token", "", f"203.0.113.{n % 250}", "GET /api/info")
+    assert log.path.read_text().count("someone") == 1
+    assert sum(e["event"] == "login" for e in log.recent(100000)) == 1
+    # a minute of one address: its first ones, then the count of the others
+    log = accesslog.AccessLog(tmp_path / "one.jsonl")
+    for _ in range(25):
+        log.record("failed", "user", "x", "203.0.113.1", "login form")
+    assert len(log.recent()) == accesslog.BURST_ADDRESS
+    log._bursts["203.0.113.1"].start -= accesslog.BURST_WINDOW
+    assert "15 more failed attempts" in log.recent()[0]["detail"]
+
+
+async def test_access_log_keeps_its_older_files(tmp_path, monkeypatch):
+    from omniacli import accesslog
+
+    monkeypatch.setattr(accesslog, "MAX_BYTES", 100)
+    log = accesslog.AccessLog(tmp_path / "access.jsonl")
+    for n in range(40):
+        log.record("action", "user", f"u{n}", "", "")
+    assert (tmp_path / "access.jsonl.5").exists()
+    assert [e["name"] for e in log.recent(3)] == ["u39", "u38", "u37"]
+    for n in range(100):
+        log.record("action", "user", "again", "", "")
+    assert not (tmp_path / f"access.jsonl.{accesslog.KEEP_FILES + 1}").exists()
+
+
+async def test_actions_are_audited_without_secrets(client, env):
+    log = client.app.state.access_log
+    secret = "a-new-password-of-this-test"
+    resp = await client.post("/api/access/users/save", headers=POST,
+                             json={"new": True, "name": "newcomer", "role": "developer", "password": secret})
+    assert resp.status_code == 200 and resp.json()["ok"]
+    assert secret not in log.path.read_text()
+    entry = next(e for e in log.recent() if e["event"] == "action")
+    assert entry["name"] == "admin"
+    assert entry["detail"] == "POST /api/access/users/save name=newcomer role=developer -> 200"
+    # refused by its role: logged as well
+    assert (await form_login(client, "newcomer", secret)).status_code == 303
+    resp = await client.post("/api/access/users/delete", headers={"Origin": f"http://{HOST}"}, json={"name": "admin"})
+    assert resp.status_code == 403
+    entry = next(e for e in log.recent() if e["event"] == "action")
+    assert entry["name"] == "newcomer" and entry["detail"].endswith("name=admin -> 403")
+    page = await client.get("/access", headers={"Authorization": AUTH})
+    assert ">Action<" in page.text and secret not in page.text
+
+
+async def test_backup_download_is_audited(client, env):
+    log = client.app.state.access_log
+    folder = env["settings"].backup_dir / "srv" / "test"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "db_20260101_000000.zip").write_bytes(b"zip")
+    resp = await client.get("/backups/srv/test/db_20260101_000000.zip", headers={"Authorization": AUTH})
+    assert resp.status_code == 200
+    entry = next(e for e in log.recent() if e["event"] == "download")
+    assert entry["name"] == "admin" and entry["detail"] == "srv/test/db_20260101_000000.zip"
+
+
+async def test_nobody_logged_in_is_no_action(client, env):
+    log = client.app.state.access_log
+    client.cookies.clear()
+    resp = await client.post("/api/access/users/delete", headers={"Origin": f"http://{HOST}"}, json={"name": "admin"})
+    assert resp.status_code == 401
+    assert not [e for e in log.recent() if e["event"] == "action"]
 
 
 async def test_login_form_session_and_logout(client, env):
@@ -556,6 +703,29 @@ async def test_login_form_session_and_logout(client, env):
     client.cookies.set(COOKIE, token)
     assert (await client.get("/jobs")).status_code == 401
     assert [e["event"] for e in client.app.state.access_log.recent()][:2] == ["logout", "login"]
+
+
+async def test_an_expired_login_goes_to_the_form(client):
+    """The login expired with a page open: its button goes to the form and
+    back to that page, not sent again; its scripts get a marked 401."""
+    client.cookies.clear()
+    origin = {"Origin": f"http://{HOST}", "Accept": "text/html,application/xhtml+xml"}
+    resp = await client.post("/servers/srv/test/stop", headers={
+        **origin, "Referer": f"http://{HOST}/links/other/servers/srv?view=both"})
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/login?next=/links/other/servers/srv%3Fview%3Dboth"
+    # a page of another site, or none: home after the login
+    for referer in ({"Referer": "http://evil.example/x"}, {}):
+        resp = await client.post("/servers/srv/test/stop", headers={**origin, **referer})
+        assert resp.status_code == 303 and resp.headers["location"] == "/login?next=/"
+    # a script's request: JSON, marked as a missing login
+    for resp in (await client.get("/api/jobs?limit=1"),
+                 await client.post("/api/access/users/delete", headers={"Origin": f"http://{HOST}"}, json={}),
+                 await client.get("/servers/srv/test/shell", headers={"Accept": "application/json"})):
+        assert resp.status_code == 401 and resp.headers["x-omniacli-login"] == "required"
+    # a wrong token is no missing login: not marked, no form
+    resp = await client.get("/api/jobs", headers={"Authorization": "Bearer nope", "Accept": "text/html"})
+    assert resp.status_code == 401 and "x-omniacli-login" not in resp.headers
 
 
 async def test_failed_logins_wait(client, monkeypatch):
@@ -659,7 +829,9 @@ async def test_dashboard_follows_jobs(client, env):
     assert set(job) == {"id", "title", "status", "instances", "servers", "source", "created", "finished", "duration", "error"}
     assert data["busy"] == []
     page = (await client.get("/", headers={"Authorization": AUTH})).text
-    assert f'<tr data-job="{job_id}">' in page
+    # each job row names its servers, each server row its server: the
+    # Dashboard's search shows the jobs of the servers it finds
+    assert f'<tr data-job="{job_id}" data-servers="srv">' in page and 'data-server="srv"' in page
 
 
 async def test_start_stop_go_back_to_the_page(client, env):
@@ -876,8 +1048,8 @@ async def test_jobs_server_column_and_filter(client, env):
 
 async def test_servers_filter(client, env):
     get = lambda url: client.get(url, headers={"Authorization": AUTH})
-    # one server: no filter to show
-    assert 'name="q"' not in (await get("/")).text
+    # one server: no search to show
+    assert 'data-list-search="servers"' not in (await get("/")).text
     settings = client.app.state.settings
     srv = settings.servers["srv"]
     settings.servers["other"] = dataclasses.replace(srv, name="other", instances={
@@ -887,14 +1059,13 @@ async def test_servers_filter(client, env):
     })
 
     page = (await get("/")).text
-    assert 'name="q"' in page and 'href="/servers/other"' in page and 'href="/servers/srv"' in page
-    page = (await get("/?q=other_TEST")).text  # a database, any case
-    assert "1 of 2 servers." in page and 'href="/servers/other"' in page
-    assert 'href="/servers/srv"' not in page and 'href="/">Clear' in page
-    page = (await get("/?q=addons+test")).text  # every word: a repository and a branch
-    assert "2 of 2 servers." in page
-    assert "No servers match." in (await get("/?q=srv+OTHER_")).text
-
+    assert 'data-list-search="servers"' in page and 'href="/servers/other"' in page and 'href="/servers/srv"' in page
+    # the list widget searches in the browser: each row carries its text, in
+    # lower case (database, repositories, branches), and ?q= fills the field
+    texts = re.findall(r'<tr data-list-item data-text="([^"]*)"', page)
+    assert len(texts) == 2 and any("other_test" in t and "addons" in t for t in texts)
+    page = (await get("/?q=other_TEST")).text
+    assert 'data-list-search="servers" value="other_TEST"' in page and 'href="/servers/srv"' in page
 
 
 def basic(user):
@@ -957,7 +1128,8 @@ async def test_link_serves_prefixed_pages_and_acts(client, env):
     link = {"Authorization": f"Bearer {LINK_TOKEN}", "X-OmniaCLI-Prefix": "/links/cliente",
             "X-OmniaCLI-User": "devuser"}
     page = (await client.get("/servers/srv?view=both", headers=link)).text
-    assert 'action="/links/cliente/servers/srv/test/pull"' in page
+    # two repositories: the pull dialog's button carries the prefixed URL
+    assert '"url": "/links/cliente/servers/srv/test/pull"' in page
     assert 'href="/links/cliente/jobs?server=srv"' in page and 'data-log="/links/cliente/api/' in page
     assert 'href="/servers/' not in page and 'action="/servers/' not in page
     # no Origin: no browser sends the link token by itself
@@ -980,7 +1152,7 @@ async def test_link_serves_prefixed_pages_and_acts(client, env):
     # a prefix or user that is not a plain path or name is ignored
     bad = {**link, "X-OmniaCLI-Prefix": "//evil.example/x\"onload=\"", "X-OmniaCLI-User": "a b<c>"}
     page = (await client.get("/servers/srv?view=both", headers=bad)).text
-    assert 'action="/servers/srv/test/pull"' in page and "evil" not in page
+    assert '"url": "/servers/srv/test/pull"' in page and "evil" not in page
     resp = await client.post("/servers/srv/test/pull", headers=bad)
     data = await wait_job(client, resp.headers["location"].rsplit("/", 1)[1])
     assert data["source"] == "manual: link omnia"
@@ -1240,16 +1412,20 @@ async def test_servers_page_groups(client, env):
     assert 'data-member="srv"' in page
     assert (await client.get("/groups", headers={"Authorization": basic("dev")})).status_code == 403
 
-    body = {"groups": [{"name": "Main servers", "members": ["srv"]}, {"name": "Empty", "members": ["nope"]}]}
+    body = {"lists": {"servers": [{"name": "Main servers", "members": ["nope"], "groups": [
+        {"name": "Odoo", "members": ["s?v"]}]}, {"name": "Empty", "members": ["nope"]}]}}
     assert (await client.post("/api/groups/save", json=body, headers=headers)).json() == {"ok": True}
     assert "Main servers" in settings.groups_file.read_text()
     page = (await client.get("/", headers=headers)).text
-    assert "<h2>Main servers <span" in page and "Empty" not in page and "Other servers" not in page
-    # the filter finds a server by its group too
-    assert "1 of 1 server." in (await client.get("/?q=main", headers=headers)).text
-    resp = await client.post("/api/groups/save", json={"groups": [{"name": "x", "members": ["a b"]}]},
+    # a group and its subgroup, folding headings of the list widget; no empty one, no Others
+    assert '<details class="group list-group level-1" open data-group="/Main servers">' in page
+    assert '<details class="group list-group level-2" open data-group="/Main servers/Odoo">' in page
+    assert "<h2>Empty" not in page and "<h2>Others" not in page
+    # the search finds a server by its groups too
+    assert re.search(r'data-text="[^"]*main servers odoo[^"]*"', page)
+    resp = await client.post("/api/groups/save", json={"lists": {"servers": [{"name": "x", "members": ["a b"]}]}},
                              headers=headers)
-    assert resp.status_code == 400 and "is not a server" in resp.json()["error"]
+    assert resp.status_code == 400 and "is not a name or a pattern" in resp.json()["error"]
     resp = await client.post("/api/groups/save", json=body,
                              headers={"Authorization": basic("dev"), "Origin": f"http://{HOST}"})
     assert resp.status_code == 403
@@ -1302,9 +1478,9 @@ async def test_package_update_is_confirmed_with_its_scripts_named(client, env):
     page = (await client.get("/servers/srv?view=test", headers={"Authorization": AUTH})).text
     warning = ("A new api-server is installed with its own scripts: they may stop and start "
                "the service odoo-test by themselves, also if it is stopped now.")
-    # in both confirms, as JSON in the onsubmit attribute
+    # two repositories and the package: in both buttons of the pull dialog, as its note
     assert page.count(warning) == 2
-    assert 'return confirm("Git pull srv/test?\\n\\n' + warning in page
+    assert '"note": "' + warning in page and '"label": "package api-server"' in page
     assert "its own scripts may stop and start odoo-test during an update, also a stopped one" in page
     # the Dashboard and the Servers page with such an instance
     for path in ("/", "/dashboard/servers", "/config"):
@@ -1314,3 +1490,95 @@ async def test_package_update_is_confirmed_with_its_scripts_named(client, env):
     page = (await client.get("/servers/srv?view=test", headers={"Authorization": AUTH})).text
     # without a package the pull asks nothing, as before
     assert "its own scripts" not in page and 'confirm("Git pull srv/test?' not in page
+
+
+def test_postgres_cpu(tmp_path):
+    from omniacli.metrics import postgres_cpu
+
+    # Debian: the slice of every cluster
+    slice_ = tmp_path / "system.slice" / "system-postgresql.slice"
+    slice_.mkdir(parents=True)
+    (slice_ / "cpu.stat").write_text("usage_usec 7500000\nuser_usec 5000000\n")
+    assert postgres_cpu(tmp_path) == 7.5
+    # other systems: the postgresql*.service units, together
+    (slice_ / "cpu.stat").unlink()
+    for unit, usec in (("postgresql.service", 1_000_000), ("postgresql-16.service", 2_000_000)):
+        (tmp_path / "system.slice" / unit).mkdir()
+        (tmp_path / "system.slice" / unit / "cpu.stat").write_text(f"usage_usec {usec}\n")
+    assert postgres_cpu(tmp_path) == 3.0
+    assert postgres_cpu(tmp_path / "none") is None
+
+
+async def test_the_shares_of_the_machine(env, tmp_path, monkeypatch):
+    """The machine's point carries PostgreSQL's and each instance's share,
+    in percent of the whole machine (4 cores here)."""
+    from omniacli import metrics
+
+    cg = tmp_path / "cg"
+    for role in ("production", "test"):
+        (cg / f"odoo-{role}.service").mkdir(parents=True)
+        (cg / f"odoo-{role}.service" / "cgroup.procs").write_text("")
+    monkeypatch.setattr(metrics, "CGROUP_ROOT", cg)
+
+    async def unit_cgroup(self, instance):
+        return f"/{instance.restart.service}.service"
+    monkeypatch.setattr(metrics.Sampler, "_unit_cgroup", unit_cgroup)
+    clock, counters, pg = [100.0], [(0, 0, 0, 0)], [1.0]
+    monkeypatch.setattr(metrics.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(metrics, "machine_counters", lambda: counters[0])
+    monkeypatch.setattr(metrics, "postgres_cpu", lambda: pg[0])
+
+    def used(role, seconds):
+        (cg / f"odoo-{role}.service" / "cpu.stat").write_text(f"usage_usec {int(seconds * 1e6)}\n")
+    sampler = metrics.Sampler(env["settings"])
+    sampler.cores = 4
+    used("production", 0); used("test", 0)
+    await sampler.sample()
+    assert list(sampler.machine) == []
+    clock[0], counters[0], pg[0] = 110.0, (400, 1000, 0, 0), 3.0
+    used("production", 0); used("test", 4)
+    await sampler.sample()
+    point = sampler.machine[-1]
+    # 40% of the machine; PostgreSQL 2 s in 10 s = 20% of a core = 5% of 4 cores;
+    # the test instance 4 s in 10 s = 40% of a core = 10% of the machine
+    assert point["cpu"] == 40.0 and point["pg"] == 5.0
+    assert point["instances"] == {"srv/production": 0.0, "srv/test": 10.0}
+    # no PostgreSQL here: no share, the rest is the same
+    clock[0], pg[0] = 120.0, None
+    await sampler.sample()
+    assert sampler.machine[-1]["pg"] is None and set(sampler.machine[-1]["instances"]) == {"srv/production", "srv/test"}
+
+
+async def test_pull_dialog_chooses_the_repositories(client, env):
+    """Two repositories: the buttons open the pull dialog; Pull selected
+    posts the ticked ones, Pull all (or no body) pulls every one."""
+    page = (await client.get("/servers/srv?view=test", headers={"Authorization": AUTH})).text
+    assert 'id="pull-dialog"' in page and '"url": "/servers/srv/test/pull-restart"' in page
+    assert 'action="/servers/srv/test/pull"' not in page
+    test = env["settings"].instance("srv", "test")
+    work = clone(env["remotes"]["addons"], env["tmp"] / "dev_addons_dialog", "test")
+    commit(work, "dialog.txt", "x\n", "change dialog.txt")
+    sh("git", "push", "-q", "origin", "HEAD:test", cwd=work)
+    resp = await client.get("/api/servers/srv/test/pull-preview", headers={"Authorization": AUTH})
+    rows = {r["name"]: r["pending"] for r in resp.json()["rows"]}
+    assert rows == {"odoo": 0, "addons": 1}
+    # nothing ticked, or a repository it has not: refused
+    form = {**POST, "Content-Type": "application/x-www-form-urlencoded"}
+    assert (await client.post("/servers/srv/test/pull", headers=form, content="chosen=1")).status_code == 400
+    assert (await client.post("/servers/srv/test/pull", headers=form,
+                              content="chosen=1&repo=nope")).status_code == 400
+    resp = await client.post("/servers/srv/test/pull", headers=form, content="chosen=1&repo=odoo")
+    data = await wait_job(client, resp.headers["location"].rsplit("/", 1)[1])
+    assert data["status"] == "success" and data["title"] == "Git pull srv/test (odoo)"
+    resp = await client.get("/api/servers/srv/test/pull-preview", headers={"Authorization": AUTH})
+    assert {r["name"]: r["pending"] for r in resp.json()["rows"]} == {"odoo": 0, "addons": 1}
+    # Pull all: the repo fields without chosen
+    resp = await client.post("/servers/srv/test/pull", headers=form, content="repo=odoo")
+    data = await wait_job(client, resp.headers["location"].rsplit("/", 1)[1])
+    assert data["status"] == "success" and data["title"] == "Git pull srv/test"
+    resp = await client.get("/api/servers/srv/test/pull-preview", headers={"Authorization": AUTH})
+    assert {r["name"]: r["pending"] for r in resp.json()["rows"]} == {"odoo": 0, "addons": 0}
+    # a viewer may not
+    viewer = "Basic " + base64.b64encode(f"viewer:{PASSWORD}".encode()).decode()
+    assert (await client.get("/api/servers/srv/test/pull-preview",
+                             headers={"Authorization": viewer})).status_code == 403

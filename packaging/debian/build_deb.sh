@@ -131,6 +131,14 @@ install -m 644 "$SRC"/packaging/debian/requirements/py*.txt "$SRC"/packaging/deb
 ln -s /opt/omniacli/venv/bin/omniacli "$PKG/usr/bin/omniacli"
 install -m 644 "$FILES/omniacli.service" "$PKG/usr/lib/systemd/system/omniacli.service"
 install -m 644 "$FILES/omniacli.yaml.in" "$PKG/usr/share/omniacli/omniacli.yaml.in"
+# the templates of the workspaces' instances: root's, the root helper creates
+# instances from them only (workspacehelper.py)
+for template in "$SRC"/templates/*/; do
+    name="$(basename "$template")"
+    install -d -m 755 "$PKG/usr/share/omniacli/templates/$name"
+    install -m 644 "$template"template.json "$template"compose.yaml "$template"odoo.conf.in \
+        "$PKG/usr/share/omniacli/templates/$name/"
+done
 install -m 644 "$FILES/default" "$PKG/etc/default/omniacli"
 install -m 440 "$FILES/sudoers" "$PKG/etc/sudoers.d/omniacli"
 install -m 644 "$SRC/README.md" "$SRC/servers.example.yaml" "$SRC/LICENSE" "$PKG/usr/share/doc/omniacli/"

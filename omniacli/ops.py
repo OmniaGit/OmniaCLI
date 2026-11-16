@@ -18,7 +18,7 @@ import signal
 import subprocess
 from pathlib import Path
 
-from . import packages
+from . import backupchoices, packages, private
 from .config import Instance, Repository, Server
 from .jobs import Job, JobFailed
 
@@ -44,13 +44,17 @@ STOP_TIMEOUT = 60
 KILL_WAIT = 10
 
 
+# what as_user carries past sudo
+SUDO_ENV = ("PYTHONPATH", "TMPDIR")
+
+
 def as_user(run_as: str | None, cmd: list, env: dict | None = None) -> list:
     """cmd as the system user run_as, through sudo -n; sudo resets the
-    environment, so a PYTHONPATH of env goes on the command line (sudoers
-    needs SETENV for it)."""
+    environment, so a PYTHONPATH or TMPDIR of env goes on the command line
+    (sudoers needs SETENV for it)."""
     if run_as is None:
         return cmd
-    extra = [f"PYTHONPATH={env['PYTHONPATH']}"] if env and env.get("PYTHONPATH") else []
+    extra = [f"{k}={env[k]}" for k in SUDO_ENV if env and env.get(k)]
     return ["sudo", "-n", "-u", run_as, *extra, *cmd]
 
 
@@ -156,16 +160,17 @@ async def run(
 
 async def capture(
     cmd: list[str], cwd: Path | None = None, timeout: float | None = None,
-    env: dict | None = None,
+    env: dict | None = None, input: bytes | None = None,
 ) -> tuple[int, str]:
-    """Run a command quietly and return (exit code, stripped output)."""
+    """Run a command quietly and return (exit code, stripped output); input
+    is its standard input (none: nothing to read)."""
     cwd = _cwd(cmd, cwd)
     try:
         proc = await asyncio.create_subprocess_exec(
             *[str(c) for c in cmd],
             cwd=cwd,
             env=env or _ENV,
-            stdin=asyncio.subprocess.DEVNULL,
+            stdin=asyncio.subprocess.DEVNULL if input is None else asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             start_new_session=True,
@@ -173,7 +178,7 @@ async def capture(
     except OSError as exc:
         return 127, str(exc)
     try:
-        out, _ = await asyncio.wait_for(proc.communicate(), timeout)
+        out, _ = await asyncio.wait_for(proc.communicate(input), timeout)
     except asyncio.TimeoutError:
         await _terminate(proc)
         return 124, f"no answer within {timeout:.0f} s"
@@ -184,13 +189,13 @@ async def capture(
 
 
 async def git(repo: Repository, *args: str) -> str:
-    code, out = await capture(["git", *args], cwd=repo.path)
+    code, out = await capture(repo.git(*args), cwd=repo.path)
     if code:
         raise JobFailed(f"[{repo.name}] git {' '.join(args)} failed: {out}")
     return out
 
 
-async def remote_branches(path: Path, remote: str, timeout: float = 30) -> dict:
+async def remote_branches(path: Path, remote: str, timeout: float = 30, git_options: tuple = ()) -> dict:
     """The branches a working copy's remote has (the ones a pull can follow)
     and the branch checked out; when the remote cannot be reached, the
     remote-tracking branches of the last fetch, with a note."""
@@ -199,7 +204,7 @@ async def remote_branches(path: Path, remote: str, timeout: float = 30) -> dict:
     code, current = await capture(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=path)
     if code:
         return {"error": current.splitlines()[0] if current else "not a git repository"}
-    code, out = await capture(["git", "ls-remote", "--heads", remote], cwd=path, timeout=timeout)
+    code, out = await capture(["git", *git_options, "ls-remote", "--heads", remote], cwd=path, timeout=timeout)
     if code == 0:
         branches = [line.split("refs/heads/", 1)[1] for line in out.splitlines() if "refs/heads/" in line]
         return {"branches": sorted(branches), "current": current, "note": None}
@@ -254,23 +259,35 @@ async def update_submodules(job: Job, repo: Repository, check: bool = True) -> N
     if not (repo.path / ".gitmodules").is_file():
         return
     try:
-        await run(job, ["git", "submodule", "update", "--init", "--recursive"],
+        await run(job, repo.git("submodule", "update", "--init", "--recursive"),
                   cwd=repo.path, check=check)
     except JobFailed as exc:
         raise JobFailed(f"[{repo.name}] {exc}: its submodules are not on the commits "
                         "it records") from exc
 
 
-async def pull(job: Job, instance: Instance) -> bool:
+# the choice of the package among the repositories (a repository named so would be taken for it)
+PACKAGE_CHOICE = ":package"
+
+
+async def pull(job: Job, instance: Instance, only: set[str] | None = None) -> bool:
     """Fast-forward every repository of the instance and its submodules,
     then install its package if a new one is published (packages.py).
+    only: the names of the repositories to pull (PACKAGE_CHOICE among them:
+    the package too); None: all of them and the package.
     Return True if any repository moved or the package was installed."""
     changed = False
+    if only is not None:
+        skipped = [r.name for r in instance.repositories if r.name not in only]
+        if skipped:
+            job.log(f"not pulled (not chosen): {', '.join(skipped)}")
     for repo in instance.repositories:
+        if only is not None and repo.name not in only:
+            continue
         job.log(f"--- [{repo.name}] pull {repo.remote}/{repo.branch}")
         await ensure_ready(job, repo, keep_changes=instance.keeps_local_changes)
         before = await git(repo, "rev-parse", "HEAD")
-        await run(job, ["git", "pull", "--ff-only", repo.remote, repo.branch], cwd=repo.path)
+        await run(job, repo.git("pull", "--ff-only", repo.remote, repo.branch), cwd=repo.path)
         await update_submodules(job, repo)
         after = await git(repo, "rev-parse", "HEAD")
         if before != after:
@@ -278,9 +295,42 @@ async def pull(job: Job, instance: Instance) -> bool:
             job.log(await git(repo, "log", "--oneline", f"{before}..{after}"))
         else:
             job.log(f"[{repo.name}] already up to date")
-    if instance.package is not None and await packages.update(job, instance):
+    if instance.package is not None and (only is None or PACKAGE_CHOICE in only) \
+            and await packages.update(job, instance):
         changed = True
     return changed
+
+
+async def pull_preview(instance: Instance, timeout: float = 60) -> list[dict]:
+    """What a pull would bring, for the choice before it: per repository its
+    branch and the commits not yet pulled (a fetch, in parallel), or the
+    error; then the package, when the instance has one."""
+    async def one(repo: Repository) -> dict:
+        row = {"name": repo.name, "label": repo.name, "branch": repo.branch, "remote": repo.remote,
+               "pending": None, "error": None}
+        if not repo.path.is_dir():
+            row["error"] = f"{repo.path} does not exist"
+            return row
+        code, out = await capture(repo.git("fetch", repo.remote, repo.branch), cwd=repo.path, timeout=timeout)
+        if code:
+            row["error"] = f"git fetch failed: {out.splitlines()[-1] if out else code}"
+            return row
+        code, out = await capture(["git", "rev-list", "--count", "HEAD..FETCH_HEAD"], cwd=repo.path)
+        if code:
+            row["error"] = f"git rev-list failed: {out}"
+        else:
+            row["pending"] = int(out)
+        return row
+
+    rows = list(await asyncio.gather(*(one(r) for r in instance.repositories)))
+    if instance.package is not None:
+        row = {"name": PACKAGE_CHOICE, "label": f"package {instance.package.name}", "pending": None, "error": None}
+        try:
+            row["pending"] = len(await packages.pending(instance))
+        except Exception as exc:  # a download site that cannot be reached: said, not fatal
+            row["error"] = str(exc) or type(exc).__name__
+        rows.append(row)
+    return rows
 
 
 async def pending_updates(instance: Instance) -> dict[str, int]:
@@ -288,7 +338,7 @@ async def pending_updates(instance: Instance) -> dict[str, int]:
     and {"package <name>": 1} when a new package is published."""
     pending = {}
     for repo in instance.repositories:
-        code, out = await capture(["git", "fetch", repo.remote, repo.branch], cwd=repo.path)
+        code, out = await capture(repo.git("fetch", repo.remote, repo.branch), cwd=repo.path)
         if code:
             raise JobFailed(f"[{repo.name}] git fetch failed: {out}")
         code, out = await capture(["git", "rev-list", "--count", "HEAD..FETCH_HEAD"], cwd=repo.path)
@@ -301,6 +351,7 @@ async def pending_updates(instance: Instance) -> dict[str, int]:
 
 
 async def restart(job: Job, instance: Instance) -> None:
+    await instance.plugin.before_start(instance)
     if instance.restart.type == "process":
         await restart_process(job, instance)
         return
@@ -421,6 +472,7 @@ def _config(instance: Instance) -> Path | None:
 async def start(job: Job, instance: Instance) -> None:
     """Start the systemd service or the compose project, or the process
     OmniaCLI starts itself."""
+    await instance.plugin.before_start(instance)
     if instance.restart.type == "process":
         job.log(f"--- start {_label(instance)} started by OmniaCLI ({_config(instance)})")
         if managed_pid(instance) is not None:
@@ -486,6 +538,60 @@ def foreign_pids(instance: Instance, own: int | None) -> list[int]:
     """Processes started with the instance's config that OmniaCLI did not
     start: its own run in the process group it created."""
     return [p for p in _config_pids(instance) if own is None or _pgid(p) != own]
+
+
+def _process_facts(pid: int) -> dict:
+    """What /proc tells of a process: its user, when it started and what
+    started it (None where it cannot be read)."""
+    facts = {"pid": pid, "user": None, "since": None, "parent": None, "detached": False}
+    try:
+        import pwd
+
+        facts["user"] = pwd.getpwuid(os.stat(f"/proc/{pid}").st_uid).pw_name
+    except (OSError, KeyError, ImportError):
+        pass
+    try:
+        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+        ppid, ticks = int(fields[1]), int(fields[19])
+        boot = next(int(line.split()[1]) for line in Path("/proc/stat").read_text().splitlines()
+                    if line.startswith("btime "))
+        facts["since"] = datetime.datetime.fromtimestamp(boot + ticks / os.sysconf("SC_CLK_TCK"))
+        if ppid == 1:
+            facts["detached"] = True
+        else:
+            parent = Path(f"/proc/{ppid}/comm").read_text().strip()
+            # a user's systemd takes the processes whose starter ended
+            facts["detached"] = parent == "systemd"
+            facts["parent"] = None if facts["detached"] else f"{parent} (pid {ppid})"
+    except (OSError, ValueError, IndexError, StopIteration):
+        pass
+    return facts
+
+
+def foreign_problem(instance: Instance, pids: list[int]) -> str:
+    """Why OmniaCLI does not start the instance while processes it did not
+    start run with its config, which they are, and what to do to go on."""
+    described = []
+    users = set()
+    for pid in pids:
+        f = _process_facts(pid)
+        parts = []
+        if f["user"]:
+            parts.append(f"user {f['user']}")
+            users.add(f["user"])
+        if f["since"]:
+            parts.append(f"since {f['since']:%Y-%m-%d %H:%M}")
+        if f["detached"]:
+            parts.append("left running after what started it ended (nohup, setsid or a closed terminal)")
+        elif f["parent"]:
+            parts.append(f"started by {f['parent']}")
+        described.append(", ".join([f"pid {pid}", *parts]))
+    kill = f"kill {' '.join(map(str, pids))}"
+    who = f" as {' or '.join(sorted(users))}" if users else ""
+    return (f"{_label(instance)} is already running with {_config(instance)}, but OmniaCLI did not start "
+            f"it: {'; '.join(described)}. OmniaCLI starts one {_label(instance)} per config and never stops "
+            f"one it did not start. To go on: stop it where it was started (its terminal, the Stop button "
+            f"of the IDE) or with \"{kill}\"{who}, then Restart: OmniaCLI starts its own")
 
 
 async def stop_process(job: Job, instance: Instance, pid: int) -> None:
@@ -558,9 +664,8 @@ async def stop(job: Job, instance: Instance) -> None:
     own = managed_pid(instance)
     if own is None:
         others = foreign_pids(instance, None)
-        job.log("not running" + (
-            f"; pid {', '.join(map(str, others))} run with this config but OmniaCLI did "
-            "not start them: not touched" if others else ""))
+        job.log("not running as OmniaCLI's" + (f", not touched. {foreign_problem(instance, others)}"
+                                                if others else ""))
         return
     await stop_process(job, instance, own)
 
@@ -570,9 +675,7 @@ async def restart_process(job: Job, instance: Instance) -> None:
     own = managed_pid(instance)
     others = foreign_pids(instance, own)
     if others:
-        raise JobFailed(
-            f"{_label(instance)} is already running with {_config(instance)} but OmniaCLI did not start "
-            f"it (pid {', '.join(map(str, others))}): stop it first, OmniaCLI stops only its own")
+        raise JobFailed(foreign_problem(instance, others))
     if own is not None:
         await stop_process(job, instance, own)
     await start_process(job, instance)
@@ -581,15 +684,42 @@ async def restart_process(job: Job, instance: Instance) -> None:
 async def backup(job: Job, instance: Instance, backup_dir: Path, options: dict | None = None) -> Path:
     """The plugin's backup, into <backup_dir>/<server>/<role>; options: the
     values of its backup_fields (none: its defaults)."""
+    return await backup_into(job, instance, backup_dir / instance.server / instance.role, options)
+
+
+async def backup_into(job: Job, instance: Instance, dest_dir: Path, options: dict | None = None) -> Path:
+    """The plugin's backup into dest_dir, the instance's backup folder. A
+    checklist the caller does not give (None) while its checkbox is ticked
+    takes the ticks of the instance's last backup dialog (backupchoices),
+    when it chose one; without, the plugin's own default. The folder is
+    700 and the zip 600, whatever the plugin made (private.py)."""
     if not instance.plugin.has_backup:
         raise JobFailed(f"{_label(instance)} has no backup")
-    dest_dir = backup_dir / instance.server / instance.role
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    return await instance.plugin.backup(job, instance, dest_dir, options)
+    private.backup_folder(dest_dir)
+    options = dict(options or {})
+    remembered = backupchoices.load(dest_dir)
+    fields = instance.plugin.backup_fields()
+    for f in fields:
+        if f.kind != "checklist" or options.get(f.key) is not None:
+            continue
+        if f.shown_with and not options.get(f.shown_with):
+            continue
+        if not isinstance((remembered.get("values") or {}).get(f.key), list):
+            continue
+        threshold = next((g for g in fields if g.key == f.threshold), None)
+        megabytes = (remembered["values"].get(f.threshold) if threshold else None)
+        if megabytes in (None, "") and threshold is not None:
+            megabytes = threshold.default
+        rows = (await instance.plugin.backup_choices(instance, f.key))["rows"]
+        options[f.key] = backupchoices.ticked(rows, remembered, f.key, megabytes)
+        job.log(f"--- {f.label}: the choice of the backup dialog of {remembered.get('saved', '?')} "
+                f"({remembered.get('user') or '?'}): {', '.join(options[f.key]) or 'none'}")
+    return private.backup_file(await instance.plugin.backup(job, instance, dest_dir, options))
 
 
-async def pull_restart(job: Job, instance: Instance, only_if_changed: bool = False) -> None:
-    changed = await pull(job, instance)
+async def pull_restart(job: Job, instance: Instance, only_if_changed: bool = False,
+                       only: set[str] | None = None) -> None:
+    changed = await pull(job, instance, only)
     if only_if_changed and not changed:
         job.log("Nothing new to deploy")
         return
@@ -638,8 +768,8 @@ async def merge_to_production(job: Job, server: Server, backup_dir: Path) -> Non
             tested = await git(test_repo, "rev-parse", "HEAD")
             before = await git(repo, "rev-parse", "HEAD")
             merged.append((repo, before))
-            await run(job, ["git", "pull", "--ff-only", repo.remote, repo.branch], cwd=repo.path)
-            await run(job, ["git", "fetch", repo.remote], cwd=repo.path)
+            await run(job, repo.git("pull", "--ff-only", repo.remote, repo.branch), cwd=repo.path)
+            await run(job, repo.git("fetch", repo.remote), cwd=repo.path)
             code, _ = await capture(["git", "cat-file", "-e", f"{tested}^{{commit}}"], cwd=repo.path)
             if code:
                 raise JobFailed(
@@ -677,7 +807,7 @@ async def merge_to_production(job: Job, server: Server, backup_dir: Path) -> Non
     for repo, _ in merged:
         job.log(f"--- [{repo.name}] push {repo.branch}")
         try:
-            await run(job, ["git", "push", repo.remote, f"HEAD:{repo.branch}"], cwd=repo.path)
+            await run(job, repo.git("push", repo.remote, f"HEAD:{repo.branch}"), cwd=repo.path)
         except JobFailed as exc:
             raise JobFailed(
                 f"{exc}; already pushed: {', '.join(pushed) or 'none'}. "

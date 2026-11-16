@@ -10,6 +10,30 @@
 <script>
 // the theme chosen with the header button, before the page paints; none: the system's
 try { const t = localStorage.getItem("omniacli.theme"); if (t) document.documentElement.dataset.theme = t; } catch (e) {}
+// the login expired: every request of the page's scripts (fetch here, the
+// upload widget and the terminals through OmniaLogin) goes to the login form,
+// which comes back to this page. A read goes at once; an action asks first,
+// since what the page holds unsaved is lost (the action is not sent again)
+window.OmniaLogin = window.OmniaLogin || (function () {
+  let leaving = false;
+  function expired(method) {
+    if (leaving) return;
+    const read = !method || ["GET", "HEAD"].includes(method.toUpperCase());
+    if (!read && !confirm("Your login has expired: log in again?\n\nWhat is not saved on this page is lost.")) return;
+    leaving = true;
+    location.assign("/login?next=" + encodeURIComponent(location.pathname + location.search));
+  }
+  // the 401 of a missing login only: a link's or a token's stays the page's
+  const isExpired = (status, header) => status === 401 && header === "required";
+  const plain = window.fetch.bind(window);
+  window.fetch = async function (input, init) {
+    const resp = await plain(input, init);
+    if (isExpired(resp.status, resp.headers.get("X-OmniaCLI-Login")))
+      expired((init && init.method) || (input instanceof Request ? input.method : "GET"));
+    return resp;
+  };
+  return {expired, isExpired};
+})();
 </script>
 <style>
 /* light: the OmniaSolutions colours (www.omniasolutions.website), with
@@ -20,6 +44,10 @@ try { const t = localStorage.getItem("omniacli.theme"); if (t) document.document
   --border: #E5E5E5; --accent: #DC2626; --ok: #15803D; --err: #991B1B;
   --warn: #B45309; --code-bg: #0A0A0A; --code-text: #E5E5E5;
   --series-1: #161616; --series-2: #DC2626; --test: #161616; --prod: #DC2626;
+  /* the shares on a chart (OmniaCharts lines c2..c8): categorical slots 2-8,
+     checked with the dataviz validator on #FFFFFF; the legend shows each value */
+  --cat-2: #eb6834; --cat-3: #1baf7a; --cat-4: #eda100; --cat-5: #e87ba4;
+  --cat-6: #008300; --cat-7: #6250d6; --cat-8: #e34948;
   --start: #15803D; --stop: #DC2626; --restart: #1D4ED8; --light-green: #16A34A; --purple: #7E22CE;
   --r: 0; --r-lg: 0;
   --font: "Helvetica Neue", Helvetica, Arial, "Nimbus Sans", "Liberation Sans", sans-serif;
@@ -32,6 +60,8 @@ try { const t = localStorage.getItem("omniacli.theme"); if (t) document.document
     --border: #2d3442; --accent: #6d9bff; --ok: #4cc283; --err: #ff6b6b;
     --warn: #f0a443; --code-bg: #0b0e14; --code-text: #d6dbe4;
     --series-1: #3987e5; --series-2: #f08a3c; --test: var(--accent); --prod: var(--err);
+    --cat-2: #d95926; --cat-3: #199e70; --cat-4: #c98500; --cat-5: #d55181;
+    --cat-6: #008300; --cat-7: #9085e9; --cat-8: #e66767;
     --start: var(--ok); --stop: var(--err); --restart: #6d9bff; --light-green: #86efac; --purple: #c084fc;
     --r: 6px; --r-lg: 8px; --font: system-ui, -apple-system, "Segoe UI", sans-serif;
     --mono: ui-monospace, "DejaVu Sans Mono", monospace; --head-bg: var(--panel);
@@ -43,6 +73,8 @@ try { const t = localStorage.getItem("omniacli.theme"); if (t) document.document
     --border: #2d3442; --accent: #6d9bff; --ok: #4cc283; --err: #ff6b6b;
     --warn: #f0a443; --code-bg: #0b0e14; --code-text: #d6dbe4;
     --series-1: #3987e5; --series-2: #f08a3c; --test: var(--accent); --prod: var(--err);
+    --cat-2: #d95926; --cat-3: #199e70; --cat-4: #c98500; --cat-5: #d55181;
+    --cat-6: #008300; --cat-7: #9085e9; --cat-8: #e66767;
     --start: var(--ok); --stop: var(--err); --restart: #6d9bff; --light-green: #86efac; --purple: #c084fc;
     --r: 6px; --r-lg: 8px; --font: system-ui, -apple-system, "Segoe UI", sans-serif;
     --mono: ui-monospace, "DejaVu Sans Mono", monospace; --head-bg: var(--panel);
@@ -69,6 +101,15 @@ header strong { font-size: 16px; }
 details.group { margin-bottom: 16px; }
 details.group > summary { cursor: pointer; margin-bottom: 8px; }
 details.group > summary h2 { display: inline; font-size: 17px; }
+/* the list widget (_list.html): its search, and the subgroups inside a group */
+.list-search { display: flex; align-items: center; gap: 10px; margin: 0 0 12px; flex-wrap: wrap; }
+.list-search input[type="search"] { flex: 1 1 260px; max-width: 520px; }
+.list-search.wide input[type="search"] { max-width: none; }
+/* what a group holds (its list, its subgroups) sits a little inside its
+   heading, so the levels read at a glance */
+details.list-group > :not(summary) { margin-left: 14px; }
+details.list-group.level-2 > summary h2 { font-size: 15px; } details.list-group.level-3 > summary h2,
+details.list-group.level-4 > summary h2 { font-size: 14px; }
 .group-box textarea { width: 100%; font: inherit; padding: 5px 8px; border: 1px solid var(--border);
   border-radius: var(--r); background: var(--bg); color: var(--text); }
 header a { color: var(--text); text-decoration: none; }
@@ -129,6 +170,7 @@ pre.console .WARNING { color: #f0c060; }
 input[type=search].console-search { width: 14em; padding: 3px 8px; }
 .console-tools { margin-left: auto; display: inline-flex; gap: 6px; align-items: center; }
 .console-term { background: var(--code-bg); padding: 6px; }
+.console-box.console-drop .console-term { outline: 2px dashed var(--accent); outline-offset: -2px; }
 .console-box.expanded { position: fixed; inset: 0; z-index: 40; background: var(--bg); padding: 12px; }
 .console-box.expanded .console-out, .console-box.expanded .console-term { flex: 1; height: auto !important; min-height: 0; }
 body.console-expanded { overflow: hidden; }
@@ -153,6 +195,7 @@ dialog::backdrop { background: rgba(0, 0, 0, .45); }
 .addon-group { font-weight: 600; color: var(--muted); margin: 8px 0 4px; font-size: 12px;
   text-transform: uppercase; letter-spacing: .04em; }
 .addon { display: block; padding: 2px 0; font-family: ui-monospace, "DejaVu Sans Mono", monospace; font-size: 12.5px; }
+.addon-version { white-space: pre; } .addon.addon-newer, .addon.addon-newer .addon-version { color: var(--err); }
 .instance-grid { display: grid; gap: 16px; grid-template-columns: repeat(var(--cols, 1), minmax(0, 1fr)); }
 .tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
 .tile { border: 1px solid var(--border); border-radius: var(--r-lg); padding: 8px 12px; }
@@ -174,7 +217,13 @@ svg.spark { width: 160px; height: 28px; display: block; }
 .sparks { min-width: 230px; }
 .spark-row { display: flex; align-items: center; gap: 8px; margin: 2px 0; }
 .spark-row .role { width: 34px; font-size: 11px; }
-.spark-value { width: 40px; text-align: right; color: var(--text); }
+/* the load widgets (_load.html): a spark and its last value */
+.load-cpu, .load-net { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.load-cpu svg.spark, .load-net svg.spark { width: 120px; }
+.load-value { color: var(--text); }
+.load-cpu .load-value { min-width: 40px; text-align: right; }
+.load-disks { display: inline-flex; gap: 10px; flex-wrap: wrap; }
+.machine-row { display: inline-flex; align-items: center; gap: 18px; flex-wrap: wrap; font-size: 13px; }
 .fold { margin-bottom: 24px; }
 .fold-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
 .fold-head h1 { margin: 0; font-size: inherit; }
@@ -194,9 +243,6 @@ svg.spark { width: 160px; height: 28px; display: block; }
 .sum-item { display: inline-flex; align-items: center; gap: 6px; }
 .fold-summary svg.spark { width: 120px; }
 .sum-disks { display: inline-flex; gap: 10px; flex-wrap: wrap; }
-.sum-disk { display: inline-flex; align-items: center; gap: 4px; }
-.sum-disk .disk-bar { width: 40px; height: 6px; }
-.sum-disk .warn { color: var(--warn); }
 @media (prefers-reduced-motion: reduce) { .fold.closed .fold-summary { animation: none; } }
 .chart-line-2 { stroke: var(--series-2); }
 /* the job's state: a runner, a thumbs up, a danger sign */
@@ -300,15 +346,35 @@ button.icon-btn .icon { margin: 0; }
 .run-buttons form { margin: 0; }
 .key { display: inline-block; width: 10px; height: 3px; border-radius: 2px; vertical-align: middle; margin: 0 4px 0 8px; }
 .key.s1 { background: var(--series-1); } .key.s2 { background: var(--series-2); }
+.chart-line.c2 { stroke: var(--cat-2); } .chart-line.c3 { stroke: var(--cat-3); } .chart-line.c4 { stroke: var(--cat-4); }
+.chart-line.c5 { stroke: var(--cat-5); } .chart-line.c6 { stroke: var(--cat-6); } .chart-line.c7 { stroke: var(--cat-7); }
+.chart-line.c8 { stroke: var(--cat-8); }
+.key.c2 { background: var(--cat-2); } .key.c3 { background: var(--cat-3); } .key.c4 { background: var(--cat-4); }
+.key.c5 { background: var(--cat-5); } .key.c6 { background: var(--cat-6); } .key.c7 { background: var(--cat-7); }
+.key.c8 { background: var(--cat-8); }
+.chart-legend { display: flex; flex-wrap: wrap; gap: 2px 14px; font-size: 12px; margin: 2px 0 0; }
+.chart-legend .key { margin-left: 0; }
+.chart-legend .mono { color: var(--muted); margin-left: 4px; }
 .machine-grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr)); }
 .disk { margin: 0 0 10px; }
 .disk-head { display: flex; justify-content: space-between; gap: 12px; font-size: 13px; margin-bottom: 4px; }
 .disk-head .mono { overflow-wrap: anywhere; } .disk-head .warn { color: var(--warn); }
 .disk-note { font-size: 12px; margin-top: 3px; }
-.disk-bar { height: 8px; border-radius: 4px; background: var(--border); overflow: hidden; }
+.disk-bar { height: 8px; border-radius: 4px; background: var(--border); overflow: hidden; display: flex; }
 .disk-fill { height: 100%; background: var(--series-1); }
 .disk-fill.warn { background: var(--warn); } .disk-fill.error { background: var(--err); }
+/* what is promised on a real disk and not used yet */
+.disk-promised { height: 100%; background: repeating-linear-gradient(45deg, var(--series-1) 0 3px, transparent 3px 6px); opacity: .45; }
 .disk-note.warn { color: var(--warn); }
+/* the one-line widget: a table cell, a folded summary (_disk.html) */
+.disk-compact { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.disk-compact .disk-bar { width: 60px; }
+.disk-compact .warn { color: var(--warn); }
+a.disk-compact { color: inherit; text-decoration: none; } a.disk-compact:hover .mono { text-decoration: underline; }
+.machine-top { margin-bottom: 16px; padding: 10px 14px; }
+.machine-top-row { display: flex; align-items: center; gap: 10px; cursor: pointer; }
+.machine-top-row .fold-icon { width: 12px; }
+#machine-detail .machine-panel { border: 0; padding: 0; margin-top: 10px; }
 .server-rows td { vertical-align: middle; }
 .server-name { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 12px; }
 .view-buttons { display: inline-flex; flex-wrap: wrap; gap: 6px; }
@@ -349,7 +415,7 @@ summary { cursor: pointer; color: var(--muted); }
       {% for c in puller_connections %}<a href="/pullers/connections/{{ c }}">{{ c }}</a>{% endfor %}
     </div>
   </div>{% endif %}
-  {% if is_admin or (can_act and account and not prefix) %}<div class="menu">
+  {% if not scoped and (is_admin or (can_act and account and not prefix)) %}<div class="menu">
     <button type="button" class="menu-label" aria-haspopup="true">Configure ▾</button>
     <div class="menu-items">
       {% if is_admin %}<a href="{{ prefix }}/config">Servers</a>
@@ -359,16 +425,19 @@ summary { cursor: pointer; color: var(--muted); }
       {% if can_act and account and not prefix %}<a href="/tunnels">Tunnels</a>{% endif %}
     </div>
   </div>{% endif %}
-  {% if is_admin %}<div class="menu">
+  {% if is_admin and not scoped %}<div class="menu">
     <button type="button" class="menu-label" aria-haspopup="true">Settings ▾</button>
     <div class="menu-items">
       <a href="{{ prefix }}/plugins">Plugins</a>
       <a href="{{ prefix }}/users">Users</a>
+      <a href="{{ prefix }}/workspaces">Workspaces</a>
+      <a href="{{ prefix }}/credentials" title="The git credentials of the servers and workspaces">Git credentials</a>
       <a href="{{ prefix }}/omniacli/log" title="OmniaCLI's own log">Log</a>
       <a href="{{ prefix }}/options">Options</a>
     </div>
   </div>{% endif %}
-  {% if can_act %}<a href="{{ prefix }}/help">Help</a>{% endif %}
+  {% if can_act and not scoped %}<a href="{{ prefix }}/help">Help</a>{% endif %}
+  {% for ws in my_workspaces %}<a href="{{ prefix }}/workspaces/{{ ws }}" title="Your workspace {{ ws }}">{{ ws }}</a>{% endfor %}
   <span class="head-end">
     {% if account %}<a href="{{ prefix }}/account" title="Your account and password">{{ account }}</a>
     <form method="post" action="/logout" class="logout"><button class="logout-button">Log out</button></form>{% endif %}

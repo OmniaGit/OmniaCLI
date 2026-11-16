@@ -24,6 +24,10 @@ read -r -d '' CHECKS <<'EOS' || true
 set -euo pipefail
 step() { echo "--- $*"; }
 fail() { echo "CHECK FAILED: $*"; exit 1; }
+# a command's output has the pattern: read to its end, as grep -q does not
+# (it stops at the first match; with pipefail, a curl still writing a long
+# page then fails on the broken pipe, and the check with it)
+has() { grep "$@" >/dev/null; }
 # the login form, as a browser fills it: the session cookie in /tmp/cookies-<user>
 login() {
     [ "$(curl -s -o /dev/null -w '%{http_code}' -c "/tmp/cookies-$1" -H "Origin: http://localhost:8090" \
@@ -34,8 +38,10 @@ export DEBIAN_FRONTEND=noninteractive
 
 step "install"
 apt-get install -y -qq /opt/omniacli-test/omniacli.deb > /tmp/install.log 2>&1 || { tail -30 /tmp/install.log; fail "apt-get install"; }
+# the links through SSH: ssh, ssh-keygen and ssh-keyscan come with the package
+for tool in ssh ssh-keygen ssh-keyscan; do command -v "$tool" >/dev/null || fail "$tool not installed with the package"; done
 grep -E '^omniacli:' /tmp/install.log || true
-dpkg -s omniacli | grep -q '^Status: install ok installed' || fail "package not installed"
+dpkg -s omniacli | has '^Status: install ok installed' || fail "package not installed"
 for i in $(seq 30); do curl -s -o /dev/null localhost:8090 && break; sleep 1; done
 systemctl is-active --quiet omniacli || { journalctl -u omniacli --no-pager | tail -20; fail "service not active"; }
 systemctl is-enabled --quiet omniacli || fail "service not enabled"
@@ -55,7 +61,9 @@ echo "venv built on $VENV_HOME"
 [ "$VENV_HOME" = "$EXPECT_HOME" ] || fail "venv built on $VENV_HOME, expected $EXPECT_HOME"
 /opt/omniacli/venv/bin/python -c 'import mcp' || fail "mcp not installed"
 if [ "$EXPECT_HOME" = /opt/omniacli/python/bin ]; then
-    grep -q 'downloading Python' /tmp/install.log || fail "bundled Python not downloaded"
+    # preinstalled by the image from the host's cache, with its sha256: postinst takes it as it is
+    grep -q 'downloading Python' /tmp/install.log && fail "the bundled Python downloaded although it was there"
+    [ -x /opt/omniacli/python/bin/python3 ] || fail "no bundled Python"
 else
     [ ! -e /opt/omniacli/python ] || fail "/opt/omniacli/python created with a usable local Python"
 fi
@@ -84,14 +92,14 @@ API=(-s -b /tmp/cookies-admin -H "Origin: http://localhost:8090" -H "Content-Typ
 curl "${API[@]}" localhost:8090/api/servers/save -d '{"original": null, "name": "demo", "server": {"production": {
   "database": "DEMO", "odoo_config": "/srv/odoo.conf", "log_file": "/srv/odoo.log", "venv_bin": "/srv/venv/bin",
   "restart": {"type": "systemd", "service": "odoo-dummy", "sudo": true},
-  "repositories": [{"name": "odoo", "path": "/srv/odoo", "branch": "main"}]}}}' | grep -q '"ok":true' \
+  "repositories": [{"name": "odoo", "path": "/srv/odoo", "branch": "main"}]}}}' | has '"ok":true' \
   || fail "server not saved"
 [ "$(stat -c %U /var/lib/omniacli/servers.yaml)" = omniacli ] || fail "servers.yaml owner"
 grep -q "status: draft" /var/lib/omniacli/servers.yaml || fail "a new server is not a draft"
 
 step "a user created from the Users page, as user omniacli"
 curl "${API[@]}" localhost:8090/api/access/users/save \
-  -d '{"name": "anna", "role": "developer", "password": "anna-pass-1", "new": true}' | grep -q '"ok":true' \
+  -d '{"name": "anna", "role": "developer", "password": "anna-pass-1", "new": true}' | has '"ok":true' \
   || fail "user not saved"
 [ "$(stat -c '%U %a' /var/lib/omniacli/users.yaml)" = "omniacli 600" ] || fail "users.yaml owner or mode"
 login anna anna-pass-1
@@ -101,11 +109,11 @@ step "a link to itself: token from the Users page, link from the Links page, pag
 LINK_TOKEN="$(curl "${API[@]}" localhost:8090/api/access/links/save -d '{"name": "self", "role": "developer", "new": true}' \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')"
 curl "${API[@]}" localhost:8090/api/links/save \
-  -d "{\"name\": \"me\", \"url\": \"http://127.0.0.1:8090\", \"token\": \"$LINK_TOKEN\", \"new\": true}" | grep -q '"ok":true' \
+  -d "{\"name\": \"me\", \"url\": \"http://127.0.0.1:8090\", \"token\": \"$LINK_TOKEN\", \"new\": true}" | has '"ok":true' \
   || fail "link not saved"
 [ "$(stat -c '%U %a' /var/lib/omniacli/links.yaml)" = "omniacli 600" ] || fail "links.yaml owner or mode"
-curl "${API[@]}" -X POST localhost:8090/api/links/me/test | grep -q '"role":"developer"' || fail "Test link"
-curl -s -b /tmp/cookies-admin -H "Accept: text/html" localhost:8090/links/me/ | grep -q "Linked instance <strong>me</strong>" \
+curl "${API[@]}" -X POST localhost:8090/api/links/me/test | has '"role":"developer"' || fail "Test link"
+curl -s -b /tmp/cookies-admin -H "Accept: text/html" localhost:8090/links/me/ | has "Linked instance <strong>me</strong>" \
   || fail "page through the link"
 
 step "Test & activate: the checks that can pass here"
@@ -126,8 +134,10 @@ PY
 sed -i 's/status: draft/status: active/' /var/lib/omniacli/servers.yaml
 systemctl restart omniacli
 for i in $(seq 30); do curl -s -o /dev/null localhost:8090 && break; sleep 1; done
-# links.yaml read again at startup: the link lists this instance's server
-curl -s -b /tmp/cookies-admin localhost:8090/dashboard/servers | grep -q "me › demo" || fail "linked server row"
+# links.yaml read again at startup: the link has its row in Linked, and its
+# servers come through it (they are on its own Dashboard, not in Servers)
+curl -s -b /tmp/cookies-admin localhost:8090/ | has '<span class="machine-row" data-link="me">' || fail "linked row"
+curl -s -b /tmp/cookies-admin localhost:8090/links/me/api/servers | has '"demo"' || fail "linked servers"
 
 step "git pull + restart through the web service"
 git -C /srv/dev commit -q --allow-empty -m two && git -C /srv/dev push -q origin main
@@ -153,10 +163,10 @@ echo "omniacli ALL=(root) NOPASSWD: $SYSTEMCTL --no-ask-password start odoo-dumm
 echo "omniacli ALL=(root) NOPASSWD: $SYSTEMCTL --no-ask-password stop odoo-dummy" >> /etc/sudoers.d/omniacli
 visudo -cf /etc/sudoers.d/omniacli >/dev/null || fail "sudoers invalid with start and stop"
 curl "${API[@]}" localhost:8090/api/access/users/save \
-  -d '{"name": "luca", "role": "user", "password": "luca-pass-1", "new": true}' | grep -q '"ok":true' || fail "user luca not saved"
+  -d '{"name": "luca", "role": "user", "password": "luca-pass-1", "new": true}' | has '"ok":true' || fail "user luca not saved"
 login luca luca-pass-1
 LUCA=(-s -b /tmp/cookies-luca -H "Origin: http://localhost:8090")
-curl -s -b /tmp/cookies-luca localhost:8090/servers/demo | grep -q "service active" || fail "service state not shown"
+curl -s -b /tmp/cookies-luca localhost:8090/servers/demo | has "service active" || fail "service state not shown"
 for action in stop start restart; do
     PID_BEFORE="$(systemctl show -p MainPID --value odoo-dummy)"
     LOCATION="$(curl "${LUCA[@]}" -o /dev/null -w '%{redirect_url}' -X POST localhost:8090/servers/demo/production/$action)"
@@ -172,7 +182,7 @@ for action in stop start restart; do
     echo "$action by luca: odoo-dummy $STATE (pid $PID_BEFORE -> $(systemctl show -p MainPID --value odoo-dummy))"
     case "$action" in
         stop) [ "$STATE" = inactive ] || fail "not stopped"
-              curl -s -b /tmp/cookies-luca localhost:8090/servers/demo | grep -q "/servers/demo/production/start" || fail "no Start button when stopped" ;;
+              curl -s -b /tmp/cookies-luca localhost:8090/servers/demo | has "/servers/demo/production/start" || fail "no Start button when stopped" ;;
         start) [ "$STATE" = active ] || fail "not started" ;;
         restart) [ "$STATE" = active ] && [ "$(systemctl show -p MainPID --value odoo-dummy)" != "$PID_BEFORE" ] || fail "not restarted" ;;
     esac
@@ -225,7 +235,7 @@ curl "${API[@]}" localhost:8090/api/servers/save -d '{"original": null, "name": 
   "database": "DEMO_RUNAS", "odoo_config": "/srv/runas.conf", "log_file": "/srv/odoo.log", "venv_bin": "/srv/runas-venv/bin",
   "odoo_bin": "/srv/odoo-src/odoo-bin", "run_as": "odoo",
   "restart": {"type": "systemd", "service": "odoo-dummy", "sudo": true},
-  "repositories": [{"name": "odoo", "path": "/srv/odoo", "branch": "main"}]}}}' | grep -q '"ok":true' \
+  "repositories": [{"name": "odoo", "path": "/srv/odoo", "branch": "main"}]}}}' | has '"ok":true' \
   || fail "run_as server not saved"
 runas_checks() {
     curl "${API[@]}" -X POST localhost:8090/api/servers/runas/test > /tmp/runas.json
@@ -271,7 +281,7 @@ wait_job "${LOCATION##*/}" || fail "backup as odoo"
 grep -o 'backup as .*' /tmp/job.log
 BACKUP="$(ls /var/lib/omniacli/backups/runas/test/)"
 [ "$(cat "/var/lib/omniacli/backups/runas/test/$BACKUP")" = dump ] || fail "backup file"
-ls /var/tmp | grep -q omniacli-backup && fail "backup staging folder left in /var/tmp"
+ls /var/tmp | has omniacli-backup && fail "backup staging folder left in /var/tmp"
 [ "$(curl -s -b /tmp/cookies-admin "localhost:8090/backups/runas/test/$BACKUP")" = dump ] || fail "backup made as odoo not downloadable"
 LOCATION="$(curl "${API[@]}" -o /dev/null -w '%{redirect_url}' -X POST localhost:8090/servers/runas/test/x/odoo/pip-requirements)"
 wait_job "${LOCATION##*/}" || fail "pip requirements as odoo"
@@ -296,7 +306,7 @@ export OMNIACLI_KEY_PASSPHRASE=test-passphrase
 PUB="$(/opt/omniacli/venv/bin/omniacli package-key /srv/sign/key 2>/dev/null)" || fail "package-key"
 /opt/omniacli/venv/bin/omniacli package-sign --key /srv/sign/key /srv/www/demo-server.deb >/dev/null || fail "package-sign"
 (cd /srv/www && sha256sum -c demo-server.deb.sha256 >/dev/null) || fail "the .sha256 is not what sha256sum checks"
-/opt/omniacli/venv/bin/omniacli package-verify --public-key "$PUB" /srv/www/demo-server.deb | grep -q "version 2.0" \
+/opt/omniacli/venv/bin/omniacli package-verify --public-key "$PUB" /srv/www/demo-server.deb | has "version 2.0" \
   || fail "package-verify"
 (cd /srv/www && exec python3 -m http.server 8099 --bind 127.0.0.1 >/tmp/www.log 2>&1) &
 WWW_PID=$!
@@ -307,7 +317,7 @@ echo "omniacli ALL=(root) NOPASSWD: $SYSTEMCTL --no-ask-password restart demo-pk
 curl "${API[@]}" localhost:8090/api/servers/save -d "{\"original\": null, \"name\": \"pkg\", \"server\": {\"type\": \"generic\",
   \"production\": {\"log_file\": \"/srv/odoo.log\", \"restart\": {\"type\": \"systemd\", \"service\": \"demo-pkg\", \"sudo\": true},
   \"repositories\": [], \"package\": {\"url\": \"http://127.0.0.1:8099/demo-server.deb\", \"name\": \"demo-server\",
-  \"public_key\": \"$PUB\"}}}}" | grep -q '"ok":true' || fail "package server not saved"
+  \"public_key\": \"$PUB\"}}}}" | has '"ok":true' || fail "package server not saved"
 # without its sudoers line the Test says which one: added as it says
 curl "${API[@]}" -X POST localhost:8090/api/servers/pkg/test > /tmp/checks.json
 python3 - <<'PY' > /tmp/sudoers-line || fail "package checks"
@@ -322,7 +332,7 @@ print(perm["detail"].split("/etc/sudoers.d/omniacli: ", 1)[1])
 PY
 cat /tmp/sudoers-line >> /etc/sudoers.d/omniacli
 visudo -cf /etc/sudoers.d/omniacli >/dev/null || fail "sudoers invalid with the line the Test printed"
-curl "${API[@]}" -X POST localhost:8090/api/servers/pkg/test | grep -q '"status":"active"' || fail "package server not activated"
+curl "${API[@]}" -X POST localhost:8090/api/servers/pkg/test | has '"status":"active"' || fail "package server not activated"
 PID_BEFORE="$(systemctl show -p MainPID --value demo-pkg)"
 LOCATION="$(curl "${API[@]}" -o /dev/null -w '%{redirect_url}' -X POST localhost:8090/servers/pkg/production/pull-restart)"
 wait_job "${LOCATION##*/}" || fail "package update job"
@@ -361,7 +371,7 @@ install -d -o dev -g dev -m 744 /home/dev/workspace
 printf '[options]\ndb_name = DEV\n' > /home/dev/workspace/odoo.conf
 chown dev:dev /home/dev/workspace/odoo.conf
 FORM='{"values": {"odoo_config": "/home/dev/workspace/odoo.conf"}}'
-curl "${API[@]}" localhost:8090/x/odoo/form/config -d "$FORM" | grep -q "Permission denied" \
+curl "${API[@]}" localhost:8090/x/odoo/form/config -d "$FORM" | has "Permission denied" \
   || fail "the workspace of dev readable by omniacli: the test proves nothing"
 echo "OMNIACLI_USER=nobody-here" >> /etc/default/omniacli
 dpkg-reconfigure omniacli > /tmp/reconf.log 2>&1 && fail "an unknown OMNIACLI_USER accepted"
@@ -372,7 +382,7 @@ wait_up || fail "service not up as dev"
 [ "$(service_user)" = dev ] || fail "service runs as $(service_user), not dev"
 [ "$(owners)" = dev:omniacli ] || fail "data owned by $(owners), not dev:omniacli"
 login admin "$PW"
-curl "${API[@]}" localhost:8090/x/odoo/form/config -d "$FORM" | grep -q '"database":"DEV"' || fail "config of dev not read as dev"
+curl "${API[@]}" localhost:8090/x/odoo/form/config -d "$FORM" | has '"database":"DEV"' || fail "config of dev not read as dev"
 # git and the restart as dev: the repository is the developer's, sudoers names dev
 chown -R dev:dev /srv/odoo /srv/remote.git
 echo "dev ALL=(root) NOPASSWD: $SYSTEMCTL --no-ask-password restart odoo-dummy" >> /etc/sudoers.d/omniacli
@@ -388,8 +398,12 @@ wait_up || fail "service not up after the upgrade"
 [ "$(owners)" = dev:omniacli ] || fail "the upgrade gave the data back to $(owners)"
 login admin "$PW"
 curl "${API[@]}" localhost:8090/api/access/users/save \
-  -d '{"name": "marta", "role": "user", "password": "marta-pass-1", "new": true}' | grep -q '"ok":true' \
+  -d '{"name": "marta", "role": "user", "password": "marta-pass-1", "new": true}' | has '"ok":true' \
   || fail "users.yaml not written as dev after the upgrade"
+# OMNIACLI_USER reaches the running service: a development machine, the shell page opens
+curl -s -b /tmp/cookies-admin localhost:8090/options | has 'id="machine">development<' || fail "OMNIACLI_USER=dev is not a development machine"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/cookies-admin localhost:8090/servers/demo/production/shell)" = 200 ] \
+    || fail "no shell page on a development machine"
 echo "as dev: config read, pulled and restarted, upgrade kept it"
 sed -i '/^OMNIACLI_USER=/d' /etc/default/omniacli
 dpkg-reconfigure omniacli > /tmp/reconf.log 2>&1 || { tail -20 /tmp/reconf.log; fail "dpkg-reconfigure back to omniacli"; }
@@ -397,7 +411,114 @@ wait_up || fail "service not up as omniacli again"
 [ "$(service_user)" = omniacli ] || fail "service runs as $(service_user), not omniacli again"
 [ "$(owners)" = omniacli:omniacli ] || fail "data owned by $(owners), not omniacli again"
 [ ! -e "$DROPIN" ] || fail "drop-in left without OMNIACLI_USER"
+# without it, a server: the shell page refused, also to an admin
+login admin "$PW"
+curl -s -b /tmp/cookies-admin localhost:8090/options | has 'id="machine">server<' || fail "without OMNIACLI_USER not a server"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/cookies-admin localhost:8090/servers/demo/production/shell)" = 403 ] \
+    || fail "the shell page opens on a server"
 chown -R omniacli:omniacli /srv/odoo /srv/remote.git
+login admin "$PW"
+
+step "OMNIACLI_WORKSPACES: the storages bound on root's paths, their sudoers lines, the room of their disks"
+WS_DEFAULT=/srv/omniacli/default_workspace
+WS_SUDOERS=/etc/sudoers.d/omniacli-workspaces
+HELPER=/opt/omniacli/venv/bin/omniacli
+bound_of() { /opt/omniacli/venv/bin/python -c 'import sys; from omniacli.config import bound_root; print(bound_root(sys.argv[1]))' "$1"; }
+[ ! -e "$WS_DEFAULT" ] || fail "$WS_DEFAULT made without OMNIACLI_WORKSPACES"
+# a second storage on a user's disk: the folders above it are the user's
+WS_USER=/srv/userdisk/mine/workspaces
+install -d -o dev -g dev -m 777 /srv/userdisk
+install -d -o dev -g dev -m 755 /srv/userdisk/mine
+install -d -o root -g root -m 755 "$WS_USER"
+echo real > "$WS_USER/marker"
+printf 'workspaces:\n  storage:\n    default: %s\n    mine: %s\n' "$WS_DEFAULT" "$WS_USER" >> /etc/omniacli/omniacli.yaml
+echo OMNIACLI_WORKSPACES=1 >> /etc/default/omniacli
+dpkg-reconfigure omniacli > /tmp/reconf.log 2>&1 || { tail -20 /tmp/reconf.log; fail "dpkg-reconfigure with OMNIACLI_WORKSPACES=1"; }
+wait_up || fail "service not up with OMNIACLI_WORKSPACES=1"
+grep 'storage ' /tmp/reconf.log || true
+[ "$(stat -c '%U:%G %a' "$WS_DEFAULT")" = "root:root 755" ] || fail "$WS_DEFAULT is $(stat -c '%U:%G %a' "$WS_DEFAULT")"
+B_DEFAULT=$(bound_of default); B_USER=$(bound_of mine)
+[ "$B_USER" = /var/lib/omniacli-storage/mine ] || fail "the storage mine is bound on $B_USER, not on its name"
+for b in "$B_DEFAULT" "$B_USER"; do
+    findmnt -n "$b" >/dev/null || { tail -20 /tmp/reconf.log; fail "$b not bound by the package"; }
+    grep -qx "omniacli ALL=(root) NOPASSWD: /opt/omniacli/venv/bin/omniacli compose-helper $b/\* \*" "$WS_SUDOERS" \
+        || { cat "$WS_SUDOERS"; fail "no compose-helper line for $b"; }
+    systemctl is-active --quiet "omniacli-storage-$(basename "$b").service" || fail "the unit of $b is not active"
+    systemctl is-enabled --quiet "omniacli-storage-$(basename "$b").service" || fail "the unit of $b is not enabled"
+done
+[ "$(cat "$B_USER/marker")" = real ] || fail "$B_USER does not show $WS_USER"
+grep -q "compose-helper $WS_USER/" "$WS_SUDOERS" && fail "a compose-helper line names the storage itself, not its root path"
+# the room of the disks, through the page's API: sudo, the root helper's space
+login admin "$PW"
+curl -s -b /tmp/cookies-admin localhost:8090/api/workspaces/space > /tmp/space.json
+/opt/omniacli/venv/bin/python -c 'import json, sys
+room = json.load(open("/tmp/space.json"))["roots"][sys.argv[1]][""]
+assert room["free"] > 0 and room["physical"] == room["free"] and room["promised"] == 0, room' default \
+    || { cat /tmp/space.json; fail "the room of $WS_DEFAULT"; }
+curl -s -b /tmp/cookies-admin localhost:8090/workspaces | has "<option value=\"mine\">mine ($WS_USER)</option>" \
+    || fail "the storage mine ($WS_USER) not offered"
+# a workspace's disk on the user's disk, through the root path; after the storage's check.
+# A container's /dev is made at its start: loop devices the kernel adds later
+# (several of these tests at once, the host's own) get their nodes here
+for i in $(seq 0 255); do [ -e "/dev/loop$i" ] || mknod "/dev/loop$i" b 7 "$i" 2>/dev/null || true; done
+"$HELPER" workspace-helper disk w1 mine 1 > /tmp/disk.json 2>&1 || { cat /tmp/disk.json
+    journalctl -u "$(systemd-escape -p --suffix=mount "$B_USER/w1")" --no-pager -o cat | tail -8
+    losetup -a; ls /dev/loop* | tr '\n' ' '; fail "the disk of w1"; }
+findmnt -n "$B_USER/w1" >/dev/null || fail "the disk of w1 not mounted on $B_USER/w1"
+grep -q "Requires=omniacli-storage-$(basename "$B_USER").service" /etc/systemd/system/*w1.mount || fail "the disk of w1 does not wait for its storage's check"
+# the user, everything running, renames a folder above the storage and plants its own
+su dev -s /bin/sh -c "mv /srv/userdisk/mine /srv/userdisk/moved && mkdir -p $WS_USER && echo planted > $WS_USER/marker" \
+    || fail "dev could not rename its own folders"
+[ "$(cat "$B_USER/marker")" = real ] || fail "the root path followed the rename"
+findmnt -n "$B_USER/w1" >/dev/null || fail "the disk of w1 lost by the rename"
+mv "$B_USER" "$B_USER.x" 2>/dev/null && fail "the root path was moved"
+# a boot: the units again; the path now holds the planted folder, the storage's unit refuses it
+W1_UNIT=$(systemd-escape -p --suffix=mount "$B_USER/w1")
+systemctl stop "$W1_UNIT" omniacli-storage-mine.service
+findmnt -n "$B_USER" >/dev/null && fail "the storage's unit stopped leaves $B_USER bound"
+systemctl start "$W1_UNIT" 2>/dev/null && fail "the disk of w1 mounted on a planted storage"
+findmnt -n "$B_USER" >/dev/null && fail "the planted folder stays bound on $B_USER"
+journalctl -u "omniacli-storage-$(basename "$B_USER").service" --no-pager -o cat | has -E "not the folder set up|root's alone" \
+    || fail "the check did not say why"
+touch "$B_USER/x" 2>/dev/null && fail "something was written beneath $B_USER (not immutable)"
+"$HELPER" workspace-helper disk w1 mine 1 > /tmp/disk.json 2>&1 && fail "an action took the planted storage"
+grep -qE "not the folder set up|root's alone" /tmp/disk.json || { cat /tmp/disk.json; fail "the action did not say why"; }
+# taken again on purpose: the planted folder is the user's, refused
+"$HELPER" workspace-helper storage-reset mine > /tmp/reset.json 2>&1 && fail "storage-reset took a folder of the user's"
+grep -q "root's alone" /tmp/reset.json || { cat /tmp/reset.json; fail "storage-reset did not say why"; }
+# the real one back: bound and checked again, the disk mounts
+su dev -s /bin/sh -c "rm -rf /srv/userdisk/mine && mv /srv/userdisk/moved /srv/userdisk/mine"
+systemctl start "$W1_UNIT" || { journalctl -u "omniacli-storage-$(basename "$B_USER").service" --no-pager | tail -5; fail "the real storage back is not taken"; }
+[ "$(cat "$B_USER/marker")" = real ] && findmnt -n "$B_USER/w1" >/dev/null || fail "the real storage and w1 not back"
+# a new disk: the workspaces stopped, the folder copied (the disks kept sparse),
+# only the folder changed in the main configuration, a boot: the storage is
+# bound from its new folder, its name and all that uses it as they were
+WS_NEW=/srv/newdisk/omniacli
+install -d -o root -g root -m 755 /srv/newdisk "$WS_NEW"
+systemctl stop "$W1_UNIT"
+cp -a --sparse=always "$WS_USER/." "$WS_NEW/"
+echo new > "$WS_NEW/marker"
+chattr -i "$WS_NEW/w1" 2>/dev/null; rmdir "$WS_NEW/w1" 2>/dev/null; mkdir -p "$WS_NEW/w1"
+sed -i "s#    mine: $WS_USER#    mine: $WS_NEW#" /etc/omniacli/omniacli.yaml
+grep -q "mine: $WS_NEW" /etc/omniacli/omniacli.yaml || fail "the storage's folder not changed in the configuration"
+systemctl stop omniacli-storage-mine.service
+systemctl start "$W1_UNIT" || { journalctl -u omniacli-storage-mine.service --no-pager | tail -5; fail "the storage on its new disk is not taken"; }
+[ "$(cat "$B_USER/marker")" = new ] || fail "$B_USER does not show the new folder $WS_NEW"
+findmnt -n "$B_USER/w1" >/dev/null || fail "the disk of w1 not mounted from the new disk"
+grep -qx "$WS_NEW" "/var/lib/omniacli-storage/.ids/mine.id" || fail "the new folder of mine not kept"
+# the helper finds it there (space, not disk: a disk mounted again here waits for
+# its loop device, which no udev of a container announces)
+"$HELPER" workspace-helper space > /tmp/space2.json 2>&1 || { cat /tmp/space2.json; fail "the helper on the storage on its new disk"; }
+/opt/omniacli/venv/bin/python -c 'import json, sys
+root = next(r for r in json.loads(open("/tmp/space2.json").read().splitlines()[-1])["roots"] if r["root"] == "mine")
+assert root["folder"] == sys.argv[1] and "w1" in root["images"], root' "$WS_NEW" \
+    || { cat /tmp/space2.json; fail "the storage mine not on its new disk for the helper"; }
+echo "storages bound: $B_DEFAULT, $B_USER; a planted folder refused at a boot; a new disk taken at a boot"
+sed -i '/^OMNIACLI_WORKSPACES=/d' /etc/default/omniacli
+dpkg-reconfigure omniacli > /tmp/reconf.log 2>&1 || { tail -20 /tmp/reconf.log; fail "dpkg-reconfigure without OMNIACLI_WORKSPACES"; }
+wait_up || fail "service not up without OMNIACLI_WORKSPACES"
+[ ! -e "$WS_SUDOERS" ] || fail "$WS_SUDOERS left without OMNIACLI_WORKSPACES"
+[ -d "$WS_DEFAULT" ] || fail "$WS_DEFAULT removed: the workspaces' disks live there"
 login admin "$PW"
 
 step "reinstall keeps config, servers and password"
@@ -407,7 +528,7 @@ grep -q 'downloading Python' /tmp/reinstall.log && fail "bundled Python download
 for i in $(seq 30); do curl -s -o /dev/null localhost:8090 && break; sleep 1; done
 systemctl is-active --quiet omniacli || fail "service not active after reinstall"
 [ "$(sha256sum /etc/omniacli/omniacli.yaml)" = "$HASH_BEFORE" ] || fail "config changed by reinstall"
-curl -s -b /tmp/cookies-admin localhost:8090/ | grep -q demo || fail "server lost after reinstall (or its session)"
+curl -s -b /tmp/cookies-admin localhost:8090/ | has demo || fail "server lost after reinstall (or its session)"
 
 step "remove and purge"
 apt-get remove -y -qq omniacli >/dev/null 2>&1 || fail "remove"
@@ -421,27 +542,53 @@ apt-get purge -y -qq omniacli >/dev/null 2>&1 || fail "purge"
 [ ! -e /etc/omniacli ] || fail "/etc/omniacli left after purge"
 [ "$(ls -A /var/lib/omniacli)" = backups ] || fail "left after purge besides the backups: $(ls -A /var/lib/omniacli | tr '\n' ' ')"
 [ "$(cat "/var/lib/omniacli/backups/runas/test/$BACKUP")" = dump ] || fail "backup lost by purge"
+[ -d /srv/omniacli/default_workspace ] || fail "the default storage of the workspaces removed by purge"
 echo "ALL CHECKS PASSED"
 EOS
 
 # the Python a local python3.12 is taken from: the package's bundled one
 BUNDLED_URL="$(dpkg-deb --ctrl-tarfile "$DEB" | tar -xO ./postinst | sed -n 's/^BUNDLED_URL=//p')"
+BUNDLED_SHA256="$(dpkg-deb --ctrl-tarfile "$DEB" | tar -xO ./postinst | sed -n 's/^BUNDLED_SHA256=//p')"
+# downloaded once into a cache of this machine, checked against the package's
+# sha256: the images take it from there, never from github.com at each run
+# (debian:11 installs it where the package looks for it, so its postinst
+# finds it and does not download it; the download itself is not run here)
+CACHE="${OMNIACLI_TEST_CACHE:-$HOME/.cache/omniacli-test}"
+mkdir -p "$CACHE"
+PY_TARBALL="$CACHE/python-$BUNDLED_SHA256.tar.gz"
+# (checked when downloaded; a file there is used as it is, also one put there
+# by hand: a tar.gz of the build's python/ folder)
+if [ ! -s "$PY_TARBALL" ]; then
+    for try in 1 2 3 4 5; do
+        curl -sfL --max-time 300 -o "$PY_TARBALL.tmp" "$BUNDLED_URL" \
+            && [ "$(sha256sum "$PY_TARBALL.tmp" | cut -d' ' -f1)" = "$BUNDLED_SHA256" ] \
+            && mv "$PY_TARBALL.tmp" "$PY_TARBALL" && break
+        echo "the bundled Python not downloaded (try $try of 5), again in 20 s" >&2
+        sleep 20
+    done
+    [ -f "$PY_TARBALL" ] || { echo "the bundled Python cannot be downloaded from $BUNDLED_URL" >&2; exit 1; }
+fi
+cp "$PY_TARBALL" "$CACHE/python.tar.gz"
 
 test_one() {
     local image="${1%+localpy}" tag="omniacli-test-${1//[:\/+]/-}" log="$LOGS/${1//[:\/+]/_}.log" cid
     local expect=/usr/bin localpy=true
     if [ "$1" != "$image" ]; then
         expect=/usr/local/bin
-        localpy="curl -sfL '$BUNDLED_URL' | tar -xz -C /usr/local/lib \
+        localpy="tar -xzf /tmp/python.tar.gz -C /usr/local/lib \
  && ln -s /usr/local/lib/python/bin/python3.12 /usr/local/bin/python3.12 \
  && printf '#!/bin/sh\\nexit 1\\n' > /usr/local/bin/python3.13 && chmod 755 /usr/local/bin/python3.13"
     elif [ "$image" = debian:11 ]; then
         expect=/opt/omniacli/python/bin
+        # the bundled Python where the package keeps it, with its sha256: postinst takes it
+        localpy="mkdir -p /opt/omniacli && tar -xzf /tmp/python.tar.gz -C /opt/omniacli \
+ && echo $BUNDLED_SHA256 > /opt/omniacli/python/.sha256"
     fi
     {
-        docker build -q -t "$tag" - >/dev/null <<EOF
+        docker build -q -t "$tag" -f - "$CACHE" >/dev/null <<EOF
 FROM $image
 ENV DEBIAN_FRONTEND=noninteractive
+COPY python.tar.gz /tmp/python.tar.gz
 RUN if grep -q '^11' /etc/debian_version 2>/dev/null; then \
       sed -i 's#http://deb.debian.org/debian-security#http://archive.debian.org/debian-security#' /etc/apt/sources.list; fi \
  && apt-get update -qq && apt-get install -y -qq systemd systemd-sysv sudo curl >/dev/null \
@@ -458,6 +605,11 @@ EOF
         done
         docker exec -e EXPECT_HOME="$expect" "$cid" bash -c "apt-get update -qq >/dev/null; $CHECKS"
         local rc=$?
+        # the immutable folders of the storages' binds and of the workspaces'
+        # disks: docker cannot remove a container that keeps them
+        docker exec "$cid" sh -c 'for m in $(findmnt -rn -o TARGET | grep "^/var/lib/omniacli-storage/" | sort -r); do umount "$m"; done
+            for d in /var/lib/omniacli-storage/* /srv/*/*/workspaces/* /srv/*/*/workspaces /srv/omniacli/default_workspace/* /srv/newdisk/omniacli/*; do
+                [ -d "$d" ] && chattr -i "$d" 2>/dev/null; done; true' >/dev/null 2>&1 || true
         docker rm -f "$cid" >/dev/null
         return $rc
     } > "$log" 2>&1

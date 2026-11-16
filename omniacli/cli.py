@@ -66,7 +66,7 @@ def _check_config(args) -> int:
     settings = load_settings(args.config)
     failed = False
     for server in settings.servers.values():
-        report = asyncio.run(checks.check_server(server, settings.backup_dir))
+        report = asyncio.run(checks.check_server(server, settings.backup_dir, settings.machine))
         ok = checks.passed(report)
         print(f"{server.name} ({server.status}): {'OK' if ok else 'PROBLEMS'}")
         for check in report:
@@ -154,12 +154,34 @@ def _plugin_install(args) -> int:
     return 0
 
 
+def _template_pack(args) -> int:
+    """The archive of a template, checked, into a folder: what the release
+    script publishes (templatestore.py). Its index entry, as JSON."""
+    import json
+
+    from . import stacktemplates
+
+    try:
+        print(json.dumps(stacktemplates.pack(Path(args.folder), Path(args.dest))))
+    except stacktemplates.TemplateError as exc:
+        print(f"template-pack: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def _compose_helper(args) -> int:
     """As root (sudo): an action on a compose project, which must be safe
     from the user who called sudo (composehelper.py)."""
     from . import composehelper
 
     return composehelper.main(args.args)
+
+
+def _workspace_helper(args) -> int:
+    """As root (sudo): a workspace's disk and instances (workspacehelper.py)."""
+    from . import workspacehelper
+
+    return workspacehelper.main(args.args)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -218,6 +240,18 @@ def main(argv: list[str] | None = None) -> int:
                                  "cannot change (start, stop, restart, state)")
     helper.add_argument("args", nargs=argparse.REMAINDER, help="<project folder> <action> [arguments]")
     helper.set_defaults(func=_compose_helper)
+
+    pack = sub.add_parser("template-pack",
+                          help="the archive of a workspace template, checked, for the download server")
+    pack.add_argument("folder", help="the template's folder (templates/<name>)")
+    pack.add_argument("dest", help="the folder the archive is written into")
+    pack.set_defaults(func=_template_pack)
+
+    workspace = sub.add_parser("workspace-helper",
+                               help="as root: a workspace's virtual disk, and its instances made from a "
+                                    "template or removed (disk, create, remove)")
+    workspace.add_argument("args", nargs=argparse.REMAINDER, help="<action> [arguments]")
+    workspace.set_defaults(func=_workspace_helper)
 
     check = sub.add_parser("check-config", help="run the Test & activate checks on every server")
     check.add_argument("-c", "--config", default="omniacli.yaml")

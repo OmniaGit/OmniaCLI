@@ -2,9 +2,12 @@
 {# Shows a check report: OmniaChecks.show(title, checks, summary) #}
 <dialog id="checks-dialog">
   <h2 id="checks-title" style="margin-bottom: 4px"></h2>
-  <p id="checks-summary" style="margin-top: 0"></p>
   <div class="scroll"><table id="checks-table"></table></div>
-  <div class="actions"><button type="button" onclick="document.getElementById('checks-dialog').close()">Close</button></div>
+  {# the outcome stays in sight beside the button, however long the list is #}
+  <div class="actions" style="position: sticky; bottom: -18px; align-items: center; margin-bottom: -18px; padding: 10px 0 18px; background: var(--panel)">
+    <p id="checks-summary" style="flex: 1 1 200px; margin: 0"></p>
+    <button type="button" onclick="document.getElementById('checks-dialog').close()">Close</button>
+  </div>
 </dialog>
 <script>
 const OmniaChecks = {

@@ -1,7 +1,11 @@
 {# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C · SPDX-License-Identifier: AGPL-3.0-or-later -#}
 {# Line charts for the load samples: one series per chart (CPU and memory
-   have different units, so they never share an axis), or two of the same
-   unit (network received and sent: opts.also). #}
+   have different units, so they never share an axis), or more of the same
+   unit: a second (network received and sent: opts.also), or any number of
+   lines over the main one (the shares of the machine's CPU: opts.lines,
+   each {cls: "c2".."c8", value: (point) => number or null}; a null breaks
+   the line). OmniaCharts.legend(el, items) writes their legend: items
+   [{label, cls ("s1", "s2", "c2"...), value: text}]. #}
 <script>
 const OmniaCharts = (function () {
   const NS = "http://www.w3.org/2000/svg";
@@ -22,8 +26,8 @@ const OmniaCharts = (function () {
   }
 
   // Draw points[key] into the svg. opts: {spark, unit, format, minMax,
-  // also: a second key on the same axis, tip: (point) => tooltip text,
-  // padLeft: room for longer y axis labels}
+  // also: a second key on the same axis, lines: more lines on the same
+  // axis, tip: (point) => tooltip text, padLeft: room for longer y axis labels}
   function draw(svg, points, key, opts) {
     opts = opts || {};
     const fmt = opts.format || ((v) => v.toFixed(1));
@@ -44,7 +48,9 @@ const OmniaCharts = (function () {
       return;
     }
     const t0 = data[0].t, t1 = data[data.length - 1].t;
-    const max = niceMax(Math.max(opts.minMax || 0, ...keys.flatMap((k) => data.map((p) => p[k] || 0))));
+    const lines = opts.lines || [];
+    const max = niceMax(Math.max(opts.minMax || 0, ...keys.flatMap((k) => data.map((p) => p[k] || 0)),
+                                 ...lines.flatMap((l) => data.map((p) => l.value(p) || 0))));
     const x = (t) => pad.l + (t1 === t0 ? 0 : (t - t0) / (t1 - t0)) * (W - pad.l - pad.r);
     const y = (v) => H - pad.b - (v / max) * (H - pad.t - pad.b);
 
@@ -67,6 +73,17 @@ const OmniaCharts = (function () {
     const base = y(0).toFixed(1);
     svg.appendChild(el("path", {d: `${line}L${x(t1).toFixed(1)},${base}L${x(t0).toFixed(1)},${base}Z`, class: "chart-area"}));
     if (opts.also) svg.appendChild(el("path", {d: path(opts.also), class: "chart-line chart-line-2"}));
+    for (const l of lines) {
+      // a point without the value (not measured then) breaks the line
+      let d = "", gap = true;
+      for (const p of data) {
+        const v = l.value(p);
+        if (v === null || v === undefined) { gap = true; continue; }
+        d += `${gap ? "M" : "L"}${x(p.t).toFixed(1)},${y(v).toFixed(1)}`;
+        gap = false;
+      }
+      if (d) svg.appendChild(el("path", {d, class: `chart-line ${l.cls}`}));
+    }
     svg.appendChild(el("path", {d: line, class: "chart-line"}));
     const last = data[data.length - 1];
     svg.appendChild(el("circle", {cx: x(last.t), cy: y(last[key]), r: opts.spark ? 2.5 : 4, class: "chart-dot"}));
@@ -99,6 +116,19 @@ const OmniaCharts = (function () {
       if (tip) tip.hidden = true;
     });
   }
-  return {draw};
+  // the legend of a chart's lines, with each one's value
+  function legend(box, items) {
+    box.replaceChildren(...items.map((item) => {
+      const entry = document.createElement("span");
+      const key = document.createElement("span");
+      key.className = "key " + item.cls;
+      const value = document.createElement("span");
+      value.className = "mono";
+      value.textContent = item.value;
+      entry.append(key, item.label, value);
+      return entry;
+    }));
+  }
+  return {draw, legend};
 })();
 </script>

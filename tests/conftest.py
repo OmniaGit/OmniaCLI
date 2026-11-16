@@ -1,13 +1,17 @@
 # Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C
 # SPDX-License-Identifier: AGPL-3.0-or-later
+import io
 import os
 import subprocess
+import zipfile
 from pathlib import Path
 
 import pytest
 import yaml
 
+from omniacli import config, workspacehelper
 from omniacli.auth import hash_password, hash_token
+from omniacli.composehelper import HelperError
 from omniacli.config import Restart, parse_settings
 
 PASSWORD = "secret"
@@ -46,6 +50,26 @@ def make_remote(base: Path, name: str) -> Path:
 def clone(remote: Path, dest: Path, branch: str) -> Path:
     sh("git", "clone", "-q", "-b", branch, str(remote), str(dest))
     return dest
+
+
+# the storages' binds (workspacehelper.bind_storage) need root and systemd: in
+# the tests a storage is used where it is, its folder, still one of
+# workspaces.storage (name: folder); a test that uses the folder as the name
+# finds its root path there too. The real ones are tested with these
+# (test_stacktemplates, storage binds)
+REAL_BOUND_ROOT = config.bound_root
+REAL_BIND_STORAGE = workspacehelper.bind_storage
+
+
+@pytest.fixture(autouse=True)
+def storage_where_it_is(monkeypatch):
+    def bind_storage(storage):
+        roots = workspacehelper.storage_roots()
+        if storage not in roots:
+            raise HelperError(f"{storage} is not a storage of workspaces.storage of {workspacehelper.SYSTEM_CONFIG}")
+        return Path(roots[storage])
+    monkeypatch.setattr(config, "bound_root", lambda storage: storage)
+    monkeypatch.setattr(workspacehelper, "bind_storage", bind_storage)
 
 
 @pytest.fixture(autouse=True)
@@ -91,6 +115,21 @@ def fake_venv(tmp_path) -> Path:
     for script in bin_dir.iterdir():
         script.chmod(0o755)
     return bin_dir
+
+
+def fake_backups_are(venv_bin: Path, content: bytes | None = None) -> bytes:
+    """The fake click-odoo-backupdb writes content: by default a zip Odoo could
+    read, as a restore of a backup from another machine asks. What it writes."""
+    if content is None:
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as zf:
+            zf.writestr("dump.sql", "-- dump")
+        content = buffer.getvalue()
+    made = venv_bin / "backup-content"
+    made.write_bytes(content)
+    script = venv_bin / "click-odoo-backupdb"
+    script.write_text(script.read_text().replace('echo dump > "$last"', f'cp {made} "$last"'))
+    return content
 
 
 @pytest.fixture
@@ -172,6 +211,8 @@ def env(tmp_path, fake_venv, restart_calls):
             "backup_dir": str(tmp_path / "backups"),
             "jobs_dir": str(tmp_path / "jobs"),
             "servers_file": "servers.yaml",
+            # the shells open: test_machine.py closes them
+            "machine": "development",
         },
         base_dir=servers_file.parent,
     )

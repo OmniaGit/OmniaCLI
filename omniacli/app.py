@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import functools
 import importlib.metadata
 import importlib.util
@@ -14,7 +15,10 @@ import logging
 import os
 import pwd
 import re
+import shutil
+import tempfile
 import time
+import zipfile
 from dataclasses import asdict
 from pathlib import Path
 from typing import Optional
@@ -28,51 +32,60 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from fastapi.templating import Jinja2Templates
 from starlette.background import BackgroundTask
-from starlette.requests import HTTPConnection
+from starlette.requests import ClientDisconnect, HTTPConnection
 
-from . import checks, consumer, disks, linkcopy, ops, packages, plugins, pluginstore, puller, publisher, schedules, selflog, shell, tunnel
+from . import (backupchoices, checks, private, restoreroom, consumer, disks, gitcredentials, linkcopy, listgroups, ops, packages, plugins, pluginstore, puller, publisher,
+               schedules, selflog, sshlinks, shell, stacktemplates, templatestore, tunnel, workspacehelper, workspaceops)
 from .accesslog import AccessLog
 from .diskhistory import DiskHistory, DiskRecorder
 from .auth import ROLES as ACCESS_ROLES
-from .auth import Authenticator, Principal, hash_password, hash_token, new_token, verify_password
+from .auth import WORKSPACE_ROLE, Authenticator, Principal, hash_password, hash_token, new_token, verify_password
 from .config import (
     PUBLISHED_COMMANDS,
     PULLER_FILE_MIB,
     PULLER_KEEP_HOURS,
     ROLES,
     SERVER_NAME,
+    MACHINE_DEVELOPMENT,
     SHELL_FONT_SIZE,
     SHELL_FONT_SIZES,
     TUNNEL_IDLE_HOURS,
+    USER_ROLES,
+    WORKSPACE_LIMITS,
     Access,
+    CERTIFICATES,
     ConfigError,
     Instance,
     LinkAccess,
     LinkTarget,
     Settings,
+    TEST_LABEL,
     TOKEN_DEFAULT_ROLE,
+    WORKSPACE_NAME,
+    Workspace,
     load_settings,
     matches,
-    parse_groups,
     parse_link,
     parse_connection,
     parse_options,
     parse_publication,
     parse_puller,
     parse_servers,
+    parse_workspaces,
     save_access,
     save_connections,
-    save_groups,
     save_links,
     save_options,
     save_publications,
+    web_names,
     save_pullers,
     save_servers,
+    save_workspaces,
     server_text,
     server_to_dict,
 )
-from .jobs import JobManager, filter_jobs
-from .plugin_api import ENTRY_POINT_GROUP, PLUGIN_API, ActionRefused, Host
+from .jobs import JobFailed, JobManager, filter_jobs
+from .plugin_api import ENTRY_POINT_GROUP, PLUGIN_API, ActionRefused, Host, restore_fetched
 from .pullcrypto import new_key
 from .links import LIST_TIMEOUT, LinkClients, describe_error, link_headers, proxy_websocket
 from .logtail import read_since
@@ -93,9 +106,15 @@ def _page_context(request: Request) -> dict:
         "console_font": settings.options.shell_font_size if settings else SHELL_FONT_SIZE,
         "console_font_sizes": SHELL_FONT_SIZES,
         "can_act": bool(user and user.can("developer")),
+        # a shell of OmniaCLI's own user: not on a server
+        "own_user_shells": bool(settings and settings.machine == MACHINE_DEVELOPMENT),
         # restart, start and stop: every role; an MCP token only reads
         "can_restart": bool(user and user.kind != "token"),
         "is_admin": bool(user and user.can("admin")),
+        # a user of workspaces: none of the machine's menus and consoles
+        "scoped": bool(user and user.scoped),
+        # the workspaces whose users it manages (admin there)
+        "my_workspaces": [ws for ws, role in user.workspaces if role == "admin"] if user and user.scoped else [],
         # a user who logged in with a password (not a token or a link)
         "account": user.name if user and user.kind == "user" else None,
         # in the footer of every page after the login
@@ -129,6 +148,8 @@ _TEMPLATES = Jinja2Templates(
 # centred on a transparent square); served without login, like any favicon.
 _STATIC = Path(__file__).parent / "static"
 _BACKUP_NAME = re.compile(r"[A-Za-z0-9._-]+\.zip")
+# a value of a checklist field (backup_fields): a name, schema.table.column
+_CHECKLIST_VALUE = re.compile(r"[A-Za-z0-9_.$:-]{1,200}")
 # the terminal of the shell page: xterm.js 6.0.0 and its fit addon 0.11.0
 # (npm @xterm/xterm and @xterm/addon-fit, MIT), served after the login
 _STATIC_FILES = {"xterm.js": "text/javascript", "xterm.css": "text/css", "addon-fit.js": "text/javascript"}
@@ -152,6 +173,30 @@ _MIN_PASSWORD = 8
 _LINK_REQUEST_HEADERS = ("content-type", "accept", "accept-language")
 _LINK_RESPONSE_HEADERS = ("content-type", "content-disposition", "content-length",
                           "content-encoding", "location", "cache-control")
+# the only routes a user of workspaces reaches (in_workspaces): its account,
+# the lists (they show its workspaces' servers only), and what a server of
+# its workspaces offers, with its role in that workspace. Not the consoles
+# (a shell of this machine), the copy from a link, the tunnels, the
+# machine's pages and the configuration.
+WORKSPACE_ROUTES = frozenset({
+    "/logout", "/account", "/api/account/password", "/static/{name}", "/x/{plugin}/static/{path:path}",
+    "/", "/dashboard/servers", "/api/servers", "/api/metrics",
+    "/jobs", "/jobs/{job_id}", "/jobs/{job_id}/stop", "/api/jobs", "/api/jobs/{job_id}",
+    "/servers/{server}", "/servers/{server}/merge", "/servers/{server}/x/{plugin}/{action}",
+    "/servers/{server}/{role}/pull", "/servers/{server}/{role}/pull-restart",
+    "/api/servers/{server}/{role}/pull-preview",
+    "/servers/{server}/{role}/restart", "/servers/{server}/{role}/start", "/servers/{server}/{role}/stop",
+    "/servers/{server}/{role}/backup", "/api/servers/{server}/{role}/backups",
+    "/backups/{server}/{role}/{name}", "/servers/{server}/{role}/x/{plugin}/{action}",
+    "/servers/{server}/{role}/log", "/api/servers/{server}/{role}/log",
+    "/workspaces/{workspace}", "/api/workspaces/{workspace}/members/save",
+    "/api/workspaces/{workspace}/members/delete", "/api/workspaces/{workspace}/instances/create",
+    "/api/workspaces/{workspace}/instances/delete", "/api/workspaces/{workspace}/web/save",
+    "/api/workspaces/{workspace}/web/publish", "/api/workspaces/{workspace}/web/certificate",
+    "/api/workspaces/{workspace}/credentials/save", "/api/workspaces/{workspace}/credentials/delete",
+    "/api/workspaces/{workspace}/repositories/add", "/api/workspaces/{workspace}/repositories/remove",
+    "/api/workspaces/{workspace}/parameters/save", "/api/workspaces/{workspace}/load",
+})
 
 
 _logger = logging.getLogger(__name__)
@@ -162,6 +207,17 @@ def _field_value(field, raw):
     a dialog's script JSON); ActionRefused when it cannot be one."""
     if field.kind == "checkbox":
         return raw not in (None, False, "", "0", "false", "off")
+    if field.kind == "checklist":
+        # the values ticked: a list (JSON), or one text of them separated by
+        # commas (a form); not posted: None, nobody chose
+        if raw is None:
+            return None
+        items = raw if isinstance(raw, list) else str(raw).split(",")
+        values = [str(v).strip() for v in items if str(v).strip()]
+        bad = [v for v in values if not _CHECKLIST_VALUE.fullmatch(v)]
+        if bad:
+            raise ActionRefused(f"{field.label}: {', '.join(bad)} is not a value of the list")
+        return values
     if raw is None:
         # not posted (a script that leaves it out): its default
         raw = field.default
@@ -188,6 +244,7 @@ def _field_dict(field) -> dict:
             "required": field.required, "placeholder": field.placeholder, "help": field.help,
             "choices": [list(c) for c in field.choices], "restart_types": list(field.restart_types),
             "disabled_placeholder": field.disabled_placeholder,
+            "shown_with": field.shown_with, "threshold": field.threshold,
             "buttons": [{"label": b.label, "route": b.route, "title": b.title, "confirm": b.confirm,
                          "only_with_value": b.only_with_value} for b in field.buttons]}
 
@@ -211,6 +268,41 @@ def _same_origin(request: Request) -> bool:
     return urlsplit(source).netloc == request.headers.get("host")
 
 
+# what a request does not say in its path: never a password, a token or a key
+_AUDIT_FIELDS = ("name", "role", "host", "server", "kind")
+_AUDIT_MAX_BODY = 64 * 1024
+# polled, or they change nothing: an access log full of them would hide the rest
+_NOT_AUDITED = re.compile(r"/logout|/api/pullers/[^/]+/producer|/api/servers/(check|branches)")
+
+
+async def _audit_target(request: Request) -> str:
+    """ name=... role=... of a small JSON request, for the access log."""
+    if "json" not in request.headers.get("content-type", ""):
+        return ""
+    length = request.headers.get("content-length", "")
+    if not length.isdigit() or int(length) > _AUDIT_MAX_BODY:
+        return ""
+    try:
+        body = json.loads(await request.body())
+    except ValueError:
+        return ""
+    if not isinstance(body, dict):
+        return ""
+    return "".join(f" {key}={body[key]}" for key in _AUDIT_FIELDS if isinstance(body.get(key), (str, int)))
+
+
+# on the 401 of a browser without a session (not on a link's or a token's)
+_LOGIN_HEADER = "X-OmniaCLI-Login"
+
+
+def _referer_path(request: Request) -> str:
+    """The page of this site a request was sent from, "/" otherwise."""
+    referer = urlsplit(request.headers.get("referer", ""))
+    if referer.netloc != request.headers.get("host"):
+        return "/"
+    return _next_path(referer.path + (f"?{referer.query}" if referer.query else ""))
+
+
 def _next_path(value: str) -> str:
     """Where to go after the login: a path of this site only, never another site."""
     value = value or "/"
@@ -226,12 +318,37 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
 
     authenticator = Authenticator(settings.users, settings.tokens, link_hashes())
     jobs = JobManager(settings.jobs_dir)
+    gitcredentials.bind(settings)
     updater = AutoUpdater(settings, jobs)
-    sampler = Sampler(settings)
+    async def workspace_networks() -> dict[str, list[str]]:
+        """{workspace: the networks of its projects}, from the root helper."""
+        found = await workspaceops.space()
+        networks: dict[str, list[str]] = {}
+        for root in found.get("roots", []):
+            networks.update(root.get("networks") or {})
+        return networks
+
+    sampler = Sampler(settings, networks=workspace_networks)
     # the disks once a day, next to the jobs like the sessions
     disk_history = DiskHistory(settings.jobs_dir.parent / "disk_history.json")
-    disk_recorder = DiskRecorder(settings, disk_history)
+    async def workspace_disks() -> list[dict]:
+        """[{name, used, capacity}] of the workspaces' disks, from the root
+        helper: capacity is disk_gb, or the image's size without one."""
+        found = await workspaceops.space()
+        result = []
+        for ws in settings.workspaces.values():
+            if not ws.storage or settings.storage_problem(ws):
+                continue
+            r = workspaceops.room(found, settings.workspaces, ws.storage, ws.name)
+            capacity = workspaceops.limit_bytes(ws) or (r or {}).get("own_size", 0)
+            if r is not None and capacity:
+                result.append({"name": ws.name, "used": r["own_used"], "capacity": capacity})
+        return result
+
+    disk_recorder = DiskRecorder(settings, disk_history, workspaces=workspace_disks)
     link_clients = LinkClients(link_transport)
+    # the links through SSH: their ssh -L, and OmniaCLI's key, next to the links file
+    ssh_tunnels = sshlinks.SshTunnels((settings.links_file or settings.servers_file).parent / "ssh")
     # the pullers of relays this one is a consumer of: their state next to the jobs
     consumers = consumer.Consumers(settings, link_clients, settings.jobs_dir.parent / "connections")
     # the scheduled actions; a schedules file that cannot be read is shown on
@@ -299,10 +416,74 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         # a browser: the session of the login form
         name = sessions.user(request.cookies.get(COOKIE), settings.users)
         if name is None:
-            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Login required")
+            # marked, so the pages' scripts tell it from a link's or a token's 401
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Login required", headers={_LOGIN_HEADER: "required"})
         if method not in ("GET", "HEAD") and not _same_origin(request):
             raise HTTPException(status.HTTP_403_FORBIDDEN, "Cross-site request refused")
-        return Principal(name, settings.user_role(name))
+        role = settings.user_role(name)
+        if role == WORKSPACE_ROLE:
+            # its role is decided for each request (in_workspaces)
+            return Principal(name, "user", workspaces=settings.memberships(name), scoped=True)
+        return Principal(name, role)
+
+    def in_workspaces(request: HTTPConnection, user: Principal) -> Principal:
+        """A user of workspaces only reaches the routes of WORKSPACE_ROUTES,
+        and of them only what is in its workspaces, with its role there; any
+        other route is refused (a route added later is closed until it is
+        listed there)."""
+        route = request.scope.get("route")
+        path = getattr(route, "path", None)
+        params = request.scope.get("path_params") or {}
+        allowed = path in WORKSPACE_ROUTES or (
+            # a plugin's own routes, of an instance only
+            path is not None and path.startswith("/x/") and "server" in params and "role" in params)
+        if not allowed:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Not open to the users of workspaces")
+        if "server" in params:
+            names = [str(params["server"])]
+        elif "job_id" in params:
+            job = jobs.get(str(params["job_id"]))
+            if job is not None and job.workspace:
+                # an instance created or removed: its server is not the workspace's before or after
+                role = user.workspace_role(job.workspace)
+                if role is None:
+                    raise HTTPException(status.HTTP_403_FORBIDDEN, "Not a workspace of yours")
+                return dataclasses.replace(user, role=role)
+            # a job of none of its servers is refused like one that does not exist
+            names = job.servers if job is not None and job.servers else [""]
+        elif "workspace" in params:
+            role = user.workspace_role(str(params["workspace"]))
+            if role is None:
+                raise HTTPException(status.HTTP_403_FORBIDDEN, "Not a workspace of yours")
+            return dataclasses.replace(user, role=role)
+        else:
+            # a list (Dashboard, jobs, account): it shows only its workspaces' servers
+            return user
+        roles = []
+        for name in names:
+            workspace = settings.workspace_of(name)
+            role = user.workspace_role(workspace) if workspace else None
+            if role is None:
+                raise HTTPException(status.HTTP_403_FORBIDDEN, "Not a server of your workspaces")
+            roles.append(role)
+        # a job of several servers: the lowest of its roles there
+        return dataclasses.replace(user, role=min(roles, key=ACCESS_ROLES.index))
+
+    def visible_servers(user: Principal | None) -> set[str] | None:
+        """The servers user may see: None, all of them (a user of the machine)."""
+        if user is None or not user.scoped:
+            return None
+        mine = {ws for ws, _ in user.workspaces}
+        return {srv for ws in settings.workspaces.values() if ws.name in mine for srv in ws.servers}
+
+    def visible_jobs(user: Principal | None, found: list) -> list:
+        """Of found, the jobs user may see: for a user of workspaces, those of
+        its workspaces and those whose every server is in its workspaces."""
+        shown = visible_servers(user)
+        if shown is None:
+            return found
+        mine = {ws for ws, _ in user.workspaces}
+        return [j for j in found if (j.workspace and j.workspace in mine) or (j.servers and set(j.servers) <= shown)]
 
     def current_user(request: HTTPConnection) -> Principal:
         ip = request.client.host if request.client else ""
@@ -321,6 +502,13 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             # a link (with who acts there through it) or a token: a login is
             # its first request after a pause; a user's login is the form's
             access_log.seen(user.kind, user.name, ip, user.on_behalf)
+        if user.scoped:
+            try:
+                user = in_workspaces(request, user)
+            except HTTPException as exc:
+                if isinstance(request, WebSocket):
+                    raise WebSocketException(1008, exc.detail) from None
+                raise
         request.state.user = user
         return user
 
@@ -347,11 +535,17 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
         own_log = selflog.attach(own_log_file)
+        _logger.warning("this machine is a %s: shells of OmniaCLI's own user %s", settings.machine,
+                        "open" if settings.machine == MACHINE_DEVELOPMENT else "closed")
+        for ws in settings.workspaces.values():
+            if settings.storage_problem(ws):
+                _logger.warning("workspace %s cannot be used: %s", ws.name, settings.storage_problem(ws))
         updater.start()
         scheduler.start()
         sampler.start()
         disk_recorder.start()
         tunnels.start()
+        ssh_tunnels.sync(settings.link_targets)
         pullers.start()
         publications.start()
         consumers.start()
@@ -365,6 +559,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         await publications.stop()
         await pullers.stop()
         await tunnels.stop()
+        await ssh_tunnels.close()
         await disk_recorder.stop()
         await sampler.stop()
         await updater.stop()
@@ -385,6 +580,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
     app.state.disk_history, app.state.disk_recorder = disk_history, disk_recorder
     app.state.access_log = access_log
     app.state.tunnels = tunnels
+    app.state.ssh_tunnels = ssh_tunnels
     app.state.pullers, app.state.publications, app.state.consumers = pullers, publications, consumers
     app.state.sessions, app.state.authenticator = sessions, authenticator
 
@@ -400,13 +596,33 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             response.headers.setdefault("Strict-Transport-Security", "max-age=31536000")
         return response
 
+    @app.middleware("http")
+    async def audit_actions(request: Request, call_next):
+        """Every request that changes something, by whoever passed the login,
+        in the access log: a route added later is logged by itself."""
+        if request.method in ("GET", "HEAD") or _NOT_AUDITED.fullmatch(request.url.path):
+            return await call_next(request)
+        target = await _audit_target(request)
+        response = await call_next(request)
+        user = getattr(request.state, "user", None)
+        if user is not None:
+            who = f" for {user.on_behalf}" if user.on_behalf else ""
+            access_log.record("action", user.kind, user.name, request.client.host if request.client else "",
+                              f"{request.method} {request.url.path}{target} -> {response.status_code}{who}"[:300])
+        return response
+
     @app.exception_handler(StarletteHTTPException)
     async def to_login(request: Request, exc: StarletteHTTPException):
-        """A browser without a session opening a page goes to the login form."""
-        if (exc.status_code == 401 and request.method == "GET"
+        """A browser without a session goes to the login form: a page it opens
+        comes back after it; a form it sends (a button: Stop, Start, ...) is not
+        sent again, the login goes back to the page the form was on."""
+        if (exc.status_code == 401 and (exc.headers or {}).get(_LOGIN_HEADER)
                 and "text/html" in request.headers.get("accept", "")
                 and not request.headers.get("authorization")):
-            target = request.url.path + (f"?{request.url.query}" if request.url.query else "")
+            if request.method == "GET":
+                target = request.url.path + (f"?{request.url.query}" if request.url.query else "")
+            else:
+                target = _referer_path(request)
             return RedirectResponse(f"/login?next={quote(target)}", status.HTTP_303_SEE_OTHER)
         return await http_exception_handler(request, exc)
 
@@ -551,15 +767,19 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         found = await asyncio.gather(*(one(link) for link in settings.link_targets.values()))
         return [row for rows in found for row in rows]
 
-    async def server_sections(request: Request, q: str, me: Principal, with_links: bool) -> dict:
-        """The Dashboard's server tables: this instance's live servers, and
-        with_links those of every link (asked to them), filtered by text (link,
-        name, database, service, repositories and branches)."""
-        live = settings.active_servers()
+    async def server_sections(request: Request, q: str, me: Principal) -> dict:
+        """The Dashboard's server table: this instance's live servers (a
+        linked instance's are on its own Dashboard, opened from Linked),
+        arranged by the groups of the servers list (listgroups.py); the list
+        widget searches them (_list.html), q fills its search. A user of
+        workspaces sees its workspaces' servers only, with no groups."""
+        shown = visible_servers(me)
+        live = [srv for srv in settings.active_servers() if shown is None or srv.name in shown]
         states = await run_states(live)
         rows = [
             {
                 "link": "", "name": srv.name, "label": srv.name, "base": prefix_of(request),
+                "workspace": settings.workspace_of(srv.name) or "",
                 "roles": [r for r in ("production", "test") if r in srv.instances],
                 "busy": {r: jobs.is_busy(i.key) for r, i in srv.instances.items()},
                 "state": {r: states[i.key] for r, i in srv.instances.items()},
@@ -569,45 +789,46 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             }
             for srv in live
         ]
-        remote = await remote_servers(me) if with_links else []
-        errors = [r for r in remote if "error" in r]
-        rows += [r for r in remote if "error" not in r]
-        # each row under the first group that has it, the rest under "Other"
+        groups = settings.groups.get("servers", []) if shown is None else []
         for row in rows:
-            row["group"] = next((g.name for g in settings.groups if g.contains(row["link"], row["name"])), "")
-            row["text"] += " " + row["group"]
-        shown = [r for r in rows if matches(r["text"], q)]
-        sections = [{"name": g.name, "rows": [r for r in shown if r["group"] == g.name]} for g in settings.groups]
-        sections.append({"name": "Other servers" if settings.groups else "",
-                         "rows": [r for r in shown if not r["group"]]})
-        return {
-            "rows": shown,
-            "sections": [sec for sec in sections if sec["rows"]],
-            "link_errors": [e for e in errors if matches(e["link"], q)],
-            "total": len(rows),
-            "q": q,
-            "lazy": False,
-        }
+            # the search finds a server by its workspace and its groups too
+            row["text"] += " " + " ".join([row["workspace"], *group_names(groups, row["name"])])
+        return {"rows": rows, "sections": listgroups.sections(rows, groups, lambda r: r["name"]),
+                "total": len(rows), "q": q}
+
+    def group_names(groups: list, key: str) -> list[str]:
+        """The names of the groups that hold key, from the top down."""
+        for group in groups:
+            if group.contains(key):
+                return [group.name, *group_names(group.groups, key)]
+        return []
 
     @app.get("/")
     async def index(request: Request, q: str = "", me: Principal = Depends(current_user)):
-        """The Dashboard. With links, their servers come after the page
-        (/dashboard/servers): a link that answers slowly never holds it back."""
-        lazy = me.kind == "user" and bool(settings.link_targets)
-        context = await server_sections(request, q, me, with_links=False)
+        """The Dashboard: this instance's servers, its workspaces (for its
+        admins), the machine of each link (Linked), this machine, the jobs."""
+        shown = visible_servers(me)
+        context = await server_sections(request, q, me)
+        links = sorted(settings.link_targets) if me.kind == "user" and shown is None else []
+        linked = [{"name": n, "url": settings.link_targets[n].url} for n in links]
         context.update({
-            "lazy": lazy,
-            # the load and disks of this machine, and of every link (a link
-            # that does not answer says so in its panel)
-            "machine_links": list(settings.link_targets) if me.kind == "user" else [],
-            "jobs": jobs.recent(10),
+            # the load and disks of this machine: not for a user of
+            # workspaces, who sees its own servers only
+            "machine": shown is None,
+            "machine_links": links,
+            "linked_sections": listgroups.sections(linked, settings.groups.get("links", []), lambda r: r["name"]),
+            # the workspaces of this machine, as on the Workspaces page
+            "dashboard_workspaces": workspace_rows() if shown is None and me.can("admin") else [],
+            "jobs": visible_jobs(me, jobs.recent(len(jobs.jobs)))[:10],
+            # a user of workspaces: the load of each of its workspaces instead
+            "load_workspaces": sorted((ws, role) for ws, role in me.workspaces if ws in settings.workspaces) if me.scoped else [],
         })
         return _TEMPLATES.TemplateResponse(request, "index.html", context)
 
     @app.get("/dashboard/servers")
     async def dashboard_servers(request: Request, q: str = "", me: Principal = Depends(current_user)):
-        """The Dashboard's server tables with the links' servers (lazy part)."""
-        context = await server_sections(request, q, me, with_links=True)
+        """The Dashboard's server table again (a job started or ended)."""
+        context = await server_sections(request, q, me)
         return _TEMPLATES.TemplateResponse(request, "_servers_part.html", context)
 
     @app.get("/servers/{server}")
@@ -635,7 +856,8 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         # shown also without a usable link, disabled, saying how to get one
         from_link = {}
         for i in shown:
-            if not (i.plugin.has_restore and me.kind == "user" and me.can(from_link_role(i))):
+            # not for a user of workspaces: the links are the machine's
+            if not (i.plugin.has_restore and me.kind == "user" and not me.scoped and me.can(from_link_role(i))):
                 continue
             src = i.from_link
             if src is None:
@@ -656,11 +878,32 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             elif not known:
                 from_link[i.key]["disabled"] = (f"No link {src.link} here: add it on the Links page, "
                                                 "or change 'Database from link' in the server's form (Edit)")
+        # Restore: for an admin who logs in here
+        restore_file = {}
+        for i in shown:
+            if i.plugin.has_restore and me.kind == "user" and not me.scoped and me.can("admin"):
+                restore_file[i.key] = {
+                    "url": f"{base}/{i.role}/restore",
+                    "upload": f"{prefix_of(request)}/api/servers/{srv.name}/{i.role}/backups/upload",
+                    "backups": f"{prefix_of(request)}/api/servers/{srv.name}/{i.role}/backups",
+                    "database": str(i.plugin.describe(i).get("database") or i.key) if i.role == "production" else ""}
+        # Git pull: with more than one thing to pull, the dialog chooses which
+        pull_choices = {}
+        for i in shown:
+            rows = [{"name": r.name, "label": r.name} for r in i.repositories]
+            if i.package is not None:
+                rows.append({"name": ops.PACKAGE_CHOICE, "label": f"package {i.package.name}"})
+            if len(rows) > 1:
+                pull_choices[i.key] = {
+                    "key": i.key, "rows": rows,
+                    "preview": f"{prefix_of(request)}/api/servers/{srv.name}/{i.role}/pull-preview"}
         return _TEMPLATES.TemplateResponse(
             request,
             "server.html",
             {
                 "from_link": from_link,
+                "pull_choices": pull_choices,
+                "restore_file": restore_file,
                 "restore_fields": [_field_dict(f) for f in plugin.restore_fields()] if plugin else [],
                 "backup_fields": [_field_dict(f) for f in plugin.backup_fields()] if plugin else [],
                 "server": srv,
@@ -698,9 +941,10 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         return {"app": "OmniaCLI", "version": _version(), "caller": str(user), "role": user.role}
 
     @app.get("/api/servers")
-    async def server_list():
+    async def server_list(request: Request):
         """The live servers, with what the Dashboard shows and filters on."""
-        live = settings.active_servers()
+        shown = visible_servers(request.state.user)
+        live = [srv for srv in settings.active_servers() if shown is None or srv.name in shown]
         states = await run_states(live)
         return [
             {
@@ -726,18 +970,20 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         ]
 
     @app.get("/api/metrics")
-    async def metrics(since: int = 0, server: Optional[str] = None, machine_only: bool = False):
+    async def metrics(request: Request, since: int = 0, server: Optional[str] = None, machine_only: bool = False):
         """{cores, interval, machine: [points], instances: {key: {source, points}}};
-        machine_only: no instances (the Dashboard's machine charts)."""
+        machine_only: no instances (the Dashboard's machine charts). A user
+        of workspaces gets its instances only, and not the machine's load."""
+        shown = visible_servers(request.state.user)
         data = {}
         for inst in [] if machine_only else settings.all_instances():
-            if server is None or inst.server == server:
+            if (server is None or inst.server == server) and (shown is None or inst.server in shown):
                 data[inst.key] = {
                     "source": sampler.source.get(inst.key, ""),
                     "points": sampler.series(inst.key, since),
                 }
-        return {"cores": sampler.cores, "interval": 5, "machine": sampler.machine_series(since),
-                "instances": data}
+        return {"cores": sampler.cores, "interval": 5,
+                "machine": sampler.machine_series(since) if shown is None else [], "instances": data}
 
     @app.get("/api/disks")
     async def disk_space():
@@ -750,37 +996,72 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
 
     @app.get("/api/disks/history")
     async def disk_history_json():
-        """Every disk's daily points (up to three years) and its forecast."""
-        return {"disks": disk_history.series()}
+        """Every disk's daily points (up to three years) and its forecast,
+        and the workspaces' disks the same way."""
+        return {"disks": disk_history.series(), "workspaces": disk_history.workspace_series(settings.workspaces)}
 
     @app.get("/disks")
     async def disks_page(request: Request):
         """The history of this machine's disks, and when each will be full."""
         return _TEMPLATES.TemplateResponse(request, "disks.html", {})
 
+    async def pull_choice(request: Request, instance: Instance) -> set[str] | None:
+        """The repositories chosen in the pull dialog (fields repo, with
+        chosen=1); None: all of them and the package (Pull all, a post with
+        no body)."""
+        form = parse_qs((await request.body()).decode("utf-8", "replace"))
+        if (form.get("chosen") or [""])[-1] != "1":
+            return None
+        known = {r.name for r in instance.repositories} | (
+            {ops.PACKAGE_CHOICE} if instance.package is not None else set())
+        only = set(form.get("repo") or [])
+        unknown = sorted(only - known)
+        if unknown:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                                f"{instance.key} has no repository {', '.join(unknown)}")
+        if not only:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Choose at least one repository")
+        return only
+
+    def pull_title(what: str, instance: Instance, only: set[str] | None) -> str:
+        if only is None:
+            return f"{what} {instance.key}"
+        names = [r.name for r in instance.repositories if r.name in only]
+        if ops.PACKAGE_CHOICE in only:
+            names.append(f"package {instance.package.name}")
+        return f"{what} {instance.key} ({', '.join(names)})"
+
+    @app.get("/api/servers/{server}/{role}/pull-preview")
+    async def pull_preview(server: str, role: str, user: Principal = Depends(developer)):
+        """The pull dialog's list: each repository with the commits not yet
+        pulled (a git fetch), and the package."""
+        return {"rows": await ops.pull_preview(get_instance(server, role))}
+
     @app.post("/servers/{server}/{role}/pull")
     async def action_pull(request: Request, server: str, role: str, user: Principal = Depends(developer)):
         instance = get_instance(server, role)
+        only = await pull_choice(request, instance)
         return started(
             request,
             jobs.submit(
-                f"Git pull {instance.key}",
+                pull_title("Git pull", instance, only),
                 [instance.key],
                 f"manual: {user}",
-                lambda job: ops.pull(job, instance),
+                lambda job: ops.pull(job, instance, only),
             )
         )
 
     @app.post("/servers/{server}/{role}/pull-restart")
     async def action_pull_restart(request: Request, server: str, role: str, user: Principal = Depends(developer)):
         instance = get_instance(server, role)
+        only = await pull_choice(request, instance)
         return started(
             request,
             jobs.submit(
-                f"Git pull and restart {instance.key}",
+                pull_title("Git pull and restart", instance, only),
                 [instance.key],
                 f"manual: {user}",
-                lambda job: ops.pull_restart(job, instance),
+                lambda job: ops.pull_restart(job, instance, only=only),
             )
         )
 
@@ -831,6 +1112,61 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             )
         )
 
+    @app.get("/api/servers/{server}/{role}/backup/choices")
+    async def backup_choices(server: str, role: str, key: str = "", user: Principal = Depends(developer)):
+        """What the backup dialog opens with: the instance's last choice
+        (remembered) and, for key, the rows of that checklist field."""
+        instance = get_instance(server, role)
+        remembered = backupchoices.load(backup_folder(instance))
+        out = {"remembered": {"values": remembered.get("values") or {}, "shown": remembered.get("shown") or {},
+                              "user": remembered.get("user"), "saved": remembered.get("saved")}}
+        if key:
+            field = next((f for f in instance.plugin.backup_fields() if f.key == key and f.kind == "checklist"), None)
+            if field is None:
+                return refuse(f"{instance.plugin.label} has no list {key} in its backup")
+            try:
+                found = await instance.plugin.backup_choices(instance, key)
+                out.update(rows=found["rows"], total=found.get("total"), total_label=found.get("total_label"))
+            except JobFailed as exc:
+                return refuse(str(exc))
+        return out
+
+    @app.get("/api/servers/{server}/{role}/backup/estimate")
+    async def backup_estimate(server: str, role: str, user: Principal = Depends(developer)):
+        """What a backup of the instance would hold, for the previews of the
+        dialogs (plugin_api.backup_estimate), with the rows of its lists the
+        instance's last backup dialog ticks (backupchoices) and that choice."""
+        instance = get_instance(server, role)
+        try:
+            found = await instance.plugin.backup_estimate(instance)
+        except JobFailed as exc:
+            return refuse(str(exc))
+        remembered = backupchoices.load(backup_folder(instance))
+        fields = {f.key: f for f in instance.plugin.backup_fields()}
+        ticked = {}
+        for key, rows in (found.get("lists") or {}).items():
+            field = fields.get(key)
+            threshold = fields.get(field.threshold) if field is not None and field.threshold else None
+            megabytes = (remembered.get("values") or {}).get(field.threshold) if threshold else None
+            if megabytes in (None, "") and threshold is not None:
+                megabytes = threshold.default
+            ticked[key] = backupchoices.ticked(rows, remembered, key, megabytes)
+        return {**found, "ticked": ticked,
+                "remembered": {"values": remembered.get("values") or {}, "shown": remembered.get("shown") or {},
+                               "user": remembered.get("user"), "saved": remembered.get("saved")}}
+
+    @app.get("/api/servers/{server}/{role}/restore/room")
+    async def restore_room(server: str, role: str, user: Principal = Depends(developer)):
+        """The disks a restore into the instance writes to, with their room
+        (restoreroom.py)."""
+        instance = get_instance(server, role)
+        try:
+            found = await instance.plugin.restore_room(instance)
+        except JobFailed as exc:
+            return refuse(str(exc))
+        paths = {**(found.get("paths") or {}), "backups": str(backup_folder(instance))}
+        return await restoreroom.room(paths, found.get("freed") or {}, found.get("notes") or [])
+
     @app.post("/servers/{server}/{role}/backup")
     async def action_backup(
         request: Request, server: str, role: str, download: bool = False,
@@ -843,6 +1179,21 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         except ActionRefused as exc:
             return refuse(str(exc))
         chosen = [f.label for f in instance.plugin.backup_fields() if f.kind == "checkbox" and options[f.key]]
+        if raw.get("remember"):
+            # the dialog's choice: it opens with it next time, and the backups
+            # without a dialog take its ticks (backupchoices)
+            # a list not posted (its checkbox off) keeps its last ticks
+            before = backupchoices.load(backup_folder(instance))
+            values, shown = dict(options), {}
+            for f in instance.plugin.backup_fields():
+                if f.kind != "checklist":
+                    continue
+                if values[f.key] is None:
+                    values[f.key] = (before.get("values") or {}).get(f.key)
+                    shown[f.key] = (before.get("shown") or {}).get(f.key) or []
+                else:
+                    shown[f.key] = [v for v in str(raw.get(f"{f.key}__shown") or "").split(",") if v]
+            backupchoices.save(backup_folder(instance), values, shown, user.name)
 
         async def action(job):
             dest = await ops.backup(job, instance, settings.backup_dir, options)
@@ -882,7 +1233,8 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         ]
 
     @app.get("/backups/{server}/{role}/{name}", dependencies=[Depends(developer)])
-    async def backup_download(server: str, role: str, name: str, me: Principal = Depends(current_user)):
+    async def backup_download(request: Request, server: str, role: str, name: str,
+                              me: Principal = Depends(current_user)):
         # an admin also backs up draft servers (MCP), and downloads their backups
         instance = get_instance(server, role, drafts=me.can("admin"))
         folder = backup_folder(instance).resolve()
@@ -890,6 +1242,8 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         # only a zip directly in this instance's backup folder
         if not _BACKUP_NAME.fullmatch(name) or path.parent != folder or not path.is_file():
             raise HTTPException(status.HTTP_404_NOT_FOUND, "No such backup")
+        access_log.record("download", me.kind, me.name, request.client.host if request.client else "",
+                          f"{instance.key}/{name}" + (f" for {me.on_behalf}" if me.on_behalf else ""))
         return FileResponse(path, media_type="application/zip", filename=name)
 
     def from_link_role(instance: Instance) -> str:
@@ -931,8 +1285,11 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             options = {f.key: _field_value(f, raw.get(f.key)) for f in instance.plugin.restore_fields()}
             # the choices of a new backup there, asked as this instance's
             # plugin asks them (an OmniaCLI there without them backs up as usual)
+            # (the checkboxes: the other fields come from the last backup
+            # dialog of the instance there)
             backup_options = {} if backup else {
-                f.key: _field_value(f, raw.get(f.key)) for f in instance.plugin.backup_fields()}
+                f.key: _field_value(f, raw.get(f.key)) for f in instance.plugin.backup_fields()
+                if f.kind == "checkbox"}
         except ActionRefused as exc:
             return refuse(str(exc))
         chosen = [f.label.lower() for f in instance.plugin.backup_fields()
@@ -947,7 +1304,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
                 dest = await consumers.fetch_backup(job, connection.name, backup_folder(instance), progress,
                                                     backup_options, user.name)
                 progress["step"] = "restore"
-                await instance.plugin.restore(job, instance, dest, options)
+                await restore_fetched(job, instance, dest, options)
 
             job = jobs.submit(f"Copy from {src.label} to {instance.key} ({what})",
                               [instance.key], f"manual: {user}", from_puller)
@@ -966,10 +1323,82 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             dest = await linkcopy.fetch_backup(job, link_clients.client(link), link, headers, src,
                                                backup, backup_folder(instance), progress, backup_options)
             progress["step"] = "restore"
-            await instance.plugin.restore(job, instance, dest, options)
+            await restore_fetched(job, instance, dest, options)
 
         job = jobs.submit(f"Copy from {src.label} to {instance.key} ({what})",
                           [instance.key], f"manual: {user}", action)
+        return {"job": job.id}
+
+    def _restorable(instance: Instance) -> Instance:
+        if not instance.plugin.has_restore:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, f"{instance.key} cannot restore a backup")
+        return instance
+
+    @app.post("/api/servers/{server}/{role}/backups/upload")
+    async def backup_upload(request: Request, server: str, role: str, name: str = "",
+                            user: Principal = Depends(admin)):
+        """A backup zip sent by the browser (the raw body), into the instance's
+        backups, through a .part file: whole or absent. An admin's: what is
+        restored runs in the database's tools (a dump.sql goes through psql)."""
+        instance = _restorable(get_instance(server, role))
+        if user.kind != "user":
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Only a user who logs in here may upload a backup")
+        name = re.sub(r"[^A-Za-z0-9._-]", "_", Path(name).name)
+        if not linkcopy.BACKUP_NAME.fullmatch(name):
+            return refuse("The file must be a .zip")
+        folder = private.backup_folder(backup_folder(instance))
+        dest = folder / name
+        if dest.exists():
+            return refuse(f"{name} is in the backups of {instance.key} already: choose it from the list",
+                          status.HTTP_409_CONFLICT)
+        length = request.headers.get("content-length", "")
+        free = shutil.disk_usage(folder).free
+        if length.isdigit() and free - int(length) < puller.MIN_FREE:
+            return refuse(f"{name}: {free >> 20} MiB free here, not enough for {int(length) >> 20} MiB",
+                          status.HTTP_507_INSUFFICIENT_STORAGE)
+        handle, part_name = tempfile.mkstemp(dir=folder, prefix=f"{name}.", suffix=".part")
+        part = Path(part_name)
+        try:
+            with os.fdopen(handle, "wb") as out:
+                async for chunk in request.stream():
+                    out.write(chunk)
+            if not zipfile.is_zipfile(part):
+                return refuse(f"{name} is not a zip file")
+            os.replace(part, dest)
+        except ClientDisconnect:
+            return refuse(f"{name}: the upload was interrupted")
+        finally:
+            part.unlink(missing_ok=True)
+        return {"file": name}
+
+    @app.post("/servers/{server}/{role}/restore")
+    async def action_restore(request: Request, server: str, role: str, user: Principal = Depends(admin)):
+        """Restore a zip of the instance's backups (made here or uploaded)
+        into it, with the choices its plugin asks."""
+        instance = _restorable(get_instance(server, role))
+        if user.kind != "user":
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Only a user who logs in here may restore a backup")
+        raw, _ = await posted_params(request)
+        name = str(raw.get("backup") or "").strip()
+        if not linkcopy.BACKUP_NAME.fullmatch(name):
+            return refuse(f"{name!r} is not the name of a backup zip")
+        path = backup_folder(instance) / name
+        if not path.is_file():
+            return refuse(f"No backup {name} of {instance.key}", status.HTTP_404_NOT_FOUND)
+        problem = instance.plugin.backup_problem(path)
+        if problem:
+            return refuse(problem)
+        if instance.role == "production":
+            # the database it replaces, typed
+            expected = str(instance.plugin.describe(instance).get("database") or instance.key)
+            if str(raw.get("confirm") or "").strip() != expected:
+                return refuse(f"Type {expected} to replace the production database")
+        try:
+            options = {f.key: _field_value(f, raw.get(f.key)) for f in instance.plugin.restore_fields()}
+        except ActionRefused as exc:
+            return refuse(str(exc))
+        job = jobs.submit(f"Restore {name} into {instance.key}", [instance.key], f"manual: {user}",
+                          lambda job: instance.plugin.restore(job, instance, path, options))
         return {"job": job.id}
 
     @app.post("/servers/{server}/merge")
@@ -1174,8 +1603,10 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
     async def job_list(request: Request, server: str = "", q: str = ""):
         """Every job kept, filtered by server and by text (title, started
         by, error, server)."""
-        found = jobs.recent(len(jobs.jobs))
-        names = sorted(set(settings.servers) | {n for j in found for n in j.servers})
+        me = request.state.user
+        found = visible_jobs(me, jobs.recent(len(jobs.jobs)))
+        shown = visible_servers(me)
+        names = sorted((set(settings.servers) if shown is None else shown) | {n for j in found for n in j.servers})
         found = filter_jobs(found, server, q)
         return _TEMPLATES.TemplateResponse(
             request, "jobs.html",
@@ -1203,15 +1634,17 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         return RedirectResponse(f"{prefix_of(request)}/jobs/{job.id}", status.HTTP_303_SEE_OTHER)
 
     @app.get("/api/jobs")
-    async def jobs_json(limit: int = 20):
+    async def jobs_json(request: Request, limit: int = 20):
         """The last jobs, without their logs, and the instances busy now: the
         Dashboard follows them (runners, end notices)."""
-        found = jobs.recent(min(max(limit, 1), 200))
+        me = request.state.user
+        found = visible_jobs(me, jobs.recent(len(jobs.jobs)))[:min(max(limit, 1), 200)]
+        running = visible_jobs(me, [j for j in jobs.jobs.values() if j.status == "running"])
         return {
             "jobs": [{"id": j.id, "title": j.title, "status": j.status, "instances": j.instances,
                       "servers": j.servers, "source": j.source, "created": j.created,
                       "finished": j.finished, "duration": j.duration, "error": j.error} for j in found],
-            "busy": sorted({key for j in jobs.jobs.values() if j.status == "running" for key in j.instances}),
+            "busy": sorted({key for j in running for key in j.instances}),
         }
 
     @app.get("/api/jobs/{job_id}")
@@ -1327,7 +1760,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             was_active = original is not None and settings.servers[original].active
             report = None
             if payload.get("activate"):
-                report = await checks.check_server(parsed, settings.backup_dir)
+                report = await checks.check_server(parsed, settings.backup_dir, settings.machine)
                 if checks.passed(report):
                     parsed.status = "active"
                 elif was_active:
@@ -1346,6 +1779,11 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             error = await store(servers)
             if error:
                 return error
+            # a renamed server stays in its workspace; a new one is in none,
+            # whatever a workspace still names
+            error = await rename_in_workspaces(original, name)
+            if error:
+                return error
         return {
             "ok": True,
             "status": parsed.status,
@@ -1362,7 +1800,11 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             parsed = parse_servers({name: server_data}, settings.logs_dir)[name]
         except (ConfigError, TypeError, ValueError, AttributeError) as exc:
             return refuse(str(exc))
-        report = await checks.check_server(parsed, settings.backup_dir)
+        options = gitcredentials.options_for(settings, name)
+        for inst in (parsed.production, parsed.test):
+            for repo in (inst.repositories if inst is not None else []):
+                repo.git_options = options
+        report = await checks.check_server(parsed, settings.backup_dir, settings.machine)
         return {"ok": checks.passed(report), "checks": [c.to_dict() for c in report]}
 
     @app.post("/api/servers/branches", dependencies=[Depends(admin)])
@@ -1374,7 +1816,9 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             return refuse("Type the repository's full path first")
         if remote.startswith("-"):
             return refuse(f"Invalid remote {remote}")
-        data = await ops.remote_branches(Path(path), remote, checks.GIT_TIMEOUT)
+        server = str(payload.get("server") or "")
+        options = gitcredentials.options_for(settings, server) if SERVER_NAME.fullmatch(server) else ()
+        data = await ops.remote_branches(Path(path), remote, checks.GIT_TIMEOUT, options)
         if "error" in data:
             return refuse(data["error"])
         return data
@@ -1383,6 +1827,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         """Write the servers file and make it current (OSError when it cannot)."""
         save_servers(settings.servers_file, servers)
         settings.servers = servers
+        gitcredentials.bind(settings)
         await updater.reload()
 
     async def store(servers):
@@ -1472,7 +1917,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             srv = settings.servers.get(name)
             if srv is None:
                 return refuse(f"No server {name}", status.HTTP_404_NOT_FOUND)
-            report = await checks.check_server(srv, settings.backup_dir)
+            report = await checks.check_server(srv, settings.backup_dir, settings.machine)
             ok = checks.passed(report)
             if ok and not srv.active:
                 srv.status = "active"
@@ -1509,7 +1954,783 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             error = await store(servers)
             if error:
                 return error
+            # out of its workspace: a later server of the same name is not in it
+            error = await rename_in_workspaces(name, None)
+            if error:
+                return error
         return {"ok": True}
+
+    # --- workspaces -------------------------------------------------------
+
+    workspaces_lock = asyncio.Lock()
+
+    async def store_workspaces(found: dict[str, Workspace]):
+        """Write the workspaces file and make it current; a response on error."""
+        try:
+            await asyncio.to_thread(save_workspaces, settings.workspaces_file, found)
+        except OSError as exc:
+            return refuse(f"Cannot write {settings.workspaces_file}: {exc}", 500)
+        settings.workspaces = found
+        gitcredentials.bind(settings)
+        return None
+
+    async def rename_in_workspaces(old: str | None, new: str | None):
+        """The server old is now new (None: deleted); a new server (old None)
+        leaves any workspace that still names it."""
+        if old == new:
+            return None
+        async with workspaces_lock:
+            changed = {}
+            for ws in settings.workspaces.values():
+                # a workspace naming new still (a deleted server's leftover) loses it
+                names = [s for s in ws.servers if new is None or s != new]
+                if old is not None:
+                    names = [n for n in (new if s == old else s for s in names) if n is not None]
+                changed[ws.name] = names_follow(ws, dataclasses.replace(ws, servers=names), old, new)
+            if changed == settings.workspaces:
+                return None
+            return await store_workspaces(changed)
+
+    def names_follow(before: Workspace, ws: Workspace, old: str | None, new: str | None) -> Workspace:
+        """The main instance and the subdomains of ws after the server old
+        became new (None: deleted): renamed with it, or dropped."""
+        prefix = f"{ws.name}-"
+        gone = old[len(prefix):] if old and old in before.servers and old.startswith(prefix) else None
+        now = new[len(prefix):] if new and new in ws.servers and new.startswith(prefix) else None
+        main = (now or "") if gone and ws.main == gone else ws.main
+        subdomains = {sub: (now if gone and target == gone else target) for sub, target in ws.subdomains.items()}
+        instances = ws.instances()
+        return dataclasses.replace(
+            ws, main=main if main in instances else "",
+            subdomains={s: t for s, t in subdomains.items() if t in instances and s not in instances})
+
+    def submit_publish(ws: Workspace, source: str):
+        """A job: the workspace's nginx site and certificate, as it is when the job runs."""
+        async def action(job):
+            current = settings.workspaces.get(ws.name)
+            if current is None:
+                raise JobFailed(f"no workspace {ws.name}")
+            job.result = await workspaceops.publish(job, current)
+        return jobs.submit(f"Names of workspace {ws.name}", [f"{s}/{r}" for s in ws.servers for r in ROLES],
+                           source, action)
+
+    def site_names(ws: Workspace) -> list[dict]:
+        try:
+            return web_names(ws.domain, [i for i in ws.instances() if workspaceops.server_name(ws, i) in settings.servers],
+                             ws.main, ws.subdomains) if ws.domain else []
+        except ConfigError:
+            return []
+
+    def workspace_rows() -> list[dict]:
+        return [{**ws.to_dict(), "name": ws.name, "storage_problem": settings.storage_problem(ws),
+                 "instances_count": len([s for s in ws.servers if s in settings.servers])}
+                for ws in sorted(settings.workspaces.values(), key=lambda w: w.name)]
+
+    # --- git credentials (gitcredentials.py) ---------------------------------
+
+    credentials_lock = asyncio.Lock()
+
+    def workspace_credentials(name: str) -> list[dict]:
+        try:
+            return credential_rows(gitcredentials.load(settings.credentials_file), f"workspace:{name}")
+        except gitcredentials.CredentialError:
+            return []
+
+    def credential_rows(found, scope: str) -> list[dict]:
+        return [c.public() for c in sorted(found.get(scope, {}).values(), key=lambda c: c.host)]
+
+    async def change_credentials(scope: str, payload: dict, delete: bool):
+        """Add or change (a token left empty keeps the one saved) or delete
+        one host's credential of a scope; then every repository gets them."""
+        host = str(payload.get("host") or "").strip().lower()
+        async with credentials_lock:
+            try:
+                found = await asyncio.to_thread(gitcredentials.load, settings.credentials_file)
+                entries = dict(found.get(scope, {}))
+                if delete:
+                    if entries.pop(host, None) is None:
+                        return refuse(f"No credential for {host}", status.HTTP_404_NOT_FOUND)
+                else:
+                    token = str(payload.get("token") or "")
+                    if not token and host in entries:
+                        token = entries[host].token
+                    cred = gitcredentials.check(host, str(payload.get("username") or "").strip(), token)
+                    entries[cred.host] = cred
+                found[scope] = entries
+                await asyncio.to_thread(gitcredentials.save, settings.credentials_file, found)
+            except gitcredentials.CredentialError as exc:
+                return refuse(str(exc))
+            except OSError as exc:
+                return refuse(f"Cannot write {settings.credentials_file}: {exc}", 500)
+            await asyncio.to_thread(gitcredentials.bind, settings)
+        return {"ok": True, "credentials": credential_rows(found, scope)}
+
+    @app.get("/credentials", dependencies=[Depends(admin)])
+    async def credentials_page(request: Request):
+        """The git credentials of every server and workspace (users of the machine only)."""
+        try:
+            found = await asyncio.to_thread(gitcredentials.load, settings.credentials_file)
+            error = None
+        except gitcredentials.CredentialError as exc:
+            found, error = {}, str(exc)
+        scopes = ([{"kind": "server", "name": n, "workspace": settings.workspace_of(n),
+                    "credentials": credential_rows(found, f"server:{n}")} for n in sorted(settings.servers)]
+                  + [{"kind": "workspace", "name": n, "workspace": None,
+                      "credentials": credential_rows(found, f"workspace:{n}")} for n in sorted(settings.workspaces)])
+        return _TEMPLATES.TemplateResponse(
+            request, "credentials.html",
+            {"scopes": scopes, "error": error, "credentials_file": settings.credentials_file})
+
+    @app.post("/api/credentials/save", dependencies=[Depends(admin)])
+    async def credentials_save(payload: dict = Body(...)):
+        try:
+            scope = gitcredentials.scope_of(str(payload.get("kind") or ""), str(payload.get("name") or ""))
+        except gitcredentials.CredentialError as exc:
+            return refuse(str(exc))
+        name = scope.split(":", 1)[1]
+        if name not in (settings.servers if scope.startswith("server:") else settings.workspaces):
+            return refuse(f"No {scope.split(':', 1)[0]} {name}", status.HTTP_404_NOT_FOUND)
+        return await change_credentials(scope, payload, delete=False)
+
+    @app.post("/api/credentials/delete", dependencies=[Depends(admin)])
+    async def credentials_delete(payload: dict = Body(...)):
+        try:
+            scope = gitcredentials.scope_of(str(payload.get("kind") or ""), str(payload.get("name") or ""))
+        except gitcredentials.CredentialError as exc:
+            return refuse(str(exc))
+        return await change_credentials(scope, payload, delete=True)
+
+    @app.post("/api/workspaces/{workspace}/credentials/save", dependencies=[Depends(admin)])
+    async def workspace_credentials_save(workspace: str, payload: dict = Body(...)):
+        """The workspace's git credentials, set by its admins."""
+        ws = a_workspace(workspace)
+        return await change_credentials(gitcredentials.scope_of("workspace", ws.name), payload, delete=False)
+
+    @app.post("/api/workspaces/{workspace}/credentials/delete", dependencies=[Depends(admin)])
+    async def workspace_credentials_delete(workspace: str, payload: dict = Body(...)):
+        ws = a_workspace(workspace)
+        return await change_credentials(gitcredentials.scope_of("workspace", ws.name), payload, delete=True)
+
+    @app.get("/workspaces", dependencies=[Depends(admin)])
+    async def workspaces_page(request: Request):
+        """The customers' workspaces (users of the machine only)."""
+        return _TEMPLATES.TemplateResponse(
+            request, "workspaces.html",
+            {"workspaces": workspace_rows(), "workspaces_file": settings.workspaces_file,
+             "servers": sorted(settings.servers), "users": sorted(settings.users),
+             "user_roles": {n: settings.user_role(n) for n in settings.users},
+             "storage_roots": settings.storage_roots, "storage_error": settings.storage_error,
+             "system_config": pluginstore.SYSTEM_CONFIG,
+             "roles": ACCESS_ROLES, "limits": WORKSPACE_LIMITS,
+             "templates": await asyncio.to_thread(template_rows),
+             "templates_index": templatestore.index_url(settings.plugin_source)},
+        )
+
+    def template_rows() -> list[dict]:
+        """The templates here: the package's and those downloaded, and which one is used."""
+        package = stacktemplates.available([workspacehelper.TEMPLATES])
+        downloaded = stacktemplates.available([templatestore.INSTALLED])
+        used = workspaceops.templates()
+        return [{"name": name, "label": used[name].label, "package": package[name].version if name in package else None,
+                 "downloaded": downloaded[name].version if name in downloaded else None,
+                 "used": used[name].version} for name in sorted(used)]
+
+    @app.get("/api/templates/available", dependencies=[Depends(admin)])
+    async def templates_available():
+        """The templates published for download (signed), with the version used here."""
+        try:
+            found = await templatestore.available(settings.plugin_source)
+        except pluginstore.StoreError as exc:
+            return refuse(str(exc), status.HTTP_502_BAD_GATEWAY)
+        used = await asyncio.to_thread(workspaceops.templates)
+        return {"index": templatestore.index_url(settings.plugin_source),
+                "templates": [{**t, "used": used[t["name"]].version if t["name"] in used else None} for t in found]}
+
+    @app.post("/api/templates/{name}/install")
+    async def template_install(name: str, user: Principal = Depends(admin)):
+        """Download a published template, check it, and install it through
+        the root helper: new instances are made from it (the higher version)."""
+        try:
+            found = {t["name"]: t for t in await templatestore.available(settings.plugin_source)}
+        except pluginstore.StoreError as exc:
+            return refuse(str(exc), status.HTTP_502_BAD_GATEWAY)
+        template = found.get(name)
+        if template is None:
+            return refuse(f"The index publishes no template {name}", status.HTTP_404_NOT_FOUND)
+        if template.get("error"):
+            return refuse(f"{name}: {template['error']}")
+
+        async def action(job):
+            manifest = await templatestore.download(job, settings.plugin_source, template,
+                                                    templatestore.templates_dir(settings.jobs_dir))
+            await ops.run(job, workspaceops.helper("template-install", name), timeout=workspaceops.HELPER_TIMEOUT)
+            job.result = {"template": name, "version": manifest["version"]}
+            job.log(f"Template {name} {manifest['version']} installed: new instances are made from it")
+
+        job = jobs.submit(f"Install template {name} {template.get('version', '')}".strip(), ["omniacli/templates"],
+                          f"manual: {user}", action)
+        return {"job": job.id}
+
+    @app.get("/api/workspaces/load", dependencies=[Depends(admin)])
+    async def workspaces_load(since: int = 0):
+        """The machine's load and each workspace's now (metrics.py): CPU in
+        percent of one core, memory in MiB, traffic in bytes per second;
+        series, each workspace's points after since (the list's sparks)."""
+        machine = sampler.machine_series()
+        return {"cores": sampler.cores, "interval": 5, "machine": machine[-1] if machine else None,
+                "workspaces": sampler.workspace_now(),
+                "series": {name: sampler.workspace_series(name, since) for name in settings.workspaces} if since else {}}
+
+    @app.get("/api/workspaces/{workspace}/load")
+    async def workspace_load(workspace: str, since: int = 0):
+        """One workspace's load for its members (the Dashboard): its points
+        after since (metrics.py), its limits, and its disk, used and size, in
+        bytes. Not the machine's load, nor the room of its real disk."""
+        ws = settings.workspaces.get(workspace)
+        if ws is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, f"No workspace {workspace}")
+        disk, disk_error = None, ""
+        if settings.storage_problem(ws):
+            disk_error = "its storage is not usable: ask an admin"
+        elif ws.storage:
+            try:
+                found = await workspaceops.space()
+            except workspaceops.SpaceError:
+                disk_error = "the disk cannot be read now"
+            else:
+                r = workspaceops.room(found, settings.workspaces, ws.storage, ws.name)
+                if r is not None:
+                    disk = {"used": r["own_used"], "size": r["own_size"],
+                            "forecast": disk_history.workspace_forecast(ws.name)}
+        return {"interval": 5, "points": sampler.workspace_series(ws.name, since),
+                "limits": {k: ws.limits.get(k) for k in ("cpus", "memory_gb", "disk_gb")},
+                "disk": disk, "disk_error": disk_error}
+
+    @app.get("/api/workspaces/space", dependencies=[Depends(admin)])
+    async def workspaces_space():
+        """The room of each storage root's real disk, for each workspace and
+        for a new one (""): what its disk may have (README, Workspaces)."""
+        try:
+            found = await workspaceops.space()
+        except workspaceops.SpaceError as exc:
+            hint = f". {workspaceops.HELPERS_HINT}" if workspaceops.helpers_refused(str(exc)) else ""
+            return refuse(f"The room of the disks cannot be read: {exc}{hint}", status.HTTP_502_BAD_GATEWAY)
+        return {"roots": {root: {name or "": workspaceops.room(found, settings.workspaces, root, name)
+                                 for name in (None, *settings.workspaces)}
+                          for root in settings.storage_roots},
+                "forecasts": {name: disk_history.workspace_forecast(name) for name in settings.workspaces},
+                # the machine's disk under each storage, and its estimate (Disks page)
+                "real_disks": await storage_disks()}
+
+    async def storage_disks() -> dict[str, dict]:
+        points = [m[1] for m in await asyncio.to_thread(disks.mounts)]
+        found = {}
+        for root, folder in settings.storage_roots.items():
+            mount = disks.holder(folder, points)
+            if mount:
+                found[root] = {"mount": mount, "forecast": disk_history.forecast_of(mount)}
+        return found
+
+    @app.post("/api/workspaces/save", dependencies=[Depends(admin)])
+    async def workspace_save(payload: dict = Body(...), me: Principal = Depends(current_user)):
+        """Create (new: true) or change a workspace: its servers and members
+        must exist, a server and a domain are in one workspace only."""
+        name = str(payload.get("name") or "").strip()
+        new = bool(payload.get("new"))
+        async with workspaces_lock:
+            if new and name in settings.workspaces:
+                return refuse(f"A workspace named {name} already exists")
+            if not new and name not in settings.workspaces:
+                return refuse(f"No workspace {name}", status.HTTP_404_NOT_FOUND)
+            data = {key: payload.get(key) for key in ("label", "domain", "storage", "limits", "servers", "members",
+                                                       "parameter_bounds")}
+            before = settings.workspaces.get(name)
+            if before is not None:
+                # the names are the workspace's admins' (its page)
+                data.update(main=before.main, subdomains=before.subdomains, certificate=before.certificate)
+            try:
+                found = parse_workspaces({**{n: ws.to_dict() for n, ws in settings.workspaces.items()}, name: data},
+                                         settings.storage_roots)
+            except ConfigError as exc:
+                return refuse(str(exc))
+            ws = found[name]
+            if ws.storage and ws.storage not in settings.storage_roots:
+                return refuse(f"storage: {ws.storage} is not one of workspaces.storage of the main configuration "
+                              f"({', '.join(settings.storage_roots) or 'none'}): pick one of them")
+            unknown = [s for s in ws.servers if s not in settings.servers]
+            if unknown:
+                return refuse(f"No server {', '.join(unknown)}")
+            strangers = [u for u in ws.members if u not in settings.users]
+            if strangers:
+                return refuse(f"No user {', '.join(strangers)}")
+            if ws.storage and ws.limits.get("disk_gb") and (
+                    before is None or before.storage != ws.storage
+                    or before.limits.get("disk_gb") != ws.limits.get("disk_gb")):
+                try:
+                    room = await workspaceops.space()
+                except workspaceops.SpaceError:
+                    room = None
+                problem = workspaceops.disk_problem(room, found, ws, bool(payload.get("force_disk")))
+                if problem:
+                    return refuse(f"disk_gb: {problem}")
+            refused = await store_workspaces(found)
+            if refused:
+                return refused
+        if before is None or not ws.instances():
+            return {"ok": True}
+        names = before.domain != ws.domain
+        resources = any(before.limits.get(k) != ws.limits.get(k) for k in ("cpus", "memory_gb"))
+        if not (names or resources):
+            return {"ok": True}
+
+        async def action(job):
+            current = settings.workspaces.get(ws.name)
+            if current is None:
+                raise JobFailed(f"no workspace {ws.name}")
+            if resources:
+                await workspaceops.apply_limits(job, current)
+            if names:
+                job.result = await workspaceops.publish(job, current)
+        job = jobs.submit(f"Workspace {ws.name}: " + ", ".join(
+            [w for w, on in (("CPU and memory", resources), ("names", names)) if on]),
+            [f"{s}/{r}" for s in ws.servers for r in ROLES], f"manual: {me}", action)
+        return {"ok": True, "job": job.id}
+
+    @app.post("/api/workspaces/delete", dependencies=[Depends(admin)])
+    async def workspace_delete(payload: dict = Body(...)):
+        """Delete a workspace: its servers stay, its users of workspaces only
+        no longer see them."""
+        name = str(payload.get("name") or "")
+        async with workspaces_lock:
+            if name not in settings.workspaces:
+                return refuse(f"No workspace {name}", status.HTTP_404_NOT_FOUND)
+            return await store_workspaces({n: ws for n, ws in settings.workspaces.items() if n != name}) \
+                or {"ok": True}
+
+    def a_workspace(name: str) -> Workspace:
+        found = settings.workspaces.get(name)
+        if found is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, f"No workspace {name}")
+        return found
+
+    @app.get("/workspaces/{workspace}", dependencies=[Depends(admin)])
+    async def workspace_page(request: Request, workspace: str):
+        """The users and the instances of a workspace, for its admins (and the machine's)."""
+        ws = a_workspace(workspace)
+        me = request.state.user
+        members = [{"name": n, "role": r, "only_here": only_here(n, ws.name)} for n, r in sorted(ws.members.items())]
+        found = await asyncio.to_thread(workspaceops.templates)
+        return _TEMPLATES.TemplateResponse(
+            request, "workspace.html",
+            {"ws": ws, "members": members, "roles": ACCESS_ROLES, "me": me.name, "min_password": _MIN_PASSWORD,
+             "servers": [n for n in ws.servers if n in settings.servers],
+             "templates": [t.to_dict() for t in found.values()],
+             "can_create": bool(ws.storage and ws.limits.get("disk_gb")) and settings.storage_problem(ws) is None,
+             "storage_problem": settings.storage_problem(ws),
+             "instances": [i for i in ws.instances() if workspaceops.server_name(ws, i) in settings.servers],
+             "parameters": {n: {role: role_parameters(ws, n[len(ws.name) + 1:], role) for role in ROLES}
+                            for n in ws.servers if n in settings.servers and n.startswith(f"{ws.name}-")},
+             "repositories": {n: {role: [{"name": r.name, "branch": r.branch} for r in getattr(settings.servers[n], role).repositories]
+                                  for role in ROLES if getattr(settings.servers[n], role) is not None}
+                              for n in ws.servers if n in settings.servers},
+             "sites": site_names(ws), "certificates": CERTIFICATES,
+             "credentials": await asyncio.to_thread(workspace_credentials, ws.name),
+             "instances_left": None if not ws.limits.get("instances")
+             else int(ws.limits["instances"]) - len([n for n in ws.servers if n in settings.servers])},
+        )
+
+    @app.post("/api/workspaces/{workspace}/instances/create", dependencies=[Depends(admin)])
+    async def instance_create(workspace: str, payload: dict = Body(...), me: Principal = Depends(current_user)):
+        """A new instance of the workspace, production and test, from a
+        template: a job (the disk, the projects, the databases); then the
+        server, of type docker, is the workspace's."""
+        ws = a_workspace(workspace)
+        instance = str(payload.get("instance") or "").strip()
+        if not WORKSPACE_NAME.fullmatch(instance):
+            return refuse("An instance's name is 1-32 lower case letters, digits and -")
+        if instance == TEST_LABEL or instance in ws.subdomains:
+            return refuse(f"{instance} is {'the name of the test sites' if instance == TEST_LABEL else 'a subdomain'} "
+                          "of the workspace: an instance needs another name")
+        name = workspaceops.server_name(ws, instance)
+        template = (await asyncio.to_thread(workspaceops.templates)).get(str(payload.get("template") or ""))
+        if template is None:
+            return refuse(f"No template {payload.get('template')!r}")
+        try:
+            values = template.values({str(k): str(v) for k, v in (payload.get("values") or {}).items()})
+        except stacktemplates.TemplateError as exc:
+            return refuse(str(exc))
+        if not ws.storage or not ws.limits.get("disk_gb"):
+            return refuse(f"Workspace {ws.name} has no storage or no disk limit: the machine's admins set them")
+        if settings.storage_problem(ws):
+            return refuse(f"Workspace {ws.name} cannot be used: {settings.storage_problem(ws)}")
+        async with workspaces_lock:
+            ws = a_workspace(workspace)
+            if name in settings.servers or name in ws.servers:
+                return refuse(f"A server named {name} exists already")
+            mine = [n for n in ws.servers if n in settings.servers]
+            if ws.limits.get("instances") and len(mine) >= ws.limits["instances"]:
+                return refuse(f"Workspace {ws.name} has its {int(ws.limits['instances'])} instances already")
+            # the server is the workspace's from now: its job is seen there
+            refused = await store_workspaces({**settings.workspaces,
+                                              ws.name: dataclasses.replace(ws, servers=[*ws.servers, name])})
+            if refused:
+                return refused
+
+        async def action(job):
+            try:
+                data = await workspaceops.create_instance(job, ws, instance, template, values)
+                parsed = parse_servers({name: {**data, "status": "active"}}, settings.logs_dir)[name]
+                async with config_lock:
+                    error = await store({**settings.servers, name: parsed})
+                if error is not None:
+                    raise JobFailed(f"the instance runs, but the servers file was not written: {error.body.decode()}")
+            except BaseException:
+                await rename_in_workspaces(name, None)
+                raise
+            job.result = {"server": name}
+            job.log(f"Server {name}: production at http://127.0.0.1:{parsed.production.options.http_port}, "
+                    f"test at http://127.0.0.1:{parsed.test.options.http_port}")
+            current = settings.workspaces.get(ws.name)
+            if current is not None and current.domain:
+                try:
+                    await workspaceops.publish(job, current)
+                except JobFailed as exc:
+                    job.log(f"The instance runs, its names are not published: {exc}")
+
+        job = jobs.submit(f"Create {name} from {template.name}", [f"{name}/production", f"{name}/test"],
+                          f"manual: {me}", action, workspace=ws.name)
+        return {"job": job.id}
+
+    @app.post("/api/workspaces/{workspace}/instances/delete", dependencies=[Depends(admin)])
+    async def instance_delete(workspace: str, payload: dict = Body(...), me: Principal = Depends(current_user)):
+        """An instance of the workspace removed: its containers, data and
+        folders, then its server."""
+        ws = a_workspace(workspace)
+        name = str(payload.get("server") or "")
+        prefix = f"{ws.name}-"
+        if name not in ws.servers or not name.startswith(prefix) or name not in settings.servers:
+            return refuse(f"No instance {name} in workspace {ws.name}", status.HTTP_404_NOT_FOUND)
+        if server_busy(name):
+            return refuse(f"A job is running on {name}: try again when it ends")
+        instance = name[len(prefix):]
+
+        async def action(job):
+            await workspaceops.remove_instance(job, ws, instance)
+            async with config_lock:
+                error = await store({k: v for k, v in settings.servers.items() if k != name})
+            if error is not None:
+                raise JobFailed(f"the instance is removed, but the servers file was not written: {error.body.decode()}")
+            await rename_in_workspaces(name, None)
+            job.log(f"Server {name} removed")
+            current = settings.workspaces.get(ws.name)
+            if current is not None:
+                try:
+                    await workspaceops.publish(job, current)
+                except JobFailed as exc:
+                    job.log(f"The names of the workspace are not published again: {exc}")
+
+        job = jobs.submit(f"Remove {name}", [f"{name}/production", f"{name}/test"], f"manual: {me}", action,
+                          workspace=ws.name)
+        return {"job": job.id}
+
+    @app.post("/api/workspaces/{workspace}/web/save", dependencies=[Depends(admin)])
+    async def web_save(workspace: str, payload: dict = Body(...), me: Principal = Depends(current_user)):
+        """The names of the workspace (its admins): the main instance, the
+        subdomains, where the certificate comes from; then a job publishes them."""
+        async with workspaces_lock:
+            ws = a_workspace(workspace)
+            data = {**ws.to_dict(), "main": payload.get("main") or "",
+                    "subdomains": payload.get("subdomains") or {}, "certificate": payload.get("certificate")}
+            try:
+                found = parse_workspaces({**{n: w.to_dict() for n, w in settings.workspaces.items()}, workspace: data},
+                                         settings.storage_roots)
+            except ConfigError as exc:
+                return refuse(str(exc))
+            ws = found[workspace]
+            refused = await store_workspaces(found)
+            if refused:
+                return refused
+        if not ws.domain or not ws.instances():
+            return {"ok": True}
+        return {"ok": True, "job": submit_publish(ws, f"manual: {me}").id}
+
+    @app.post("/api/workspaces/{workspace}/web/publish", dependencies=[Depends(admin)])
+    async def web_publish(workspace: str, me: Principal = Depends(current_user)):
+        """The names published again (after the DNS records were made, a certificate failed)."""
+        ws = a_workspace(workspace)
+        if not ws.storage:
+            return refuse(f"Workspace {ws.name} has no storage: the machine's admins set it")
+        return {"job": submit_publish(ws, f"manual: {me}").id}
+
+    @app.post("/api/workspaces/{workspace}/web/certificate", dependencies=[Depends(admin)])
+    async def web_certificate(workspace: str, payload: dict = Body(...), me: Principal = Depends(current_user)):
+        """The customer's own certificate (PEM, with its chain) and key; the
+        names are then published with it."""
+        ws = a_workspace(workspace)
+        if ws.certificate != "own":
+            return refuse("The workspace takes its certificate from Let's Encrypt: choose its own certificate first")
+        ok, out = await workspaceops.own_certificate(ws, str(payload.get("certificate") or ""),
+                                                     str(payload.get("key") or ""))
+        if not ok:
+            return refuse(out.removeprefix("workspace-helper: "))
+        try:
+            made = json.loads(out.splitlines()[-1])
+        except (ValueError, IndexError):
+            made = {}
+        return {"ok": True, **made, "job": submit_publish(ws, f"manual: {me}").id}
+
+    def workspace_instance(ws: Workspace, payload: dict):
+        """(server name, instance) of a request on an instance of ws; a response when refused."""
+        name = str(payload.get("server") or "")
+        prefix = f"{ws.name}-"
+        if name not in ws.servers or not name.startswith(prefix) or name not in settings.servers:
+            return refuse(f"No instance {name} in workspace {ws.name}", status.HTTP_404_NOT_FOUND)
+        if any(getattr(settings.servers[name], role) is None for role in ROLES):
+            return refuse(f"{name} has no production and test")
+        if server_busy(name):
+            return refuse(f"A job is running on {name}: try again when it ends")
+        return name, name[len(prefix):]
+
+    def repository_rows(repos) -> list[dict]:
+        return [{"name": r.name, "path": str(r.path), "branch": r.branch, "remote": r.remote} for r in repos]
+
+    async def set_repositories(name: str, repositories: dict[str, list[dict]]):
+        """The repositories of the roles in the servers file; the server as it is then."""
+        async with config_lock:
+            data = server_to_dict(settings.servers[name])
+            for role, repos in repositories.items():
+                data[role]["repositories"] = repos
+            try:
+                parsed = parse_servers({name: data}, settings.logs_dir)[name]
+            except ConfigError as exc:
+                raise JobFailed(str(exc)) from None
+            error = await store({**settings.servers, name: parsed})
+        if error is not None:
+            raise JobFailed(f"the servers file was not written: {error.body.decode()}")
+        return settings.servers[name]
+
+    @app.post("/api/workspaces/{workspace}/repositories/add", dependencies=[Depends(admin)])
+    async def repository_add(workspace: str, payload: dict = Body(...), me: Principal = Depends(current_user)):
+        """A customer's repository (https, the workspace's git credentials)
+        cloned into production and test of an instance, each on its branch
+        (a test branch is merged into production's as for every server),
+        named in their odoo.conf, both restarted: its modules can then be
+        installed from Odoo's Apps."""
+        ws = a_workspace(workspace)
+        found = workspace_instance(ws, payload)
+        if not isinstance(found, tuple):
+            return found
+        name, instance = found
+        repo, url = str(payload.get("name") or "").strip(), str(payload.get("url") or "").strip()
+        branches = {role: str(payload.get(f"{role}_branch") or "").strip() for role in ROLES}
+        try:
+            for branch in branches.values():
+                workspaceops.check_repository(repo, url, branch)
+        except JobFailed as exc:
+            return refuse(str(exc))
+        server = settings.servers[name]
+        if any(r.name == repo for role in ROLES for r in getattr(server, role).repositories):
+            return refuse(f"{name} has a repository {repo} already")
+
+        async def action(job):
+            options = gitcredentials.options_for(settings, name)
+            current = {role: list(getattr(server, role).repositories) for role in ROLES}
+            cloned = {}
+            try:
+                for role in ROLES:
+                    cloned[role] = await workspaceops.clone(job, ws, instance, role, repo, url, branches[role], options)
+                for role in ROLES:
+                    await workspaceops.write_conf(job, ws, instance, role, [*(r.name for r in current[role]), repo])
+                done = await set_repositories(name, {role: [*repository_rows(current[role]), {
+                    "name": repo, "path": str(cloned[role]), "branch": branches[role], "remote": "origin"}]
+                    for role in ROLES})
+            except BaseException:
+                for role in ROLES:
+                    await workspaceops.write_conf(job, ws, instance, role, [r.name for r in current[role]])
+                    if role in cloned:
+                        workspaceops.remove_clone(cloned[role])
+                raise
+            for role in ROLES:
+                await ops.restart(job, getattr(done, role))
+            job.log(f"{repo} is in {name}: install its modules from Odoo's Apps")
+
+        job = jobs.submit(f"Add repository {repo} to {name}", [f"{name}/{role}" for role in ROLES],
+                          f"manual: {me}", action)
+        return {"job": job.id}
+
+    @app.post("/api/workspaces/{workspace}/repositories/remove", dependencies=[Depends(admin)])
+    async def repository_remove(workspace: str, payload: dict = Body(...), me: Principal = Depends(current_user)):
+        """A customer's repository out of an instance: out of the odoo.conf
+        and of the server, both roles restarted, the clones deleted."""
+        ws = a_workspace(workspace)
+        found = workspace_instance(ws, payload)
+        if not isinstance(found, tuple):
+            return found
+        name, instance = found
+        repo = str(payload.get("name") or "")
+        server = settings.servers[name]
+        if not any(r.name == repo for role in ROLES for r in getattr(server, role).repositories):
+            return refuse(f"{name} has no repository {repo}", status.HTTP_404_NOT_FOUND)
+
+        async def action(job):
+            kept = {role: [r for r in getattr(server, role).repositories if r.name != repo] for role in ROLES}
+            for role in ROLES:
+                await workspaceops.write_conf(job, ws, instance, role, [r.name for r in kept[role]])
+            done = await set_repositories(name, {role: repository_rows(kept[role]) for role in ROLES})
+            for role in ROLES:
+                await ops.restart(job, getattr(done, role))
+                workspaceops.remove_clone(workspaceops.addons_folder(ws, instance, role) / repo)
+            job.log(f"{repo} removed from {name}")
+
+        job = jobs.submit(f"Remove repository {repo} from {name}", [f"{name}/{role}" for role in ROLES],
+                          f"manual: {me}", action)
+        return {"job": job.id}
+
+    def instance_template(ws: Workspace, instance: str):
+        """The template an instance was made from (the higher version installed), or None."""
+        try:
+            meta = json.loads((workspaceops.storage_path(ws) / ws.name / instance / workspacehelper.INSTANCE_FILE).read_text())
+        except (OSError, ValueError):
+            return None
+        return workspaceops.templates().get(str(meta.get("template") or ""))
+
+    def role_parameters(ws: Workspace, instance: str, role: str) -> dict | None:
+        """What the page shows of a role: each parameter with its value (a
+        password: whether it is set), the debug switch."""
+        template = instance_template(ws, instance)
+        if template is None or not template.parameters:
+            return None
+        state = workspacehelper.role_state(workspaceops.storage_path(ws) / ws.name / instance / role)
+        rows = []
+        for param in template.parameters:
+            value = state["parameters"].get(param.name, param.default)
+            bounds = ws.parameter_bounds.get(param.name) or [param.min, param.max]
+            rows.append({**param.to_dict(), "min": bounds[0], "max": bounds[1],
+                         "value": "" if param.type == "password" else value,
+                         "set": bool(value) if param.type == "password" else None})
+        return {"parameters": rows, "debug": state["debug"]}
+
+    @app.post("/api/workspaces/{workspace}/parameters/save", dependencies=[Depends(admin)])
+    async def parameters_save(workspace: str, payload: dict = Body(...), me: Principal = Depends(current_user)):
+        """The editable Odoo parameters and the debug log of a role of an
+        instance: checked against the template's bounds or the workspace's,
+        and workers x limit_memory_hard against the workspace's memory; the
+        helper writes its odoo.conf again, the role is restarted (and the
+        workspace's names published again: the websocket follows workers)."""
+        ws = a_workspace(workspace)
+        found = workspace_instance(ws, payload)
+        if not isinstance(found, tuple):
+            return found
+        name, instance = found
+        role = str(payload.get("role") or "")
+        if role not in ROLES:
+            return refuse(f"The role is {' or '.join(ROLES)}")
+        template = await asyncio.to_thread(instance_template, ws, instance)
+        if template is None:
+            return refuse(f"{name} was not made from a template installed here")
+        given = {str(k): v for k, v in (payload.get("parameters") or {}).items()}
+        saved = workspacehelper.role_state(workspaceops.storage_path(ws) / ws.name / instance / role)["parameters"]
+        for param in template.parameters:
+            # a password left empty keeps the one saved
+            if param.type == "password" and not str(given.get(param.name) or "") and saved.get(param.name):
+                given[param.name] = saved[param.name]
+        bounds = {k: tuple(v) for k, v in ws.parameter_bounds.items()}
+        try:
+            values = template.parameter_values(given, bounds)
+        except stacktemplates.TemplateError as exc:
+            return refuse(str(exc))
+        memory = ws.limits.get("memory_gb")
+        workers, hard = values.get("workers") or 0, values.get("limit_memory_hard") or 0
+        if memory and workers and workers * hard > memory * 1024:
+            return refuse(f"{workers} workers x {hard} MB is more than the workspace's {memory:g} GB: the kernel "
+                          "would kill Odoo instead of Odoo stopping one request")
+        debug = bool(payload.get("debug"))
+
+        async def action(job):
+            await workspaceops._helper(job, "conf", ws.name, ws.storage, instance, role, json.dumps(
+                {"parameters": given, "debug": debug, "bounds": ws.parameter_bounds}))
+            await ops.restart(job, getattr(settings.servers[name], role))
+            current = settings.workspaces.get(ws.name)
+            if current is not None and current.domain:
+                try:
+                    await workspaceops.publish(job, current)
+                except JobFailed as exc:
+                    job.log(f"The names of the workspace are not published again: {exc}")
+            if not workers and values.get("limit_time_cpu"):
+                job.log("Note: with workers = 0 Odoo does not apply limit_time_cpu (only with workers)")
+
+        job = jobs.submit(f"Odoo parameters of {name}/{role}", [f"{name}/{role}"], f"manual: {me}", action)
+        return {"job": job.id}
+
+    def only_here(user: str, workspace: str) -> bool:
+        """user is a user of workspaces only, and of this one only: its
+        workspace's admins may change its password and delete it."""
+        return (settings.user_role(user) == WORKSPACE_ROLE and user not in settings.fixed.users
+                and [ws for ws, _ in settings.memberships(user)] == [workspace])
+
+    @app.post("/api/workspaces/{workspace}/members/save", dependencies=[Depends(admin)])
+    async def member_save(workspace: str, payload: dict = Body(...), me: Principal = Depends(current_user)):
+        """A workspace's admin creates a user of it (new: true, with a
+        password: a user of workspaces only), changes a member's role, and
+        the password of a member of this workspace only."""
+        name, role = str(payload.get("name") or "").strip(), str(payload.get("role") or "")
+        password, new = str(payload.get("password") or ""), bool(payload.get("new"))
+        if role not in ACCESS_ROLES:
+            return refuse(f"The role must be one of {', '.join(ACCESS_ROLES)}")
+        async with access_lock, workspaces_lock:
+            ws = a_workspace(workspace)
+            if new:
+                refused = check_name("User", name, settings.fixed.users, settings.users, True)
+                if refused:
+                    return refused
+                if len(password) < _MIN_PASSWORD:
+                    return refuse(f"The password needs at least {_MIN_PASSWORD} characters")
+            else:
+                if name not in ws.members:
+                    return refuse(f"{name} is not a user of {workspace}", status.HTTP_404_NOT_FOUND)
+                if me.kind == "user" and name == me.name and role != ws.members[name]:
+                    return refuse("You cannot change your own role")
+                if password and not only_here(name, workspace):
+                    return refuse(f"{name} is also a user of other workspaces or of the machine: "
+                                  "ask the administrator of the machine for its password")
+                if password and len(password) < _MIN_PASSWORD:
+                    return refuse(f"The password needs at least {_MIN_PASSWORD} characters")
+            if new or password:
+                web = web_copy()
+                web.users[name] = await asyncio.to_thread(hash_password, password)
+                if new:
+                    web.roles[name] = WORKSPACE_ROLE
+                refused = await store_access(web)
+                if refused:
+                    return refused
+            found = dict(settings.workspaces)
+            found[workspace] = dataclasses.replace(ws, members={**ws.members, name: role})
+            return await store_workspaces(found) or {"ok": True}
+
+    @app.post("/api/workspaces/{workspace}/members/delete", dependencies=[Depends(admin)])
+    async def member_delete(workspace: str, payload: dict = Body(...), me: Principal = Depends(current_user)):
+        """Out of the workspace; a user of this workspace only is deleted."""
+        name = str(payload.get("name") or "")
+        async with access_lock, workspaces_lock:
+            ws = a_workspace(workspace)
+            if name not in ws.members:
+                return refuse(f"{name} is not a user of {workspace}", status.HTTP_404_NOT_FOUND)
+            if me.kind == "user" and name == me.name:
+                return refuse("You cannot remove yourself")
+            delete_user = only_here(name, workspace)
+            found = dict(settings.workspaces)
+            found[workspace] = dataclasses.replace(ws, members={n: r for n, r in ws.members.items() if n != name})
+            refused = await store_workspaces(found)
+            if refused:
+                return refused
+            if delete_user:
+                web = web_copy()
+                web.users.pop(name, None)
+                web.roles.pop(name, None)
+                refused = await store_access(web)
+                if refused:
+                    return refused
+            return {"ok": True, "deleted": delete_user}
 
     # --- users, links and MCP tokens ------------------------------------
 
@@ -1544,8 +2765,8 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             return refuse(f"No {kind.lower()} {name}", status.HTTP_404_NOT_FOUND)
         return None
 
-    def check_role(role: str):
-        return None if role in ACCESS_ROLES else refuse(f"The role must be one of {', '.join(ACCESS_ROLES)}")
+    def check_role(role: str, roles: tuple[str, ...] = ACCESS_ROLES):
+        return None if role in roles else refuse(f"The role must be one of {', '.join(roles)}")
 
     @app.get("/users", dependencies=[Depends(admin)])
     async def users_page(request: Request):
@@ -1562,6 +2783,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
                            for n in sorted(settings.tokens)],
                 "users_file": settings.users_file,
                 "roles": ACCESS_ROLES,
+                "user_roles": USER_ROLES,
             },
         )
 
@@ -1651,7 +2873,8 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         found = [e for e in entries if matches(" ".join(str(v) for v in e.values()), q)]
         return _TEMPLATES.TemplateResponse(
             request, "access.html",
-            {"entries": found[:500], "total": len(found), "q": q, "log_file": access_log.path},
+            {"entries": found[:500], "total": len(found), "q": q, "log_file": access_log.path,
+             "failed_file": access_log.failed_path},
         )
 
     @app.post("/api/access/users/save")
@@ -1662,7 +2885,8 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         password, new = str(payload.get("password") or ""), bool(payload.get("new"))
         async with access_lock:
             web = web_copy()
-            refused = check_name("User", name, settings.fixed.users, settings.users, new) or check_role(role)
+            refused = (check_name("User", name, settings.fixed.users, settings.users, new)
+                       or check_role(role, USER_ROLES))
             if refused:
                 return refused
             if (new or password) and len(password) < _MIN_PASSWORD:
@@ -1759,14 +2983,43 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         except OSError as exc:
             return refuse(f"Cannot write {settings.links_file}: {exc}", 500)
         settings.link_targets = links
+        ssh_tunnels.sync(links)
         return None
 
     @app.get("/links", dependencies=[Depends(admin)])
     async def links_page(request: Request):
+        public = sshlinks.public_key(ssh_tunnels.folder)
+        ssh = {}
+        for link in settings.link_targets.values():
+            if link.ssh is not None:
+                ssh[link.name] = {"status": ssh_tunnels.status(link.name), "fingerprint": sshlinks.fingerprint(
+                    link.ssh.host_key), "line": sshlinks.authorized_line(public, link) if public else "",
+                    "block": sshlinks.sshd_block(link)}
         return _TEMPLATES.TemplateResponse(
             request, "links.html",
-            {"links": list(settings.link_targets.values()), "links_file": settings.links_file},
+            {"links": list(settings.link_targets.values()), "links_file": settings.links_file,
+             "public_key": public, "ssh": ssh},
         )
+
+    @app.post("/api/links/ssh/key", dependencies=[Depends(admin)])
+    async def link_ssh_key():
+        """OmniaCLI's SSH key for the links through SSH, made the first time."""
+        try:
+            return {"ok": True, "public_key": await sshlinks.ensure_key(ssh_tunnels.folder)}
+        except (sshlinks.SshError, OSError) as exc:
+            return refuse(str(exc), 500)
+
+    @app.post("/api/links/ssh/host-key", dependencies=[Depends(admin)])
+    async def link_ssh_host_key(payload: dict = Body(...)):
+        """The SSH server's key, to be compared with the customer's before saving."""
+        port = payload.get("port") or 22
+        if isinstance(port, bool) or not str(port).isdigit():
+            return refuse(f"{port!r} is not a port")
+        try:
+            key = await sshlinks.fetch_host_key(str(payload.get("host") or "").strip(), int(port))
+        except sshlinks.SshError as exc:
+            return refuse(str(exc))
+        return {"ok": True, "host_key": key, "fingerprint": sshlinks.fingerprint(key)}
 
     @app.post("/api/links/save", dependencies=[Depends(admin)])
     async def link_target_save(payload: dict = Body(...)):
@@ -1777,7 +3030,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
                 return refuse(f"A link named {name} already exists")
             if not new and name not in settings.link_targets:
                 return refuse(f"No link {name}", status.HTTP_404_NOT_FOUND)
-            data = {k: payload.get(k) for k in ("url", "token", "ca_file")}
+            data = {k: payload.get(k) for k in ("url", "token", "ca_file", "ssh")}
             if not new and not str(data["token"] or "").strip():
                 data["token"] = settings.link_targets[name].token
             try:
@@ -1798,6 +3051,9 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
     async def link_target_test(name: str, me: Principal = Depends(admin)):
         """Ask the other instance who we are there: its version and our role."""
         link = a_link(name)
+        tunnel = ssh_tunnels.status(name) if link.ssh is not None else None
+        if tunnel is not None and tunnel["state"] != "up":
+            return {"ok": False, "error": f"SSH tunnel {tunnel['state']}: {tunnel['detail'] or 'starting'}"}
         try:
             resp = await link_clients.client(link).get(
                 "/api/info", headers=link_headers(link, me.name, me.role), timeout=LIST_TIMEOUT)
@@ -1887,9 +3143,21 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         "psql": (shell_folder, psql_run),
     }
 
+    def shell_refused(instance: Instance, kind: str) -> str | None:
+        """Why this machine does not open that shell: on a server nobody gets
+        a shell of OmniaCLI's own user, whatever the role, also through a link."""
+        if settings.machine == MACHINE_DEVELOPMENT:
+            return None
+        if kind == "psql" and not instance.plugin.db_shell_as_service(instance):
+            return None
+        return f"This machine is a server: no {kind} as OmniaCLI's own user"
+
     def shell_instance(server: str, role: str, kind: str) -> Instance:
         active_server(server)
         instance = get_instance(server, role)
+        refused = shell_refused(instance, kind)
+        if refused:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, refused)
         run = shell_kinds[kind][1](instance)
         if isinstance(run, str):
             raise HTTPException(status.HTTP_404_NOT_FOUND, run)
@@ -1901,7 +3169,9 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         command, _, stay = run(instance)
         return _TEMPLATES.TemplateResponse(request, "shell.html", {
             "instance": instance, "folder": folder(instance), "kind": kind, "command": command, "stay": stay,
-            "system_user": pwd.getpwuid(os.getuid()).pw_name, "shell": shell.login_shell()[0]})
+            "system_user": pwd.getpwuid(os.getuid()).pw_name, "shell": shell.login_shell()[0],
+            "drops": shell.drops_folder(instance.server, instance.role), "drop_days": shell.DROP_DAYS,
+            "drop_max": shell.DROP_MAX})
 
     async def shell_socket(websocket: WebSocket, server: str, role: str, kind: str, me: Principal):
         """A login shell of the user running OmniaCLI, in the instance's first
@@ -1915,6 +3185,10 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             return
         if instance is None:
             await websocket.close(1008, f"No instance {server}/{role}")
+            return
+        refused = shell_refused(instance, kind)
+        if refused:
+            await websocket.close(1008, refused)
             return
         folder, run = shell_kinds[kind]
         run = run(instance)
@@ -1937,6 +3211,32 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             minutes = round((time.monotonic() - opened) / 60)
             access_log.record("shell", me.kind, me.name, ip, f"{what} closed after {minutes} min{who}")
 
+    async def shell_upload(request: Request, server: str, role: str, kind: str, name: str, me: Principal):
+        """A file dropped on the terminal of a shell (the raw body), into the
+        instance's drops folder: the page types the path it answers. Allowed
+        where that shell opens, for whom may open it (a link too)."""
+        instance = shell_instance(server, role, kind)
+        name = shell.drop_name(name)
+        length = request.headers.get("content-length", "")
+        if length.isdigit() and int(length) > shell.DROP_MAX:
+            return refuse(f"{name}: more than {shell.DROP_MAX >> 20} MiB", 413)
+        folder = shell.drops_folder(instance.server, instance.role)
+        shell.prune_drops(folder)
+        probe = folder if folder.is_dir() else Path(shell.login_shell()[1])
+        free = shutil.disk_usage(probe).free
+        if free - (int(length) if length.isdigit() else 0) < puller.MIN_FREE:
+            return refuse(f"{name}: {free >> 20} MiB free here, not enough", status.HTTP_507_INSUFFICIENT_STORAGE)
+        try:
+            dest = await shell.save_drop(folder, name, request.stream())
+        except shell.DropRefused as exc:
+            return refuse(str(exc), 413)
+        except ClientDisconnect:
+            return refuse(f"{name}: the upload was interrupted")
+        who = f", acting for {me.on_behalf}" if me.on_behalf else ""
+        access_log.record("shell", me.kind, me.name, request.client.host if request.client else "",
+                          f"{instance.key} {kind}: {dest.name} dropped ({dest.stat().st_size} bytes){who}")
+        return {"path": str(dest)}
+
     async def link_shell_socket(websocket: WebSocket, name: str, server: str, role: str, kind: str,
                                 me: Principal):
         """The shell of a linked instance's server, as the link, with at most our role."""
@@ -1958,6 +3258,11 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         @app.get(f"/servers/{{server}}/{{role}}/{kind}", name=f"{kind}_page")
         async def page(request: Request, server: str, role: str, me: Principal = Depends(developer)):
             return await shell_page(request, server, role, kind)
+
+        @app.post(f"/servers/{{server}}/{{role}}/{kind}/upload", name=f"{kind}_upload")
+        async def upload(request: Request, server: str, role: str, name: str = "",
+                         me: Principal = Depends(developer)):
+            return await shell_upload(request, server, role, kind, name, me)
 
         @app.websocket(f"/servers/{{server}}/{{role}}/{kind}/ws", name=f"{kind}_socket")
         async def socket(websocket: WebSocket, server: str, role: str, me: Principal = Depends(current_user)):
@@ -2062,26 +3367,27 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
 
     @app.get("/groups")
     async def groups_page(request: Request, me: Principal = Depends(admin)):
-        known = [srv.name for srv in settings.active_servers()]
-        known += [f"{r['link']}/{r['name']}" for r in await remote_servers(me) if "error" not in r]
+        """The groups of the Dashboard's lists: servers and linked instances."""
         return _TEMPLATES.TemplateResponse(
             request, "groups.html",
-            {"groups": [{"name": g.name, "members": g.members} for g in settings.groups],
-             "known": known, "links": list(settings.link_targets), "groups_file": settings.groups_file},
+            {"lists": {name: [g.to_dict() for g in settings.groups.get(name, [])] for name in listgroups.LISTS},
+             "known": {"servers": [srv.name for srv in settings.active_servers()],
+                       "links": sorted(settings.link_targets)},
+             "groups_file": settings.groups_file},
         )
 
     @app.post("/api/groups/save", dependencies=[Depends(admin)])
     async def groups_save(payload: dict = Body(...)):
-        """The whole list of groups, in order."""
+        """The groups of every list: {lists: {servers: [...], links: [...]}}."""
         try:
-            groups = parse_groups(payload.get("groups"))
-        except ConfigError as exc:
+            lists = listgroups.parse_lists({"lists": payload.get("lists") or {}})
+        except listgroups.GroupsError as exc:
             return refuse(str(exc))
         try:
-            await asyncio.to_thread(save_groups, settings.groups_file, groups)
+            await asyncio.to_thread(listgroups.save, settings.groups_file, lists)
         except OSError as exc:
             return refuse(f"Cannot write {settings.groups_file}: {exc}", 500)
-        settings.groups = groups
+        settings.groups = lists
         return {"ok": True}
 
     # --- pullers this instance relays ----------------------------------
@@ -2186,12 +3492,14 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             return puller_answer(exc)
 
     @app.get("/api/pullers/{name}/files/{file}")
-    async def puller_download(name: str, file: str, me: Principal = Depends(current_user)):
+    async def puller_download(request: Request, name: str, file: str, me: Principal = Depends(current_user)):
         link = puller_link(me)
         try:
             path = pullers.download_path(name, link, file)
         except puller.PullerRefused as exc:
             return puller_answer(exc)
+        access_log.record("download", me.kind, me.name, request.client.host if request.client else "",
+                          f"puller {name}/{file}" + (f" for {me.on_behalf}" if me.on_behalf else ""))
         return FileResponse(path, media_type="application/octet-stream", filename=file)
 
     @app.delete("/api/pullers/{name}/files/{file}")
@@ -2451,7 +3759,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
     @app.get("/options", dependencies=[Depends(admin)])
     async def options_page(request: Request):
         return _TEMPLATES.TemplateResponse(request, "options.html", {
-            "options": settings.options, "options_file": settings.options_file,
+            "options": settings.options, "options_file": settings.options_file, "machine": settings.machine,
             "font_sizes": SHELL_FONT_SIZES, "idle_hours": TUNNEL_IDLE_HOURS})
 
     @app.post("/api/options/save", dependencies=[Depends(admin)])
@@ -2538,8 +3846,10 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
                     return refuse(f"{instance.plugin.label} cannot restore a database: no copy from link")
                 # the choices as the instance's plugin asks them
                 try:
+                    # the checkboxes: the other fields come from the last
+                    # backup dialog of the instance there
                     copy["backup_options"] = {f.key: _field_value(f, (copy.get("backup_options") or {}).get(f.key))
-                                              for f in instance.plugin.backup_fields()}
+                                              for f in instance.plugin.backup_fields() if f.kind == "checkbox"}
                     copy["restore_options"] = {
                         f.key: _field_value(f, (copy.get("restore_options") or {}).get(f.key))
                         for f in instance.plugin.restore_fields()}
@@ -2602,7 +3912,8 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         password_user(me)
         return _TEMPLATES.TemplateResponse(
             request, "account.html",
-            {"name": me.name, "role": me.role, "fixed": me.name in settings.fixed.users},
+            {"name": me.name, "role": WORKSPACE_ROLE if me.scoped else me.role, "workspaces": me.workspaces,
+             "fixed": me.name in settings.fixed.users},
         )
 
     @app.post("/api/account/password")

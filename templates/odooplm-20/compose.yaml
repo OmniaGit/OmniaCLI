@@ -1,0 +1,93 @@
+# OdooPLM 20 (DockerOdooPLM image) and PostgreSQL 17: a template of OmniaCLI's
+# workspaces (docs/workspaces.md). OmniaCLI writes .env (the variables below)
+# and config/odoo.conf; filestore and database are folders of the instance,
+# on its workspace's disk; the ports listen on this machine only, the network
+# is one OmniaCLI's firewall knows (SUBNET), the containers are in the
+# workspace's systemd slice, its CPU and memory (SLICE). The containers' own
+# files are read only: what they write goes on the disk (Odoo's /tmp, where
+# dumps and loads are staged) or into a small tmpfs, never onto docker's disk.
+# The database's superuser is postgres, with a password Odoo does not know;
+# Odoo's role, made by dbinit/ at the first start, is no superuser.
+name: ${PROJECT}
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: ${SUBNET}
+services:
+  odoo:
+    image: ${IMAGE}
+    restart: unless-stopped
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 1024
+    cgroup_parent: ${SLICE}
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${HTTP_PORT}:8069"
+      - "127.0.0.1:${WEBSOCKET_PORT}:8072"
+    environment:
+      HOST: db
+      PORT: "5432"
+      USER: odoo
+      PASSWORD: ${DB_PASSWORD}
+      # OmniaCLI creates the database itself (a job), not the image's entrypoint
+      ODOOPLM_AUTO_INIT: "0"
+    volumes:
+      - ./data/filestore:/var/lib/odoo
+      - ./data/tmp:/tmp
+      # a volume of the image, otherwise an anonymous one on docker's disk
+      - ./data/extra-addons:/mnt/extra-addons:ro
+      - ./config:/etc/odoo:ro
+      # the customer's repositories of this role (production or test)
+      - ./addons:/mnt/customer-addons:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+  db:
+    image: postgres:17
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /var/run/postgresql:size=16m
+      - /tmp:size=64m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # the image's entrypoint, as root: gives its folders to postgres and drops to it
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
+      - FOWNER
+    pids_limit: 512
+    cgroup_parent: ${SLICE}
+    environment:
+      POSTGRES_DB: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${DB_SUPER_PASSWORD}
+      ODOO_DB_PASSWORD: ${DB_PASSWORD}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - ./data/pgdata:/var/lib/postgresql/data/pgdata
+      - ./dbinit:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"

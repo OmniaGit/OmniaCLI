@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import configparser
 import os
+import re
 from pathlib import Path
 
 from ..plugin_api import ERROR, WARNING, Check, Instance, as_user, capture, system_user
@@ -17,6 +18,9 @@ PYTHON_TIMEOUT = 60
 
 # Connects to the instance's database with the settings of its Odoo config,
 # run by the instance's own python (which has psycopg2, an Odoo requirement).
+# Exit code 3: PostgreSQL answers and has no such database (asked to its
+# maintenance database, the text of a connection error depends on the server's
+# language); 4: the database has no Odoo in it. Any other failure prints one line.
 _DB_PROBE = r"""
 import configparser, sys
 conf, dbname = sys.argv[1], sys.argv[2]
@@ -25,14 +29,76 @@ parser.read(conf)
 opt = lambda key: (parser.get("options", key, fallback="") or "").strip()
 value = lambda key: None if opt(key) in ("", "False", "None") else opt(key)
 import psycopg2
-cn = psycopg2.connect(dbname=dbname, host=value("db_host"), port=value("db_port"),
-                      user=value("db_user"), password=value("db_password"),
-                      connect_timeout=10)
+def connect(name):
+    return psycopg2.connect(dbname=name, host=value("db_host"), port=value("db_port"),
+                            user=value("db_user"), password=value("db_password"),
+                            connect_timeout=10)
+try:
+    cn = connect(dbname)
+except psycopg2.OperationalError as exc:
+    error = str(exc).strip().splitlines()[0]
+    try:
+        cr = connect("postgres").cursor()
+        cr.execute("SELECT 1 FROM pg_database WHERE datname = %s", (dbname,))
+        found = cr.fetchone()
+    except psycopg2.Error:
+        found = True
+    if not found:
+        sys.exit(3)
+    print(error)
+    sys.exit(1)
 cr = cn.cursor()
-cr.execute("SELECT latest_version FROM ir_module_module WHERE name = 'base'")
+try:
+    cr.execute("SELECT latest_version FROM ir_module_module WHERE name = 'base'")
+except psycopg2.ProgrammingError as exc:
+    if exc.pgcode == "42P01":  # undefined table
+        sys.exit(4)
+    print(str(exc).strip().splitlines()[0])
+    sys.exit(1)
 row = cr.fetchone()
-print("base module %s" % (row[0] if row else "missing"))
+if not row or not row[0]:
+    sys.exit(4)
+print("base module %s" % row[0])
 """
+
+# what database_state() answers
+DATABASE_OK, DATABASE_ERROR = "ok", "error"
+# PostgreSQL answered, and there is nothing to run on: a restore fixes it, so
+# the checks only warn and a start is what is refused (OdooPlugin.before_start)
+NO_DATABASE = {"missing": "the database does not exist", "empty": "the database is empty: no Odoo in it"}
+_NO_DATABASE_EXIT = {3: "missing", 4: "empty"}
+# an exception's name: ...Error, ...Exception, or dotted (psycopg2.errors.UndefinedTable),
+# not PostgreSQL's LINE 1:, DETAIL: and HINT: that follow it
+_EXCEPTION_LINE = re.compile(r"[A-Za-z_][\w.]*(Error|Exception)\b|[A-Za-z_]\w*(\.\w+)+:")
+
+
+def _error_line(out: str) -> str:
+    """The line of a failed python's output that says what went wrong: the
+    exception's, not the last (a PostgreSQL error ends with the ^ under the
+    position in the query)."""
+    lines = [line.strip() for line in out.splitlines() if line.strip()]
+    for line in reversed(lines):
+        if _EXCEPTION_LINE.match(line):
+            return line
+    return lines[-1] if lines else ""
+
+
+async def database_state(instance: Instance) -> tuple[str, str]:
+    """(state, what to tell): DATABASE_OK, a key of NO_DATABASE (it could be
+    asked, and there is no Odoo to run on) or DATABASE_ERROR (it could not be
+    asked: wrong settings, PostgreSQL down, no psycopg2)."""
+    opts = instance.options
+    code, out = await capture(
+        as_user(instance.run_as,
+                [opts.venv_bin / "python", "-c", _DB_PROBE, opts.odoo_config, opts.database]),
+        timeout=PYTHON_TIMEOUT,
+    )
+    if code == 0:
+        return DATABASE_OK, out.splitlines()[-1] if out else ""
+    if code in _NO_DATABASE_EXIT:
+        state = _NO_DATABASE_EXIT[code]
+        return state, NO_DATABASE[state]
+    return DATABASE_ERROR, _error_line(out) or f"exit code {code}"
 
 
 async def instance_checks(instance: Instance) -> list[Check]:
@@ -73,17 +139,15 @@ async def instance_checks(instance: Instance) -> list[Check]:
         env=env,
     )
     add("Odoo importable by click-odoo", code == 0,
-        out.splitlines()[-1] if out else f"exit code {code}")
+        (out.splitlines()[-1] if code == 0 else _error_line(out)) if out else f"exit code {code}")
 
     # database
-    code, out = await capture(
-        as_user(instance.run_as,
-                [opts.venv_bin / "python", "-c", _DB_PROBE, opts.odoo_config, opts.database]),
-        timeout=PYTHON_TIMEOUT,
-    )
-    add("Database", code == 0,
-        f"{opts.database}: {out.splitlines()[-1] if out else ''}" if code == 0
-        else f"{opts.database}: {out.splitlines()[-1] if out else f'exit code {code}'}")
+    state, detail = await database_state(instance)
+    if state in NO_DATABASE:
+        add("Database", False, f"{opts.database}: {detail}. Restore a backup into it (Restore on the server's "
+            "page): the instance does not start until then", WARNING)
+    else:
+        add("Database", state == DATABASE_OK, f"{opts.database}: {detail}")
 
     # odoo-bin, only needed to update chosen modules
     odoo_bin = ops.find_odoo_bin(instance)

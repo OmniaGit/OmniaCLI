@@ -11,6 +11,12 @@ The forecast is the least-squares line of the used space over the last
 WINDOW_DAYS days (at least MIN_DAYS days of them): the day it reaches the
 space a service may fill, used + free (free as a user who is not root sees
 it: ext4 keeps 5% for root).
+
+The workspaces' disks are recorded the same way, apart from the machine's
+(the Disks page lists both, the publisher sends the machine's only): the
+space their image takes, and its capacity, the workspace's disk_gb (its
+image's size when it has none). Their forecast is the day the image fills
+the workspace's limit.
 """
 
 from __future__ import annotations
@@ -35,41 +41,67 @@ HORIZON_DAYS = 100 * 366
 
 
 class DiskHistory:
-    """{mount: {device, type, points: [[day, used, free, total]]}} in a JSON file."""
+    """{mount: {device, type, points: [[day, used, free, total]]}} in a JSON
+    file, and {workspace: {points}} the same way."""
 
     def __init__(self, path: Path):
         self.path = Path(path)
         self.disks: dict[str, dict] = {}
+        self.workspaces: dict[str, dict] = {}
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
             if isinstance(data.get("disks"), dict):
                 self.disks = data["disks"]
+            if isinstance(data.get("workspaces"), dict):
+                self.workspaces = data["workspaces"]
         except FileNotFoundError:
             pass
         except (OSError, ValueError, AttributeError) as exc:
             _logger.warning("Disk history %s not read, starting a new one: %s", self.path, exc)
 
+    @staticmethod
+    def _has(entries: dict[str, dict], day: datetime.date) -> bool:
+        text = day.isoformat()
+        return any(e["points"] and e["points"][-1][0] == text for e in entries.values())
+
     def recorded(self, day: datetime.date) -> bool:
         """Whether day is recorded (any disk has it)."""
-        text = day.isoformat()
-        return any(d["points"] and d["points"][-1][0] == text for d in self.disks.values())
+        return self._has(self.disks, day)
+
+    def workspaces_recorded(self, day: datetime.date) -> bool:
+        """Whether day is recorded for the workspaces (any has it)."""
+        return self._has(self.workspaces, day)
+
+    @staticmethod
+    def _add(entries: dict[str, dict], key: str, point: list, day: datetime.date) -> dict:
+        entry = entries.setdefault(key, {"points": []})
+        entry["points"] = sorted([p for p in entry["points"] if p[0] != day.isoformat()] + [point])
+        return entry
 
     def record(self, found: list[dict], day: datetime.date) -> None:
         """The disks found (disks.disks) as day's points; older than KEEP_DAYS dropped."""
-        text = day.isoformat()
-        oldest = (day - datetime.timedelta(days=KEEP_DAYS)).isoformat()
         for disk in found:
-            entry = self.disks.setdefault(disk["mount"], {"points": []})
+            entry = self._add(self.disks, disk["mount"], [day.isoformat(), disk["used"], disk["free"], disk["total"]], day)
             entry["device"], entry["type"] = disk["device"], disk["type"]
-            points = [p for p in entry["points"] if p[0] != text]
-            points.append([text, disk["used"], disk["free"], disk["total"]])
-            entry["points"] = sorted(points)
-        for entry in self.disks.values():
-            entry["points"] = [p for p in entry["points"] if p[0] >= oldest]
+        self._save(day)
+
+    def record_workspaces(self, found: list[dict], day: datetime.date) -> None:
+        """The workspaces' disks found ([{name, used, capacity}]) as day's points."""
+        for disk in found:
+            free = max(disk["capacity"] - disk["used"], 0)
+            self._add(self.workspaces, disk["name"], [day.isoformat(), disk["used"], free, disk["capacity"]], day)
+        self._save(day)
+
+    def _save(self, day: datetime.date) -> None:
+        oldest = (day - datetime.timedelta(days=KEEP_DAYS)).isoformat()
+        for entries in (self.disks, self.workspaces):
+            for entry in entries.values():
+                entry["points"] = [p for p in entry["points"] if p[0] >= oldest]
         self.disks = {m: e for m, e in self.disks.items() if e["points"]}
+        self.workspaces = {m: e for m, e in self.workspaces.items() if e["points"]}
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"disks": self.disks}), encoding="utf-8")
+        tmp.write_text(json.dumps({"disks": self.disks, "workspaces": self.workspaces}), encoding="utf-8")
         tmp.replace(self.path)
 
     def series(self) -> list[dict]:
@@ -83,6 +115,18 @@ class DiskHistory:
 
     def forecast_of(self, mount: str) -> dict | None:
         entry = self.disks.get(mount)
+        return forecast(entry["points"]) if entry else None
+
+    def workspace_series(self, names=None) -> list[dict]:
+        """Every workspace's disk (of names, when given) with its points and forecast."""
+        return [
+            {"name": name, "points": [{"day": p[0], "used": p[1], "free": p[2], "total": p[3]} for p in e["points"]],
+             "forecast": forecast(e["points"])}
+            for name, e in sorted(self.workspaces.items()) if names is None or name in names
+        ]
+
+    def workspace_forecast(self, name: str) -> dict | None:
+        entry = self.workspaces.get(name)
         return forecast(entry["points"]) if entry else None
 
 
@@ -117,10 +161,12 @@ def forecast(points: list[list]) -> dict:
 
 
 class DiskRecorder:
-    """Records the disks once a day while OmniaCLI runs."""
+    """Records the disks once a day while OmniaCLI runs; workspaces, an async
+    callable, gives the workspaces' disks ([{name, used, capacity}])."""
 
-    def __init__(self, settings: Settings, history: DiskHistory):
+    def __init__(self, settings: Settings, history: DiskHistory, workspaces=None):
         self.settings, self.history = settings, history
+        self._workspaces = workspaces
         self._task: asyncio.Task | None = None
 
     def start(self) -> None:
@@ -134,13 +180,22 @@ class DiskRecorder:
     async def check(self, today: datetime.date | None = None) -> bool:
         """Record today if it is not yet; True when it recorded."""
         today = today or datetime.date.today()
-        if self.history.recorded(today):
-            return False
-        found = await _disks.disks(self.settings)
-        if not found:
-            return False
-        await asyncio.to_thread(self.history.record, found, today)
-        return True
+        done = False
+        if not self.history.recorded(today):
+            found = await _disks.disks(self.settings)
+            if found:
+                await asyncio.to_thread(self.history.record, found, today)
+                done = True
+        if self._workspaces is not None and self.settings.workspaces and not self.history.workspaces_recorded(today):
+            try:
+                found = await self._workspaces()
+            except Exception as exc:  # noqa: BLE001 - no helper: the machine's disks are still recorded
+                _logger.warning("The workspaces' disks not recorded: %s", exc)
+                found = []
+            if found:
+                await asyncio.to_thread(self.history.record_workspaces, found, today)
+                done = True
+        return done
 
     async def _loop(self) -> None:
         while True:

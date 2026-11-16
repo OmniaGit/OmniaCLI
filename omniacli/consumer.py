@@ -35,6 +35,7 @@ from typing import Optional
 
 import httpx
 
+from . import private
 from .config import PullerConnection, Settings
 from .jobs import Job, JobFailed
 from .linkcopy import BACKUP_NAME, _said
@@ -423,7 +424,7 @@ class _Conn:
         file, backup = str(result.get("file") or ""), str(result.get("backup") or "")
         if not FILE_NAME.fullmatch(file) or not BACKUP_NAME.fullmatch(backup):
             raise JobFailed(f"the backup on puller {c.puller} names no file (job {remote})")
-        folder.mkdir(parents=True, exist_ok=True)
+        private.backup_folder(folder)
         dest = folder / f"{self.name}_{backup}"
         progress["step"] = "download"
         got = await self._download(job, file, folder / f".{self.name}_{file}", progress)
@@ -435,6 +436,7 @@ class _Conn:
                 job.log(f"--- decrypt {file}")
                 try:
                     await asyncio.to_thread(decrypt_file, parse_key(c.key), c.puller, got, dest)
+                    private.backup_file(dest)
                 except PullerCryptoError as exc:
                     raise JobFailed(f"{file}: {exc}") from None
             elif is_encrypted_file(got):
@@ -460,7 +462,7 @@ class _Conn:
                     raise JobFailed(f"{c.link} refused {file} (HTTP {resp.status_code}): {_said(resp)}")
                 length = int(resp.headers.get("content-length") or 0)
                 progress.update(done=0, total=length, since=time.time())
-                with open(part, "wb") as fh:
+                with private.new_file(part) as fh:
                     async for chunk in resp.aiter_bytes(CHUNK):
                         fh.write(chunk)
                         size += len(chunk)

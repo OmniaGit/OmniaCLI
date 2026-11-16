@@ -6,70 +6,90 @@
 {% endblock %}
 {% block content %}
 <h1>Groups</h1>
-<p class="muted">The headings of the Dashboard, in this order. One member per line:
-<span class="mono">srv</span> a server of this instance, <span class="mono">*</span> all of them,
-<span class="mono">customer/srv</span> a server of a link, <span class="mono">customer/*</span> all the servers of a link.
-A server shows under the first group that has it; the others under "Other servers".
-Saved in <span class="mono">{{ groups_file }}</span>.</p>
+<p class="muted">The headings of the Dashboard's lists, in this order, each with its subgroups. One member per line:
+a name of the list (<span class="mono">srv</span>), or a pattern of names (<span class="mono">acme-*</span>,
+<span class="mono">*</span> all of them; <span class="mono">?</span> one character). An item shows under the first
+group that has it, itself or in a subgroup, then under the first of its subgroups that has it; the others under
+"Others". Saved in <span class="mono">{{ groups_file }}</span>.</p>
 <div id="error" class="banner" hidden></div>
-<div id="groups"></div>
+{% for list, title in (("servers", "Servers"), ("links", "Linked")) %}
+<section class="panel group-list" id="{{ list }}" data-list-name="{{ list }}" style="margin-bottom: 16px">
+  <h2 style="margin-top: 0">{{ title }}</h2>
+  <div class="groups"></div>
+  <div class="actions"><button type="button" class="add-top">Add group</button></div>
+  <p class="muted" style="margin-bottom: 4px">{{ "Servers" if list == "servers" else "Linked instances" }} known now
+  (click one to add it to the last group you edited):</p>
+  <div class="actions known">
+    {% for key in known[list] %}<button type="button" class="mono" data-member="{{ key }}">{{ key }}</button>
+    {% else %}<span class="muted">none yet</span>{% endfor %}
+  </div>
+</section>
+{% endfor %}
 <div class="actions">
-  <button type="button" id="add">Add group</button>
   <button type="button" id="save">Save</button>
   <a class="button" href="{{ prefix }}/">Cancel</a>
-</div>
-<h2 style="margin-top: 24px">Servers known now</h2>
-<p class="muted">Click one to add it to the last group you edited.</p>
-<div class="actions" id="known">
-  {% for key in known %}<button type="button" class="mono" data-member="{{ key }}">{{ key }}</button>{% endfor %}
-  {% for link in links %}<button type="button" class="mono" data-member="{{ link }}/*">{{ link }}/*</button>{% endfor %}
-  {% if not known and not links %}<span class="muted">No live servers and no links yet.</span>{% endif %}
 </div>
 <template id="group-template">
   <fieldset class="group-box">
     <legend><input type="text" class="name" placeholder="group name" aria-label="Group name"></legend>
-    <textarea class="members mono" rows="4" placeholder="one member per line" aria-label="Members"></textarea>
+    <textarea class="members mono" rows="3" placeholder="one member per line" aria-label="Members"></textarea>
     <div class="actions" style="margin: 8px 0 0">
       <button type="button" class="up" title="Move up">↑</button>
       <button type="button" class="down" title="Move down">↓</button>
+      <button type="button" class="add-sub">Add subgroup</button>
       <button type="button" class="danger remove">Remove</button>
     </div>
+    <div class="subgroups" style="margin-left: 18px"></div>
   </fieldset>
 </template>
 <script>
 (function () {
-  const list = document.getElementById("groups"), template = document.getElementById("group-template");
+  const template = document.getElementById("group-template");
+  const lists = {{ lists | tojson }};
+  const MAX_DEPTH = 4;
   let last = null;
-  function addGroup(group) {
+  const depthOf = (box) => { let d = 0; for (let b = box; b; b = b.parentElement.closest(".group-box")) d++; return d; };
+  function addGroup(container, group) {
     const box = template.content.firstElementChild.cloneNode(true);
     box.querySelector(".name").value = group.name || "";
     box.querySelector(".members").value = (group.members || []).join("\n");
-    box.querySelector(".up").onclick = () => { if (box.previousElementSibling) list.insertBefore(box, box.previousElementSibling); };
-    box.querySelector(".down").onclick = () => { if (box.nextElementSibling) list.insertBefore(box.nextElementSibling, box); };
-    box.querySelector(".remove").onclick = () => { if (last === box) last = null; box.remove(); };
-    box.addEventListener("focusin", () => { last = box; });
-    list.appendChild(box);
+    const subs = box.querySelector(".subgroups");
+    box.querySelector(".up").onclick = () => { if (box.previousElementSibling) container.insertBefore(box, box.previousElementSibling); };
+    box.querySelector(".down").onclick = () => { if (box.nextElementSibling) container.insertBefore(box.nextElementSibling, box); };
+    box.querySelector(".remove").onclick = () => { if (last && box.contains(last)) last = null; box.remove(); };
+    box.querySelector(".add-sub").onclick = () => { last = addGroup(subs, {}); last.querySelector(".name").focus(); };
+    box.addEventListener("focusin", (e) => { e.stopPropagation(); last = box; });
+    container.appendChild(box);
+    for (const sub of group.groups || []) addGroup(subs, sub);
+    if (depthOf(box) >= MAX_DEPTH) box.querySelector(".add-sub").hidden = true;
     return box;
   }
-  for (const group of {{ groups | tojson }}) addGroup(group);
-  document.getElementById("add").onclick = () => { last = addGroup({}); last.querySelector(".name").focus(); };
-  for (const button of document.querySelectorAll("[data-member]")) {
-    button.onclick = () => {
-      const box = last || list.lastElementChild || addGroup({});
-      last = box;
-      const area = box.querySelector(".members");
-      const lines = area.value.split("\n").map((l) => l.trim()).filter(Boolean);
-      if (!lines.includes(button.dataset.member)) lines.push(button.dataset.member);
-      area.value = lines.join("\n");
-    };
+  const collect = (container) => [...container.children].map((box) => ({
+    name: box.querySelector(":scope > legend .name").value.trim(),
+    members: box.querySelector(":scope > .members").value.split("\n").map((l) => l.trim()).filter(Boolean),
+    groups: collect(box.querySelector(":scope > .subgroups")),
+  }));
+  for (const section of document.querySelectorAll(".group-list")) {
+    const top = section.querySelector(".groups");
+    for (const group of lists[section.dataset.listName] || []) addGroup(top, group);
+    section.querySelector(".add-top").onclick = () => { last = addGroup(top, {}); last.querySelector(".name").focus(); };
+    for (const button of section.querySelectorAll("[data-member]")) {
+      button.onclick = () => {
+        // the last group edited in this list, else its last group, else a new one
+        const box = (last && section.contains(last)) ? last : (top.lastElementChild || addGroup(top, {}));
+        last = box;
+        const area = box.querySelector(":scope > .members");
+        const lines = area.value.split("\n").map((l) => l.trim()).filter(Boolean);
+        if (!lines.includes(button.dataset.member)) lines.push(button.dataset.member);
+        area.value = lines.join("\n");
+      };
+    }
   }
   document.getElementById("save").onclick = async () => {
-    const groups = [...list.children].map((box) => ({
-      name: box.querySelector(".name").value.trim(),
-      members: box.querySelector(".members").value.split("\n").map((l) => l.trim()).filter(Boolean),
-    }));
+    const body = {lists: Object.fromEntries([...document.querySelectorAll(".group-list")].map(
+      (section) => [section.dataset.listName, collect(section.querySelector(".groups"))]))};
     const resp = await fetch("{{ prefix }}/api/groups/save", {method: "POST",
-      headers: {"Content-Type": "application/json"}, body: JSON.stringify({groups})});
+      headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
     const data = await resp.json().catch(() => ({}));
     if (resp.ok) { location.href = "{{ prefix }}/"; return; }
     const errorBox = document.getElementById("error");

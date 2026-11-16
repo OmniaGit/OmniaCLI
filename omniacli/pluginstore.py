@@ -164,12 +164,20 @@ async def download(job: Job, source: PluginSource, plugin: dict, folder: Path) -
     name, url = plugin["name"], plugin["url"]
     if not NAME.fullmatch(name):
         raise JobFailed(f"{name!r} is not a plugin name")
-    target = folder / name
+    return await download_signed(job, source.public_key, url, folder / name, lambda manifest: _wheel_of(manifest, url))
+
+
+async def download_signed(job: Job, public_key: str, url: str, target: Path, check=None) -> dict:
+    """The file at url and its signed manifest into target (the only files
+    kept there: one version), under the published name, once the bytes are
+    the ones signed; its verified manifest. check(manifest) may refuse it
+    (StoreError) before the download."""
     target.mkdir(parents=True, exist_ok=True)
     async with _client() as client:
         try:
-            manifest, manifest_bytes, signature = await _signed(client, source.public_key, url)
-            _wheel_of(manifest, url)
+            manifest, manifest_bytes, signature = await _signed(client, public_key, url)
+            if check is not None:
+                check(manifest)
         except StoreError as exc:
             raise JobFailed(str(exc)) from None
         dest = target / Path(urlsplit(url).path).name
@@ -189,7 +197,7 @@ async def download(job: Job, source: PluginSource, plugin: dict, folder: Path) -
                         digest.update(chunk)
             if size != manifest["size"] or digest.hexdigest() != manifest["sha256"]:
                 raise JobFailed(f"{url}: not the file its manifest signs: not installed")
-            # the old plugin's files go: one version is kept
+            # the old files go: one version is kept
             for old in target.iterdir():
                 if old != part:
                     old.unlink()
@@ -202,6 +210,25 @@ async def download(job: Job, source: PluginSource, plugin: dict, folder: Path) -
             part.unlink(missing_ok=True)
     job.log(f"{size} bytes, sha256 {manifest['sha256']} as signed")
     return manifest
+
+
+def copy_signed(path: Path, staging: Path, public_key: str) -> tuple[Path, dict]:
+    """The file kept at path and its manifest and signature copied into
+    staging, never through a link the service user may put there meanwhile;
+    the copy and its manifest, verified with the key."""
+    for suffix in ("", MANIFEST_SUFFIX, SIGNATURE_SUFFIX):
+        src = path.with_name(path.name + suffix)
+        try:
+            fd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW)
+        except OSError as exc:
+            raise StoreError(f"{src}: {exc.strerror}") from None
+        with os.fdopen(fd, "rb") as fh, open(staging / src.name, "wb") as out:
+            shutil.copyfileobj(fh, out)
+    copy = staging / path.name
+    try:
+        return copy, verify_local(public_key, copy)
+    except SigningError as exc:
+        raise StoreError(f"{path}: {exc}") from None
 
 
 # --- the root helper ----------------------------------------------------------
@@ -236,20 +263,7 @@ def install(name: str, config: Path = SYSTEM_CONFIG, python: str = sys.executabl
         raise StoreError(f"{source}: {len(wheels)} wheels, not one")
     staging = Path(tempfile.mkdtemp(prefix="omniacli-plugin-"))
     try:
-        for suffix in ("", MANIFEST_SUFFIX, SIGNATURE_SUFFIX):
-            src = wheels[0].with_name(wheels[0].name + suffix)
-            # not through a link the service user may put there meanwhile
-            try:
-                fd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW)
-            except OSError as exc:
-                raise StoreError(f"{src}: {exc.strerror}") from None
-            with os.fdopen(fd, "rb") as fh, open(staging / src.name, "wb") as out:
-                shutil.copyfileobj(fh, out)
-        copy = staging / wheels[0].name
-        try:
-            manifest = verify_local(key, copy)
-        except SigningError as exc:
-            raise StoreError(f"{wheels[0]}: {exc}") from None
+        copy, manifest = copy_signed(wheels[0], staging, key)
         wheel = _wheel_of(manifest, str(wheels[0]))
         named = staging / wheel
         copy.rename(named)

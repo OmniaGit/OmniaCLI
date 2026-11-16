@@ -37,7 +37,7 @@ A command waits on the relay until the producer takes it (10 minutes at most), a
   </section>
   <section class="panel">
     <h3 class="chart-title">Disks</h3>
-    <div class="scroll"><table id="disks"><tr><th>Mount</th><th>Used</th><th>Free</th><th>Size</th><th>Full on</th></tr></table></div>
+    <div id="disks"><span class="muted">Waiting for the first report…</span></div>
     <h3 class="chart-title" style="margin-top: 16px">Commands sent from here</h3>
     <div class="scroll"><table id="sent"><tr><th>When</th><th>Command</th><th>By</th><th>Answer</th></tr></table></div>
   </section>
@@ -52,12 +52,12 @@ A command waits on the relay until the producer takes it (10 minutes at most), a
   </div>
 </section>
 {% include "_charts.html" %}
+{% include "_disk.html" %}
 <script>
 (function () {
   const base = "{{ prefix }}/api/connections/{{ name | urlencode }}";
   const $ = (id) => document.getElementById(id);
   const canAct = {{ can_act | tojson }}, isAdmin = {{ is_admin | tojson }}, account = {{ account | tojson }};
-  const sizeText = (b) => b >= 1073741824 ? (b / 1073741824).toFixed(1) + " GiB" : (b / 1048576).toFixed(0) + " MiB";
   const when = (t) => t ? new Date(t * 1000).toLocaleString() : "never";
   let latest = {}, shownJob = null, jobNext = 0;
 
@@ -103,11 +103,14 @@ A command waits on the relay until the producer takes it (10 minutes at most), a
       }
       options.hidden = false;
     }
-    const disks = $("disks"); clear(disks);
+    const disks = $("disks");
+    disks.replaceChildren();
+    if (!(latest.disks || []).length) OmniaDisk.message(disks, "No disks in the report.");
     for (const d of latest.disks || []) {
-      const row = disks.insertRow();
-      cell(row, d.mount, "mono"); cell(row, sizeText(d.used)); cell(row, sizeText(d.free)); cell(row, sizeText(d.total));
-      cell(row, d.forecast && d.forecast.full ? d.forecast.full : "—");
+      const item = document.createElement("div");
+      OmniaDisk.render(item, {label: d.mount, title: `${d.device} (${d.type})`, used: d.used, free: d.free, total: d.total,
+                              forecast: d.forecast, note: (d.holds || []).join(", ")});
+      disks.appendChild(item);
     }
     const sent = $("sent"); clear(sent);
     for (const c of data.sent) {

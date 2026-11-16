@@ -57,6 +57,9 @@ as_user = _ops.as_user
 # restart, start and stop an instance as the core does (its service, or the
 # process it starts; start and stop: systemd or process only)
 restart = _ops.restart
+# a backup into the instance's backup folder, with what the last backup
+# dialog chose for the fields a caller does not give (backup_into)
+backup_into = _ops.backup_into
 start = _ops.start
 stop = _ops.stop
 service_state = _ops.service_state
@@ -64,7 +67,7 @@ service_state = _ops.service_state
 __all__ = [
     "PLUGIN_API", "ENTRY_POINT_GROUP", "ServicePlugin", "Check", "ERROR", "WARNING",
     "ConfigError", "Instance", "Repository", "Server", "Job", "JobFailed",
-    "run", "capture", "as_user", "restart", "start", "stop", "service_state", "base_env", "system_user",
+    "run", "capture", "as_user", "backup_into", "restart", "start", "stop", "service_state", "base_env", "system_user",
     "ROLES", "SERVER_NAME", "USER_NAME", "Field", "FormButton", "Action", "ActionRefused", "Host",
     "Discovered", "COMPOSE_TOOLS",
 ]
@@ -131,7 +134,7 @@ class Discovered:
 
 # --- the server form ------------------------------------------------------
 
-FIELD_KINDS = ("text", "path", "number", "checkbox", "select")
+FIELD_KINDS = ("text", "path", "number", "checkbox", "select", "checklist")
 # the keys of an instance's mapping that the core reads: no field may take them
 CORE_KEYS = ("repositories", "restart", "log_file", "run_as", "from_link", "auto_update", "status",
              "type", "claude_dir")
@@ -177,6 +180,11 @@ class Field:
     # placeholder while it is disabled
     disabled_placeholder: str = ""
     buttons: tuple = ()  # FormButton
+    # backup_fields only: shown while the checkbox of this key is ticked
+    shown_with: str = ""
+    # checklist only: the number field (megabytes) under which a row is not
+    # ticked by default (backup_choices gives each row its size)
+    threshold: str = ""
 
 
 # --- the buttons of the server page ------------------------------------------
@@ -324,14 +332,50 @@ class ServicePlugin(ABC):
     async def backup(self, job: Job, instance: Instance, dest_dir: Path, options: dict | None = None) -> Path:
         """Back up the instance into dest_dir (it exists), return the file.
         options: the values of backup_fields; None or a key left out: its
-        default (the backup before a merge passes none)."""
+        default (the backup before a merge passes none). A checklist's value
+        is the list of the values ticked, None when nobody chose (the
+        plugin's own default; the core gives the choice of the last backup
+        dialog when there is one, see backup_into)."""
         raise JobFailed(f"{self.label} has no backup")
 
     def backup_fields(self) -> list[Field]:
-        """What may be chosen for a backup (checkbox or text), given as
-        options. A checkbox not posted is off: its off must be the backup
-        made without any choice."""
+        """What may be chosen for a backup (checkbox, text, number or
+        checklist), given as options. A checkbox not posted is off: its off
+        must be the backup made without any choice. Only the backup dialog
+        shows the fields that are not checkboxes; the other ways to back up
+        (a copy from a link, a schedule, MCP) take their values from the
+        last backup dialog of the instance."""
         return []
+
+    async def backup_choices(self, instance: Instance, key: str) -> dict:
+        """The rows the backup dialog offers for the checklist field key:
+        {"rows": [{"value", "label", "size" (bytes), "detail"}], "total":
+        bytes or None, "total_label"}. With a total (what the rows are part
+        of, the database's size) the dialog shows it, the size of the rows
+        ticked and what is left, an estimate of the backup. Raise JobFailed
+        when they cannot be found."""
+        raise JobFailed(f"{self.label} has no choices for {key}")
+
+    async def backup_estimate(self, instance: Instance) -> dict:
+        """What a backup of the instance would hold, before it is made, for
+        the preview of the dialogs: {"database": bytes on disk, "files":
+        bytes or None, "files_off": the checkbox that leaves the files out,
+        "list": the checklist whose ticked rows are left out of the
+        database, "list_on": its checkbox, "lists": {key: rows as
+        backup_choices}}. The dump of a database is taken as its size on
+        disk plus once more its binary rows not left out (written in hex).
+        Raise JobFailed when it cannot be told."""
+        raise JobFailed(f"{self.label} has no estimate of a backup")
+
+    async def restore_room(self, instance: Instance) -> dict:
+        """Where a restore into the instance writes, for the room check of
+        the dialogs: {"paths": {"database": folder or None (not known),
+        "files": folder, "temp": folder where the backup is unpacked},
+        "freed": {"database": bytes, "files": bytes the restore drops
+        first}, "notes": [text]}. The core adds the instance's backup
+        folder (the zip) and places each path on its disk. Raise JobFailed
+        when it cannot be told."""
+        raise JobFailed(f"{self.label} has no room check of a restore")
 
     async def restore(self, job: Job, instance: Instance, backup_zip: Path, options: dict) -> None:
         """Load a file of backup (made here or by a linked instance) into the
@@ -343,6 +387,16 @@ class ServicePlugin(ABC):
     def restore_fields(self) -> list[Field]:
         """What is asked before a restore (checkbox or text), given as options."""
         return []
+
+    def backup_problem(self, backup_zip: Path) -> str | None:
+        """Why this file, chosen by a person or come from another machine,
+        cannot be restored into an instance of this type: asked before
+        anything is touched, a restore drops the database first. None: it fits."""
+        return None
+
+    async def before_start(self, instance: Instance) -> None:
+        """Called before every start and restart of the instance: raise
+        JobFailed when it has nothing to run on (Odoo: no database yet)."""
 
     def process_command(self, instance: Instance) -> tuple[list[str], Path]:
         """(command, working directory) of the process OmniaCLI starts itself
@@ -383,6 +437,18 @@ class ServicePlugin(ABC):
         """The database client of the instance's psql page: the command the
         login shell runs (found by its PATH) and the environment it gets.
         None: the instance has no database shell."""
+        return None
+
+    def db_shell_as_service(self, instance: Instance) -> bool:
+        """Whether that client runs as OmniaCLI's own user: its \\! is then a
+        shell of that user, so a server does not open it. A plugin says False
+        only when it runs as somebody else."""
+        return True
+
+    def own_user_code(self, instance: Instance) -> str | None:
+        """On a server, what of the instance's code runs as OmniaCLI's own
+        user and how to avoid it (a warning of the checks). None: nothing
+        known."""
         return None
 
     def script_runner(self, instance: Instance) -> tuple[Path, str | None, dict]:
@@ -465,7 +531,18 @@ class ServicePlugin(ABC):
 
 
 # the methods a plugin must write as async def
-ASYNC_METHODS = ("checks", "after_pull", "backup", "restore", "dev_setup", "discover")
+async def restore_fetched(job: Job, instance: Instance, backup_zip: Path, options: dict) -> None:
+    """The restore of a backup downloaded from another machine: what came may
+    not be a backup, and is refused with the instance and its database intact.
+    The backups made here are not checked again."""
+    problem = instance.plugin.backup_problem(backup_zip)
+    if problem:
+        raise JobFailed(f"{problem}: nothing restored, {instance.key} not touched")
+    await instance.plugin.restore(job, instance, backup_zip, options)
+
+
+ASYNC_METHODS = ("checks", "after_pull", "backup", "backup_choices", "backup_estimate", "restore_room", "restore",
+                 "before_start", "dev_setup", "discover")
 _ID = re.compile(r"[a-z][a-z0-9_-]{0,31}")
 
 
@@ -520,8 +597,17 @@ def parts_problems(plugin: ServicePlugin) -> list[str]:
             problems.append(f"action {a.id}: no template {a.dialog} in the plugin's templates_dir")
         if a.dialog and a.params:
             problems.append(f"action {a.id}: a dialog of its own or params, not both")
-    for what, fields in (("backup", plugin.backup_fields()), ("restore", plugin.restore_fields())):
+    backup_kinds = ("checkbox", "text", "number", "checklist")
+    for what, fields, kinds in (("backup", plugin.backup_fields(), backup_kinds),
+                                ("restore", plugin.restore_fields(), ("checkbox", "text"))):
+        keys = {f.key: f.kind for f in fields if isinstance(f, Field)}
         for f in fields:
-            if not isinstance(f, Field) or f.kind not in ("checkbox", "text"):
-                problems.append(f"{what} field {f!r} is not a plugin_api.Field of kind checkbox or text")
+            if not isinstance(f, Field) or f.kind not in kinds:
+                problems.append(f"{what} field {f!r} is not a plugin_api.Field of kind {', '.join(kinds)}")
+                continue
+            if f.shown_with and keys.get(f.shown_with) != "checkbox":
+                problems.append(f"{what} field {f.key}: shown_with {f.shown_with!r} is not a checkbox of its fields")
+            if f.threshold and (f.kind != "checklist" or keys.get(f.threshold) != "number"):
+                problems.append(f"{what} field {f.key}: threshold is a number field of its fields, "
+                                "for a checklist")
     return problems

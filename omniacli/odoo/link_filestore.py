@@ -4,14 +4,16 @@
 python, as the user the instance runs as, so it imports nothing of OmniaCLI
 and runs on the oldest Python of an Odoo venv (no f-strings).
 
-    python link_filestore.py check|link SRC DST
+    python link_filestore.py check|link|merge SRC DST
 
 check proves, before anything is touched, that the files of SRC can be hard
 linked into DST by this user: SRC and DST's folder are on
 the same filesystem, a file of SRC is readable and may be linked (the kernel's
 fs.protected_hardlinks). link makes DST a tree of directories of its own
 holding hard links to the files of SRC; DST must not exist (the restore
-before it dropped the old one).
+before it dropped the old one). merge does the same into a DST that may
+exist already as a folder (an Odoo that wrote files while loading the
+database): its files stay, those of SRC with the same name are not linked.
 
 Odoo never rewrites a file of its filestore (it writes one only when its
 path, the sha1 of the content, does not exist yet) and only unlinks one, so
@@ -51,25 +53,31 @@ def check(src, dst):
     os.unlink(probe_link)
 
 
-def link(src, dst):
+def link(src, dst, merge=False):
     count = 0
     for root, names in files(src):
         target = os.path.join(dst, os.path.relpath(root, src))
         os.makedirs(target, exist_ok=True)
         for name in names:
+            if merge and os.path.lexists(os.path.join(target, name)):
+                continue
             os.link(os.path.join(root, name), os.path.join(target, name))
             count += 1
     print("%d files linked" % count)
 
 
 def main(argv):
-    if len(argv) != 4 or argv[1] not in ("check", "link"):
-        sys.exit("usage: link_filestore.py check|link SRC DST")
+    if len(argv) != 4 or argv[1] not in ("check", "link", "merge"):
+        sys.exit("usage: link_filestore.py check|link|merge SRC DST")
     mode, src, dst = argv[1:]
     if not os.path.isdir(src):
         sys.exit("no filestore %s" % src)
     if mode == "check":
         check(src, dst)
+    elif mode == "merge":
+        if os.path.islink(dst) or (os.path.lexists(dst) and not os.path.isdir(dst)):
+            sys.exit("the filestore %s is not a folder" % dst)
+        link(src, dst, merge=True)
     elif os.path.lexists(dst):
         sys.exit("the filestore %s already exists" % dst)
     else:
