@@ -5,6 +5,7 @@
    groups of the servers list (the list widget, _list.html), rendered with
    the page and again by /dashboard/servers when a job starts or ends. #}
 {% from "_icons.html" import icon, runner %}
+{% from "_instance_link.html" import instance_link %}
 {% macro server_table(rows) %}
 <div class="panel" data-list-box>
   <div class="scroll">
@@ -14,10 +15,11 @@
     <tr {{ item(row.text) }} data-server="{{ row.name }}">
       <td><div class="server-name"><a href="{{ row.base }}/servers/{{ row.name }}"><strong>{{ row.label }}</strong></a>
         <span class="view-buttons">
-          {# the instance itself, at its domain or on localhost, in a new tab;
+          {# the instance itself, at its domain or on localhost, in a new tab,
+             not clickable while its Odoo is stopped (_instance_link.html);
              its page here when its address is not known #}
           {% for role in ("production", "test") if role in row.roles %}
-          {% if row.web.get(role) %}<a class="button view-{{ role }}" href="{{ row.web[role] }}" target="_blank" rel="noopener" title="Open {{ row.web[role] }} in a new tab">{{ icon(role) }}{{ role | capitalize }}</a>
+          {% if row.web.get(role) %}{% call instance_link(row.web[role], row.state.get(role), "button view-" ~ role, "Odoo of " ~ row.label ~ " " ~ role) %}{{ icon(role) }}{{ role | capitalize }}{% endcall %}
           {% else %}<a class="button view-{{ role }}" href="{{ row.base }}/servers/{{ row.name }}?view={{ role }}" title="{{ role | capitalize }} of {{ row.label }}">{{ icon(role) }}{{ role | capitalize }}</a>{% endif %}
           {% endfor %}
         </span></div>

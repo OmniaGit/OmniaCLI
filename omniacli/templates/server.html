@@ -7,6 +7,7 @@
 {% endblock %}
 {% block content %}
 {% from "_icons.html" import icon %}
+{% from "_instance_link.html" import instance_link %}
 {% from "_actions.html" import action_button %}
 {% from "_console.html" import logbox, console_script with context %}
 <div class="server-head" style="padding: 0 0 14px; border: 0">
@@ -30,7 +31,7 @@
   <section class="panel instance-panel" data-key="{{ inst.key }}">
     <div class="server-head" style="padding: 0 0 8px; border: 0">
       <h2><span class="role {{ inst.role }}">{{ inst.role }}</span>
-        {% if inst.web_url %}<a class="web-link mono" href="{{ inst.web_url }}" target="_blank" rel="noopener" title="Open {{ inst.web_url }} in a new tab">{{ inst.web_url }} ↗</a>{% endif %}
+        {% if inst.web_url %}{% call instance_link(inst.web_url, run_state[inst.key], "web-link mono", inst.plugin.label ~ " of " ~ inst.key) %}{{ inst.web_url }} ↗{% endcall %}{% endif %}
         {% if busy[inst.key] %}{% set running_job = busy_job[inst.key] %}<span class="status running" style="font-size: 13px"> · {% if running_job %}<a href="{{ prefix }}/jobs/{{ running_job.id }}" style="color: inherit; text-decoration: underline" title="Open the job: {{ running_job.title }}">job running</a>{% else %}job running{% endif %}</span>{% endif %}</h2>
     {% if can_restart %}
     {% set off = "disabled" if busy[inst.key] else "" %}

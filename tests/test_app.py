@@ -13,6 +13,7 @@ import httpx
 import pytest
 
 from omniacli.app import create_app
+from omniacli import ops as core_ops
 from omniacli.odoo import ops as odoo_ops
 from omniacli.logtail import read_since
 
@@ -806,6 +807,24 @@ async def test_web_link_follows_the_domain(client, env):
     assert 'class="button view-test" href="https://test.example.com" target="_blank"' in page
     servers = (await client.get("/api/servers", headers={"Authorization": AUTH})).json()
     assert servers[0]["instances"]["test"]["url"] == "https://test.example.com"
+
+
+async def test_link_of_a_stopped_instance_is_not_clickable(client, env, monkeypatch):
+    test = env["settings"].instance("srv", "test")
+    test.domain = "https://test.example.com"
+
+    async def stopped(instance):
+        return "inactive"  # the unit of a stopped instance
+
+    monkeypatch.setattr(core_ops, "service_state", stopped)
+    page = (await client.get("/", headers={"Authorization": AUTH})).text
+    assert 'class="run-state stopped"' in page
+    assert 'href="https://test.example.com"' not in page
+    assert 'class="button view-test link-off" aria-disabled="true"' in page
+    # the address on the server page too
+    page = (await client.get("/servers/srv", headers={"Authorization": AUTH})).text
+    assert 'href="https://test.example.com"' not in page
+    assert 'class="web-link mono link-off" aria-disabled="true"' in page
 
 async def test_help_for_developers_and_admins(client):
     for user in ("admin", "dev"):

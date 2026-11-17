@@ -714,8 +714,14 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
     async def run_state(inst: Instance) -> str:
         """running, stopped or unknown (an init.d service, a unit not found)."""
         if inst.restart.type == "process":
+            return run_state_of(inst, None)
+        return run_state_of(inst, await ops.service_state(inst))
+
+    def run_state_of(inst: Instance, state: str | None) -> str:
+        """run_state of the instance from the service state already asked
+        (ops.service_state; not asked for a process OmniaCLI starts)."""
+        if inst.restart.type == "process":
             return "running" if ops.managed_pid(inst) else "stopped"
-        state = await ops.service_state(inst)
         if state in ("active", "activating", "reloading"):
             return "running"
         if state in ("inactive", "failed", "deactivating"):
@@ -852,6 +858,9 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         statuses = await asyncio.gather(
             *(asyncio.gather(*(ops.repository_status(r) for r in i.repositories)) for i in shown)
         )
+        # a systemd service: its ActiveState, None when unknown
+        service_states = dict(zip([i.key for i in shown],
+                                  await asyncio.gather(*(ops.service_state(i) for i in shown))))
         # Copy from link: for a user who logs in here, with the role it needs;
         # shown also without a usable link, disabled, saying how to get one
         from_link = {}
@@ -922,9 +931,9 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
                 "busy_job": {i.key: jobs.running_on(i.key) for i in shown},
                 # Odoo started by OmniaCLI: its pid, None when stopped
                 "running": {i.key: ops.managed_pid(i) for i in shown if i.restart.type == "process"},
-                # a systemd service: its ActiveState, None when unknown
-                "service_state": dict(zip([i.key for i in shown],
-                                          await asyncio.gather(*(ops.service_state(i) for i in shown)))),
+                "service_state": service_states,
+                # running, stopped or unknown, as on the Dashboard: the web link off when stopped
+                "run_state": {i.key: run_state_of(i, service_states[i.key]) for i in shown},
                 "jobs": [j for j in jobs.recent(200) if any(k.startswith(f"{server}/") for k in j.instances)][:10],
             },
         )

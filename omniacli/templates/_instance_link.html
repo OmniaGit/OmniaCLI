@@ -1,0 +1,13 @@
+{# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C · SPDX-License-Identifier: AGPL-3.0-or-later -#}
+{# The link that opens an instance (its domain, or localhost at its port) in
+   a new tab: the Dashboard's Production / Test buttons and the address on
+   the server page. Not clickable while the instance is stopped (nothing
+   answers there); a state not known (None, "unknown") leaves it clickable.
+   state: the run state of app.run_state ("running", "stopped", "unknown"). -#}
+{% macro instance_link(url, state, cls, what) -%}
+{% if state == "stopped" -%}
+<span class="{{ cls }} link-off" aria-disabled="true" title="{{ what }} is stopped: start it to open {{ url }}">{{ caller() }}</span>
+{%- else -%}
+<a class="{{ cls }}" href="{{ url }}" target="_blank" rel="noopener" title="Open {{ url }} in a new tab">{{ caller() }}</a>
+{%- endif %}
+{%- endmacro %}
