@@ -12,7 +12,9 @@
       <div id="addon-recent" class="actions" style="margin: 8px 0" hidden></div>
       <input type="text" id="addon-filter" placeholder="Filter modules…" style="margin: 8px 0">
       <div id="addon-list" class="addon-list"><span class="muted">Loading…</span></div>
-      <p class="muted" id="addon-versions" style="margin: -4px 0 8px"></p>
+      <p class="muted" style="margin: -4px 0 8px"><span id="addon-versions"></span>
+        <button type="button" id="addon-newer-pick" hidden
+                title="Choose the installed modules with a newer version on disk (in red)"></button></p>
       <label>Other modules, comma separated
         <input type="text" id="addon-extra" placeholder="e.g. base"></label>
       <p class="muted" id="addon-count"></p>
@@ -34,7 +36,9 @@
   const errorBox = document.getElementById("update-error");
   const chosenBox = document.getElementById("chosen-box");
   const recentBox = document.getElementById("addon-recent");
+  const newerPick = document.getElementById("addon-newer-pick");
   let target = null;
+  let newerModules = [];  // the installed modules with a newer version on disk
 
   // The last choices of modules of each instance, kept in this browser only
   // (a viewer's convenience): the newest first, at most RECENT_MAX.
@@ -119,7 +123,7 @@
     }
     if (target !== asked) return;  // the dialog was opened again for another instance
     const modules = data.modules || {};
-    let newer = 0;
+    newerModules = [];
     for (const label of list.querySelectorAll(".addon")) {
       const m = modules[label.dataset.name];
       const span = label.querySelector(".addon-version");
@@ -128,17 +132,23 @@
       if (!m.installed) span.textContent = "  not installed";
       else if (m.available && m.available !== m.installed) span.textContent = `  ${m.installed} → ${m.available}`;
       else span.textContent = "  " + m.installed;
-      if (m.newer) newer += 1;
+      if (m.newer) newerModules.push(label.dataset.name);
       label.title = m.newer ? `${label.dataset.path}\nnewer on disk: ${m.installed} → ${m.available}` : label.dataset.path;
     }
+    const newer = newerModules.length;
     document.getElementById("addon-versions").textContent =
       newer ? `${newer} installed module${newer > 1 ? "s" : ""} with a newer version on disk (in red)`
             : "No installed module has a newer version on disk";
+    newerPick.textContent = newer > 1 ? `Choose these ${newer}` : "Choose it";
+    newerPick.hidden = !newer;
   }
+  // the modules in red become the choice, as a recent choice does
+  newerPick.onclick = () => applyRecent(newerModules);
   async function load() {
     const asked = target;
     list.innerHTML = '<span class="muted">Loading…</span>';
     document.getElementById("addon-versions").textContent = "";
+    newerModules = []; newerPick.hidden = true;
     const resp = await fetch(`{{ prefix }}/x/odoo/servers/${target.server}/${target.role}/addons`);
     const data = await resp.json();
     if (target !== asked) return;
