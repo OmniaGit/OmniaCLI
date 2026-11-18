@@ -37,7 +37,9 @@ from ..plugin_api import (
     ServicePlugin,
     backup_into,
     capture,
+    is_sql_dump,
     restart,
+    sql_dump_problem,
     start,
     stop,
 )
@@ -168,6 +170,8 @@ class OdooPlugin(ServicePlugin):
     name = "odoo"
     label = "Odoo"
     api_version = PLUGIN_API
+    # a plain SQL dump too: load_sql.py, the filestore left as it is
+    restores_sql = True
 
     def __init__(self):
         # what the core gives the routes; the copy of production uses it too
@@ -490,6 +494,8 @@ class OdooPlugin(ServicePlugin):
                             load_only=bool(options.get("load_only", False)))
 
     def backup_problem(self, backup_zip: Path) -> str | None:
+        if is_sql_dump(backup_zip.name):
+            return sql_dump_problem(backup_zip)
         return ops.backup_problem(backup_zip)
 
     async def before_start(self, instance: Instance) -> None:
@@ -510,8 +516,12 @@ class OdooPlugin(ServicePlugin):
         stopped nor updated nor restarted."""
         odoo_bin = ops.find_odoo_bin(instance)
         major = ops.odoo_major(odoo_bin) if odoo_bin else None
-        found = ops.backup_major(backup_zip)
-        if found is None:
+        sql = is_sql_dump(backup_zip.name)
+        found = None if sql else ops.backup_major(backup_zip)
+        if sql:
+            job.log(f"WARNING: {backup_zip.name} is a SQL dump: it names no Odoo version, not compared with "
+                    "the instance's")
+        elif found is None:
             job.log(f"WARNING: {backup_zip.name} names no Odoo version (no manifest.json): not compared "
                     "with the instance's")
         elif major is not None and found != major:
@@ -519,7 +529,8 @@ class OdooPlugin(ServicePlugin):
                             f"{major}: a database is not loaded into another version")
         major = major if major is not None else found
         if major is not None and major >= 20:
-            raise JobFailed("click-odoo-restoredb does not restore Odoo 20 and later")
+            raise JobFailed("a SQL dump is not loaded into Odoo 20 and later here (not verified)" if sql
+                            else "click-odoo-restoredb does not restore Odoo 20 and later")
         if reset_passwords and major is None:
             raise JobFailed("the Odoo version is unknown (no odoo-bin, no manifest.json in the backup): "
                             "the passwords cannot be set to admin")
@@ -540,7 +551,14 @@ class OdooPlugin(ServicePlugin):
         else:
             job.log(f"--- {instance.key} is an init.d service: not stopped, restarted at the end")
         try:
-            await ops.restore(job, instance, backup_zip, neutralize)
+            if sql:
+                errors = await ops.load_sql(job, instance, backup_zip, neutralize, instance.web_url)
+                if errors:
+                    job.log(f"WARNING: psql went past {errors} SQL error(s) of the dump (each one is above): "
+                            "the database may differ from the dump where they are; the update of the "
+                            "modules makes their report views again")
+            else:
+                await ops.restore(job, instance, backup_zip, neutralize)
             if shared:
                 await ops.share_filestore(job, instance, *shared)
             if reset_passwords:

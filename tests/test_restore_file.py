@@ -118,8 +118,9 @@ async def test_a_zip_that_is_no_backup_touches_nothing(here, env):
 async def test_what_the_upload_refuses(here):
     admin = as_user("admin", post=True)
     folder = here.settings.backup_dir / "srv" / "test"
+    # Odoo also takes a plain SQL dump (test_restore_sql.py): what is neither is refused
     resp = await here.post(UPLOAD, params={"name": "x.tar"}, headers=admin, content=b"x")
-    assert resp.status_code == 400 and ".zip" in resp.json()["error"]
+    assert resp.status_code == 400 and "x.tar is not a zip nor a plain SQL dump" in resp.json()["error"]
     resp = await here.post(UPLOAD, params={"name": "notzip.zip"}, headers=admin, content=b"not a zip")
     assert resp.status_code == 400 and "not a zip" in resp.json()["error"]
     assert not folder.exists() or not list(folder.iterdir())  # no part left behind

@@ -34,6 +34,10 @@ CLI_PACKAGE = "click-odoo-contrib"
 LINK_SCRIPT = Path(__file__).with_name("link_filestore.py")
 # what click-odoo runs to set every user's password to admin
 PASSWORDS_SCRIPT = Path(__file__).with_name("reset_passwords.py")
+# what the venv's python runs to load a plain SQL dump (the database dropped
+# and made again, the filestore left as it is)
+LOAD_SQL_SCRIPT = Path(__file__).with_name("load_sql.py")
+SQL_ERRORS_MARK = "OMNIACLI_SQL_ERRORS="
 # what click-odoo runs around a module update: a neutralized database keeps
 # its crons off
 CRON_GUARD_SCRIPT = Path(__file__).with_name("cron_guard.py")
@@ -554,6 +558,36 @@ async def restore(job: Job, instance: Instance, backup_zip: Path, neutralize: bo
         env = {**env, "TMPDIR": str(folder)}
         job.log(f"the backup is unpacked in {folder} first")
         await run(job, as_user(instance.run_as, [*cmd, opts.database, staged], env), env=env)
+
+
+async def load_sql(job: Job, instance: Instance, dump: Path, neutralize: bool, base_url: str | None) -> int:
+    """load_sql.py: the plain SQL dump replaces the instance's database
+    (dropped and made again by Odoo), the filestore is left as it is; with
+    neutralize Odoo's neutralize_database runs; then a new database.uuid and
+    database.secret and web.base.url = base_url (None: Odoo's default). The
+    dump reaches the script on its standard input, opened here: run_as
+    needs no access to the backup folder and no copy is made. The number
+    of the SQL errors psql went past (each is in the log)."""
+    opts = instance.options
+    env = odoo_env(instance)
+    job.log(f"--- load the SQL dump {dump.name} into database {opts.database}"
+            + (" (neutralized)" if neutralize else "") + ": the filestore is not touched")
+    lines: list[str] = []
+
+    class Seen:
+        """The job, keeping the lines the script prints too."""
+        def log(self, line: str) -> None:
+            lines.append(line)
+            job.log(line)
+
+    with _staged_script(LOAD_SQL_SCRIPT, "omniacli-load-sql-") as script:
+        cmd = [opts.venv_bin / "python", script, opts.odoo_config, opts.database, "1" if neutralize else "0",
+               base_url or "", str(dump.stat().st_size)]
+        with open(dump, "rb") as source:
+            # no timeout, as the restore of a zip: a big dump takes its time
+            await run(Seen(), as_user(instance.run_as, cmd, env), env=env, stdin=source)
+    found = [line for line in lines if line.startswith(SQL_ERRORS_MARK)]
+    return int(found[-1][len(SQL_ERRORS_MARK):]) if found else 0
 
 
 

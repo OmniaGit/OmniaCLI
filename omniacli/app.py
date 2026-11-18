@@ -35,7 +35,7 @@ from starlette.background import BackgroundTask
 from starlette.requests import ClientDisconnect, HTTPConnection
 
 from . import (backupchoices, checks, private, restoreroom, consumer, disks, gitcredentials, linkcopy, listgroups, ops, packages, plugins, pluginstore, puller, publisher,
-               schedules, selflog, sshlinks, shell, stacktemplates, templatestore, tunnel, workspacehelper, workspaceops)
+               schedules, selflog, sqldump, sshlinks, shell, stacktemplates, templatestore, tunnel, workspacehelper, workspaceops)
 from .accesslog import AccessLog
 from .diskhistory import DiskHistory, DiskRecorder
 from .auth import ROLES as ACCESS_ROLES
@@ -147,7 +147,6 @@ _TEMPLATES = Jinja2Templates(
 # The OmniaSolutions "O" (Client2019 Setup/dist/images/omnia.ico, 355x280,
 # centred on a transparent square); served without login, like any favicon.
 _STATIC = Path(__file__).parent / "static"
-_BACKUP_NAME = re.compile(r"[A-Za-z0-9._-]+\.zip")
 # a value of a checklist field (backup_fields): a name, schema.table.column
 _CHECKLIST_VALUE = re.compile(r"[A-Za-z0-9_.$:-]{1,200}")
 # the terminal of the shell page: xterm.js 6.0.0 and its fit addon 0.11.0
@@ -894,7 +893,9 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
                 restore_file[i.key] = {
                     "url": f"{base}/{i.role}/restore",
                     "upload": f"{prefix_of(request)}/api/servers/{srv.name}/{i.role}/backups/upload",
-                    "backups": f"{prefix_of(request)}/api/servers/{srv.name}/{i.role}/backups",
+                    "backups": f"{prefix_of(request)}/api/servers/{srv.name}/{i.role}/backups"
+                               + ("?dumps=1" if i.plugin.restores_sql else ""),
+                    "sql": i.plugin.restores_sql,
                     "database": str(i.plugin.describe(i).get("database") or i.key) if i.role == "production" else ""}
         # Git pull: with more than one thing to pull, the dialog chooses which
         pull_choices = {}
@@ -1226,11 +1227,15 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         return settings.backup_dir / instance.server / instance.role
 
     @app.get("/api/servers/{server}/{role}/backups")
-    async def backup_list(request: Request, server: str, role: str):
+    async def backup_list(request: Request, server: str, role: str, dumps: bool = False):
+        """The backup zips of the instance, newest first; with dumps the SQL
+        dumps uploaded for a restore too (the restore dialog, the server
+        page: a link's copy and the MCP list take zips only)."""
         instance = get_instance(server, role)
         folder = backup_folder(instance)
-        files = sorted(folder.glob("*.zip"), key=lambda p: p.stat().st_mtime, reverse=True) \
-            if folder.is_dir() else []
+        found = [p for p in folder.iterdir() if p.is_file() and (
+            p.suffix == ".zip" or (dumps and sqldump.is_dump_name(p.name)))] if folder.is_dir() else []
+        files = sorted(found, key=lambda p: p.stat().st_mtime, reverse=True)
         return [
             {
                 "file": p.name,
@@ -1248,12 +1253,13 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         instance = get_instance(server, role, drafts=me.can("admin"))
         folder = backup_folder(instance).resolve()
         path = (folder / name).resolve()
-        # only a zip directly in this instance's backup folder
-        if not _BACKUP_NAME.fullmatch(name) or path.parent != folder or not path.is_file():
+        # only a zip or a SQL dump directly in this instance's backup folder
+        if not sqldump.RESTORE_NAME.fullmatch(name) or path.parent != folder or not path.is_file():
             raise HTTPException(status.HTTP_404_NOT_FOUND, "No such backup")
         access_log.record("download", me.kind, me.name, request.client.host if request.client else "",
                           f"{instance.key}/{name}" + (f" for {me.on_behalf}" if me.on_behalf else ""))
-        return FileResponse(path, media_type="application/zip", filename=name)
+        return FileResponse(path, media_type="application/sql" if sqldump.is_dump_name(name) else "application/zip",
+                            filename=name)
 
     def from_link_role(instance: Instance) -> str:
         """Who may copy a linked instance's database into instance: a production
@@ -1347,14 +1353,22 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
     async def backup_upload(request: Request, server: str, role: str, name: str = "",
                             user: Principal = Depends(admin)):
         """A backup zip sent by the browser (the raw body), into the instance's
-        backups, through a .part file: whole or absent. An admin's: what is
-        restored runs in the database's tools (a dump.sql goes through psql)."""
+        backups, through a .part file: whole or absent. For a plugin with
+        restores_sql, a plain SQL dump too, told by its head and kept with
+        the name .sql (17.11.2026.bck: 17.11.2026.bck.sql). An admin's: what
+        is restored runs in the database's tools (a dump.sql goes through
+        psql)."""
         instance = _restorable(get_instance(server, role))
         if user.kind != "user":
             raise HTTPException(status.HTTP_403_FORBIDDEN, "Only a user who logs in here may upload a backup")
         name = re.sub(r"[^A-Za-z0-9._-]", "_", Path(name).name)
-        if not linkcopy.BACKUP_NAME.fullmatch(name):
-            return refuse("The file must be a .zip")
+        dump = instance.plugin.restores_sql and not name.endswith(".zip")
+        given = name
+        if dump:
+            name = sqldump.stored_name(name)
+        if not sqldump.RESTORE_NAME.fullmatch(name):
+            return refuse("The file must be a .zip or a plain SQL dump" if instance.plugin.restores_sql
+                          else "The file must be a .zip")
         folder = private.backup_folder(backup_folder(instance))
         dest = folder / name
         if dest.exists():
@@ -1371,7 +1385,11 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             with os.fdopen(handle, "wb") as out:
                 async for chunk in request.stream():
                     out.write(chunk)
-            if not zipfile.is_zipfile(part):
+            if dump:
+                problem = sqldump.problem(part, given)
+                if problem:
+                    return refuse(problem)
+            elif not zipfile.is_zipfile(part):
                 return refuse(f"{name} is not a zip file")
             os.replace(part, dest)
         except ClientDisconnect:
@@ -1383,14 +1401,17 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
     @app.post("/servers/{server}/{role}/restore")
     async def action_restore(request: Request, server: str, role: str, user: Principal = Depends(admin)):
         """Restore a zip of the instance's backups (made here or uploaded)
-        into it, with the choices its plugin asks."""
+        into it, with the choices its plugin asks; or a SQL dump uploaded,
+        for a plugin with restores_sql."""
         instance = _restorable(get_instance(server, role))
         if user.kind != "user":
             raise HTTPException(status.HTTP_403_FORBIDDEN, "Only a user who logs in here may restore a backup")
         raw, _ = await posted_params(request)
         name = str(raw.get("backup") or "").strip()
-        if not linkcopy.BACKUP_NAME.fullmatch(name):
-            return refuse(f"{name!r} is not the name of a backup zip")
+        if not sqldump.RESTORE_NAME.fullmatch(name):
+            return refuse(f"{name!r} is not the name of a backup zip or SQL dump")
+        if sqldump.is_dump_name(name) and not instance.plugin.restores_sql:
+            return refuse(f"{instance.plugin.label} does not restore a SQL dump: a backup zip is asked")
         path = backup_folder(instance) / name
         if not path.is_file():
             return refuse(f"No backup {name} of {instance.key}", status.HTTP_404_NOT_FOUND)

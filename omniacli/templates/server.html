@@ -123,7 +123,7 @@
       {% endif %}
       {% if restore_file[inst.key] %}
       <button type="button" {{ off }} data-restore-file='{{ restore_file[inst.key] | tojson }}' data-key="{{ inst.key }}"
-              title="Restore a backup into {{ inst.key }}: a zip from this computer, or one of its backups">{{ icon("backup") }}Restore</button>
+              title="Restore a backup into {{ inst.key }}: a zip{{ ' or a plain SQL dump' if inst.plugin.restores_sql }} from this computer, or one of its backups">{{ icon("backup") }}Restore</button>
       {% endif %}
       {% for b in buttons[inst.key].backup %}{{ action_button(b, off) }}{% endfor %}
       </div>
@@ -169,7 +169,7 @@
     <div class="chart-box"><svg class="chart" data-chart="mem" role="img" aria-label="Memory of {{ inst.key }} over the last hour"></svg><div class="chart-tip" hidden></div></div>
 
     {% if can_act %}
-    <details class="backups" style="margin-top: 12px" data-url="{{ prefix }}/api/servers/{{ server.name }}/{{ inst.role }}/backups">
+    <details class="backups" style="margin-top: 12px" data-url="{{ prefix }}/api/servers/{{ server.name }}/{{ inst.role }}/backups{{ '?dumps=1' if inst.plugin.restores_sql }}">
       <summary>Backups</summary>
       <div class="backup-list muted">Loading…</div>
     </details>

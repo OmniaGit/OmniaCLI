@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import Any, Callable, Union
 
 from . import ops as _ops
+from . import sqldump as _sqldump
 from .composehelper import TOOLS as COMPOSE_TOOLS
 from .config import ROLES, SERVER_NAME, USER_NAME, ConfigError, Instance, Repository, Server
 from .jobs import Job, JobFailed
@@ -63,13 +64,17 @@ backup_into = _ops.backup_into
 start = _ops.start
 stop = _ops.stop
 service_state = _ops.service_state
+# a plain SQL dump of pg_dump, for a plugin with restores_sql: whether a
+# backup's name is one, and why a file is not one (None: it is)
+is_sql_dump = _sqldump.is_dump_name
+sql_dump_problem = _sqldump.problem
 
 __all__ = [
     "PLUGIN_API", "ENTRY_POINT_GROUP", "ServicePlugin", "Check", "ERROR", "WARNING",
     "ConfigError", "Instance", "Repository", "Server", "Job", "JobFailed",
     "run", "capture", "as_user", "backup_into", "restart", "start", "stop", "service_state", "base_env", "system_user",
     "ROLES", "SERVER_NAME", "USER_NAME", "Field", "FormButton", "Action", "ActionRefused", "Host",
-    "Discovered", "COMPOSE_TOOLS",
+    "Discovered", "COMPOSE_TOOLS", "is_sql_dump", "sql_dump_problem",
 ]
 
 
@@ -300,6 +305,9 @@ class ServicePlugin(ABC):
     label: str = ""
     # the PLUGIN_API this plugin was written for
     api_version: int = 0
+    # True: restore() also takes a plain SQL dump (pg_dump --format=plain,
+    # its name ends in .sql, sqldump.py), besides a backup zip
+    restores_sql: bool = False
 
     # --- what every plugin does ----------------------------------------
 
@@ -381,7 +389,8 @@ class ServicePlugin(ABC):
         """Load a file of backup (made here or by a linked instance) into the
         instance, whose data it replaces. options: the values of
         restore_fields. Raise JobFailed before touching anything when the
-        file does not fit the instance."""
+        file does not fit the instance. With restores_sql the file may be a
+        plain SQL dump (its name ends in .sql)."""
         raise JobFailed(f"{self.label} has no restore")
 
     def restore_fields(self) -> list[Field]:

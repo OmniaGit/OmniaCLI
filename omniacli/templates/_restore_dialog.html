@@ -1,12 +1,13 @@
 {# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C · SPDX-License-Identifier: AGPL-3.0-or-later -#}
 {# Restore: drawn once on the server page, it opens for the buttons
-   data-restore-file (url, upload, backups, database). A zip from this computer
-   goes first into the instance's backups, then a job restores it. -#}
+   data-restore-file (url, upload, backups, sql, database). A zip from this
+   computer (or, with sql, a plain SQL dump: any name, told by its head) goes
+   first into the instance's backups, then a job restores it. -#}
 <dialog id="restore-dialog">
   <form method="dialog" id="restore-form">
     <h2 id="restore-title" style="margin-bottom: 4px"></h2>
-    <p class="muted" style="margin-top: 0">The instance's database and filestore are dropped first, then the backup is loaded.</p>
-    <label><input type="radio" name="restore-source" value="" checked> A zip from this computer</label>
+    <p class="muted" style="margin-top: 0" id="restore-what"></p>
+    <label><input type="radio" name="restore-source" value="" checked> <span id="restore-source-label">A zip from this computer</span></label>
     <input type="file" id="restore-file" accept=".zip" style="display: block; margin: 4px 0 8px 22px">
     <div id="restore-backups" class="scroll" style="max-height: 35vh; margin: 6px 0"></div>
     {% for f in restore_fields %}
@@ -38,7 +39,13 @@
   const fileInput = document.getElementById("restore-file");
   const progress = document.getElementById("restore-progress");
   const go = document.getElementById("restore-go");
+  const what = document.getElementById("restore-what");
   let target = null, key = "", sending = null;
+  // what a restore drops: a zip brings a filestore, a SQL dump only the database
+  const ZIP_TEXT = "The instance's database and filestore are dropped first, then the backup is loaded.";
+  const SQL_TEXT = ZIP_TEXT + " A plain SQL dump (pg_dump --format=plain) replaces only the database: "
+    + "the filestore stays as it is.";
+  const isDump = (name) => !name.toLowerCase().endsWith(".zip");
   const sizeText = (b) => b >= 1073741824 ? (b / 1073741824).toFixed(2) + " GiB"
     : b >= 1048576 ? (b / 1048576).toFixed(1) + " MiB" : Math.max(1, Math.round(b / 1024)) + " KiB";
 
@@ -62,9 +69,9 @@
   fileInput.addEventListener("change", () => {
     dialog.querySelector('input[name=restore-source][value=""]').checked = true;
   });
-  // the upload widget (_upload.html): the zip with its percentage
+  // the upload widget (_upload.html): the zip or the SQL dump with its percentage
   async function upload(file) {
-    sending = OmniaUpload.send(target.upload, file, {type: "application/zip",
+    sending = OmniaUpload.send(target.upload, file, {type: isDump(file.name) ? "application/sql" : "application/zip",
                                                      progress: (p) => { progress.value = p; }});
     return (await sending).file;
   }
@@ -74,6 +81,11 @@
       target = JSON.parse(button.dataset.restoreFile); key = button.dataset.key;
       document.getElementById("restore-title").textContent = `Restore into ${key}`;
       document.getElementById("restore-form").reset();
+      // a SQL dump has any name (17.11.2026.bck): the file chooser filters nothing
+      if (target.sql) fileInput.removeAttribute("accept"); else fileInput.accept = ".zip";
+      document.getElementById("restore-source-label").textContent = target.sql
+        ? "A zip or a plain SQL dump from this computer" : "A zip from this computer";
+      what.textContent = target.sql ? SQL_TEXT : ZIP_TEXT;
       document.getElementById("restore-confirm").hidden = !target.database;
       document.getElementById("restore-db").textContent = target.database;
       errorBox.textContent = ""; progress.hidden = true; go.disabled = false;
@@ -86,7 +98,10 @@
     errorBox.textContent = "";
     let backup = dialog.querySelector("input[name=restore-source]:checked").value;
     const file = backup ? null : fileInput.files[0];
-    if (!backup && !file) { errorBox.textContent = "Choose a zip, or one of the backups."; return; }
+    if (!backup && !file) {
+      errorBox.textContent = target.sql ? "Choose a zip or a SQL dump, or one of the backups." : "Choose a zip, or one of the backups.";
+      return;
+    }
     const body = {};
     for (const input of dialog.querySelectorAll("[data-restore-option]")) {
       body[input.dataset.restoreOption] = input.type === "checkbox" ? input.checked : input.value.trim();

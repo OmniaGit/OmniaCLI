@@ -202,7 +202,8 @@ it has, at least one.</p>
     every repository on its branch without local changes, the service found, sudo allowed, production and test on
     separate databases and working copies, the backup folder writable. If they all pass, the server goes live; the dialog lists each check.
     A database that does not exist yet, or an empty one, is only a warning: <strong>Start</strong> and <strong>Restart</strong> refuse it until a
-    backup is restored with <strong>Restore</strong> (admin): a zip from this computer, or one of the instance's backups; a production needs its database name typed.</li>
+    backup is restored with <strong>Restore</strong> (admin): a zip from this computer, or one of the instance's backups; a production needs its database name typed.
+    For Odoo it also takes a plain SQL dump (<span class="mono">pg_dump --format=plain</span>, of any name): it replaces only the database, the filestore stays as it is; neutralized by Odoo if asked, with a new database uuid and <span class="mono">web.base.url</span> set to the instance's address.</li>
   <li>On a live server, <strong>Test &amp; save</strong> saves the change only if every check passes, otherwise the
     server stays as it was; <strong>Save as draft</strong> takes it offline.</li>
   <li>A server with a running job cannot be edited or deleted. Every save keeps the previous servers file as
