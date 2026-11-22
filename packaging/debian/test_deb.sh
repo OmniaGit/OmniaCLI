@@ -48,6 +48,14 @@ systemctl is-enabled --quiet omniacli || fail "service not enabled"
 [ "$(stat -c '%U:%G %a' /etc/omniacli/omniacli.yaml)" = "root:omniacli 640" ] || fail "config permissions"
 [ "$(stat -c '%U %a' /etc/omniacli/initial-admin-password)" = "root 600" ] || fail "password file permissions"
 visudo -cf /etc/sudoers.d/omniacli >/dev/null || fail "sudoers file invalid"
+# the shell sandboxes: their helper and the login shell of the group's users, nothing else
+visudo -cf /etc/sudoers.d/omniacli-sandbox >/dev/null || fail "sandbox sudoers file invalid"
+grep -qx 'omniacli ALL=(root) NOPASSWD: /opt/omniacli/venv/bin/omniacli sandbox-helper \*' /etc/sudoers.d/omniacli-sandbox \
+    || fail "sandbox helper not allowed"
+grep -qx 'omniacli ALL=(%omniacli-sandbox) NOPASSWD: /bin/bash --login' /etc/sudoers.d/omniacli-sandbox \
+    || fail "sandbox shells not allowed"
+getent group omniacli-sandbox >/dev/null || fail "group omniacli-sandbox missing"
+[ "$(stat -c '%U %a' /var/lib/omniacli-sandbox)" = "root 711" ] || fail "sandbox folder permissions"
 PW="$(cat /etc/omniacli/initial-admin-password)"
 [ "$(curl -s -o /dev/null -w '%{http_code}' localhost:8090/)" = 401 ] || fail "no 401 without login"
 [ "$(curl -s -o /dev/null -w '%{http_code}' -H "Origin: http://localhost:8090" -d "username=admin&password=wrong" localhost:8090/login)" = 401 ] \

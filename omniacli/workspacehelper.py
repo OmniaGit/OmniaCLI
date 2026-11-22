@@ -595,6 +595,45 @@ def _harden_mount(mount: Path) -> None:
         _run("mount", "-o", "remount,nosuid,nodev", str(mount))
 
 
+def image_to_size(image: Path, size: int) -> bool:
+    """The ext4 image of a disk made (sparse, root's only), or made larger to
+    size: whether it grew (its file system then grows once it is mounted,
+    grow_mounted). Never smaller: the caller refuses that first. Also used
+    by the shell sandboxes (sandboxhelper.py)."""
+    if image.is_symlink():
+        raise HelperError(f"{image} is a symbolic link")
+    if not image.exists():
+        fd = os.open(image, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        os.close(fd)
+        os.truncate(image, size)
+        _run("mkfs.ext4", "-q", "-F", str(image))
+        return False
+    if image.stat().st_size < size:
+        os.truncate(image, size)
+        return True
+    return False
+
+
+def mount_folder(mount: Path) -> None:
+    """The empty folder a disk is mounted on; while the disk is not mounted
+    it is immutable, so nothing is written beneath it."""
+    if not mount.exists():
+        mount.mkdir(mode=0o755)
+    if not os.path.ismount(mount):
+        if any(mount.iterdir()):
+            raise HelperError(f"{mount} is not empty: a disk is mounted on an empty folder only")
+        _run("chattr", "+i", str(mount))
+
+
+def grow_mounted(image: Path) -> None:
+    """The file system of a mounted image grown to the image's new size."""
+    loop = loop_of(image)
+    if loop is None:
+        raise HelperError(f"{image} is not attached to a loop device: it is not mounted")
+    _run("losetup", "--set-capacity", loop)
+    _run("resize2fs", loop)
+
+
 def disk(name: str, storage: str, size_gb: str) -> dict:
     image, mount = workspace(name, storage)
     if not (size_gb.isdigit() and 1 <= int(size_gb) <= MAX_DISK_GB):
@@ -602,28 +641,12 @@ def disk(name: str, storage: str, size_gb: str) -> dict:
     size = int(size_gb) * GB
     image.parent.mkdir(mode=0o700, exist_ok=True)
     os.chmod(image.parent, 0o700)
-    grow = False
-    if image.is_symlink():
-        raise HelperError(f"{image} is a symbolic link")
+    if image.exists() and not image.is_symlink() and image.stat().st_size > size:
+        raise HelperError(f"the disk of {name} is {image.stat().st_size // GB} GB: a disk is not made smaller")
     if not image.exists() or image.stat().st_size < size:
         _fits(image, size, storage)
-    if not image.exists():
-        fd = os.open(image, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-        os.close(fd)
-        os.truncate(image, size)
-        _run("mkfs.ext4", "-q", "-F", str(image))
-    elif image.stat().st_size < size:
-        os.truncate(image, size)
-        grow = True
-    elif image.stat().st_size > size:
-        raise HelperError(f"the disk of {name} is {image.stat().st_size // GB} GB: a disk is not made smaller")
-    if not mount.exists():
-        mount.mkdir(mode=0o755)
-    if not os.path.ismount(mount):
-        if any(mount.iterdir()):
-            raise HelperError(f"{mount} is not empty: a disk is mounted on an empty folder only")
-        # nothing is written beneath the disk while it is not mounted
-        _run("chattr", "+i", str(mount))
+    grow = image_to_size(image, size)
+    mount_folder(mount)
     unit = unit_name(mount)
     _write(SYSTEMD / unit, unit_text(image, mount, name))
     dropin = SYSTEMD / "docker.service.d"
@@ -637,9 +660,7 @@ def disk(name: str, storage: str, size_gb: str) -> dict:
         raise HelperError(f"{unit} did not mount {image} on {mount}")
     _harden_mount(mount)
     if grow:
-        loop = loop_of(image)
-        _run("losetup", "--set-capacity", loop)
-        _run("resize2fs", loop)
+        grow_mounted(image)
     _close_mount(mount)
     return {"workspace": name, "image": str(image), "mount": str(mount), "unit": unit, "size_gb": int(size_gb)}
 

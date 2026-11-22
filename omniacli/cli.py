@@ -184,6 +184,13 @@ def _workspace_helper(args) -> int:
     return workspacehelper.main(args.args)
 
 
+def _sandbox_helper(args) -> int:
+    """As root (sudo): the shell sandbox of a user on a server (sandboxhelper.py)."""
+    from . import sandboxhelper
+
+    return sandboxhelper.main(args.args)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="omniacli")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -252,6 +259,12 @@ def main(argv: list[str] | None = None) -> int:
                                     "template or removed (disk, create, remove)")
     workspace.add_argument("args", nargs=argparse.REMAINDER, help="<action> [arguments]")
     workspace.set_defaults(func=_workspace_helper)
+
+    sandbox = sub.add_parser("sandbox-helper",
+                             help="as root: the shell sandbox of a user on a server, a Linux user of its "
+                                  "own with a small disk (ensure, disable, enable, delete)")
+    sandbox.add_argument("args", nargs=argparse.REMAINDER, help="<action> [arguments]")
+    sandbox.set_defaults(func=_sandbox_helper)
 
     check = sub.add_parser("check-config", help="run the Test & activate checks on every server")
     check.add_argument("-c", "--config", default="omniacli.yaml")

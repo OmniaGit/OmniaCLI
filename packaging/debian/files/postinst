@@ -246,6 +246,32 @@ for root, state in found.items():
     [ -n "$storages" ] || echo "omniacli: workspaces.storage of $CONFIG is empty: no workspace can have instances yet"
 }
 
+# The shell sandboxes (README, Shell): on a server the Shell of a user opens
+# as a Linux user of its own, without privileges, made by the root helper
+# sandbox-helper in group omniacli-sandbox; the service's user may run that
+# helper and a login shell of any user of the group, nothing else as them.
+SANDBOX_SUDOERS=/etc/sudoers.d/omniacli-sandbox
+SANDBOX_ROOT=/var/lib/omniacli-sandbox
+apply_sandbox() {
+    user="$1"
+    getent group omniacli-sandbox >/dev/null || addgroup --quiet --system omniacli-sandbox
+    [ -d "$SANDBOX_ROOT" ] || install -d -o root -g root -m 711 "$SANDBOX_ROOT"
+    tmp="$SANDBOX_SUDOERS.tmp"
+    {
+        echo "# Written by the omniacli package: the shell sandboxes of the users (README, Shell)."
+        echo "$user ALL=(root) NOPASSWD: $VENV/bin/omniacli sandbox-helper *"
+        # the commands go on the shell's standard input: no argument more is allowed
+        echo "$user ALL=(%omniacli-sandbox) NOPASSWD: /bin/bash --login"
+    } > "$tmp"
+    chmod 440 "$tmp"
+    if ! visudo -cf "$tmp" >/dev/null; then
+        rm -f "$tmp"
+        echo "omniacli: the sudoers lines of the shell sandboxes do not check (visudo): nothing written" >&2
+        exit 1
+    fi
+    mv "$tmp" "$SANDBOX_SUDOERS"
+}
+
 case "$1" in
     configure)
         if ! getent passwd omniacli >/dev/null; then
@@ -258,6 +284,7 @@ case "$1" in
         build_venv
         create_config
         apply_workspaces "$(service_user)"
+        apply_sandbox "$(service_user)"
         # the plugins installed from the Plugins page, into the new venv
         [ -x "$VENV/bin/omniacli" ] && "$VENV/bin/omniacli" plugin-install --all || true
         ;;
