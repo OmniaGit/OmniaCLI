@@ -412,11 +412,22 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             prefix = request.headers.get(_PREFIX_HEADER, "")
             request.state.prefix = prefix if _PREFIX.fullmatch(prefix) else ""
             on_behalf = request.headers.get(_ON_BEHALF_HEADER, "")
-            role = settings.links[name].role
+            link = settings.links[name]
+            role, acts_as = link.role, ""
+            # bound to a user here who may log in: it acts with at most that
+            # user's role too, and opens that user's sandbox; a user gone,
+            # disabled or of workspaces only: the link as before, no sandbox
+            if (link.user in settings.users and not settings.user_disabled(link.user)
+                    and settings.user_role(link.user) in ACCESS_ROLES):
+                acts_as = link.user
+                own = settings.user_role(link.user)
+                if ACCESS_ROLES.index(own) < ACCESS_ROLES.index(role):
+                    role = own
             cap = request.headers.get(_ROLE_CAP_HEADER, "")
             if cap in ACCESS_ROLES and ACCESS_ROLES.index(cap) < ACCESS_ROLES.index(role):
                 role = cap
-            return Principal(name, role, "link", on_behalf if _ON_BEHALF.fullmatch(on_behalf) else "")
+            return Principal(name, role, "link", on_behalf if _ON_BEHALF.fullmatch(on_behalf) else "",
+                             acts_as=acts_as)
         # a browser: the session of the login form
         name = sessions.user(request.cookies.get(COOKIE), settings.users)
         if name is None or settings.user_disabled(name):
@@ -2823,8 +2834,12 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
                            "shells": live_shells.count(n)}
                           for n in sorted(settings.users)],
                 "sandbox_limits": SANDBOX_MB_LIMITS,
-                "links": [{"name": n, "role": link.role, "fixed": n in fixed.links}
+                "links": [{"name": n, "role": link.role, "fixed": n in fixed.links, "user": link.user}
                           for n, link in sorted(settings.links.items())],
+                # who a link may act as: a user who may log in here (not of workspaces only)
+                "link_users": sorted(n for n in settings.users if settings.user_role(n) in ACCESS_ROLES),
+                "links_of": {u: sorted(n for n, link in settings.links.items() if link.user == u)
+                             for u in settings.users},
                 "tokens": [{"name": n, "role": settings.token_role(n), "fixed": n in fixed.tokens}
                            for n in sorted(settings.tokens)],
                 "users_file": settings.users_file,
@@ -3011,6 +3026,10 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
                     _logger.warning("%s", warning)
             live_shells.close(name, "the user is deleted")
             web = web_copy()
+            # the links that acted as it act as nobody: they open no sandbox
+            for link_name, link in list(web.links.items()):
+                if link.user == name:
+                    web.links[link_name] = LinkAccess(link.token, link.role)
             del web.users[name]
             web.roles.pop(name, None)
             web.disabled.discard(name)
@@ -3023,16 +3042,19 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
     @app.post("/api/access/links/save", dependencies=[Depends(admin)])
     async def link_save(payload: dict = Body(...)):
         """Create a link (new: true; its token is in the answer, once) or
-        change its role."""
+        change its role and the local user it acts as ("": none)."""
         name, role = str(payload.get("name") or "").strip(), str(payload.get("role") or "")
+        user = str(payload.get("user") or "").strip()
         new = bool(payload.get("new"))
         async with access_lock:
             refused = check_name("Link", name, settings.fixed.links, settings.links, new) or check_role(role)
             if refused:
                 return refused
+            if user and (user not in settings.users or settings.user_role(user) not in ACCESS_ROLES):
+                return refuse(f"No user {user} here who may log in: a link acts as one of them, or as none")
             web = web_copy()
             token = new_token() if new else None
-            web.links[name] = LinkAccess(hash_token(token) if token else web.links[name].token, role)
+            web.links[name] = LinkAccess(hash_token(token) if token else web.links[name].token, role, user)
             return await store_access(web) or {"ok": True, "token": token}
 
     @app.post("/api/access/tokens/save", dependencies=[Depends(admin)])
@@ -3263,7 +3285,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
     def sandbox_owner(me: Principal) -> tuple[str, str | None]:
         """(the local user whose sandbox me opens, why none), refused when
         that user is disabled or there is none (a link acting for nobody here)."""
-        owner = me.name if me.kind == "user" else (getattr(me, "acts_as", "") if me.kind == "link" else "")
+        owner = me.name if me.kind == "user" else (me.acts_as if me.kind == "link" else "")
         if not owner:
             return "", ("This machine is a server: its Shell opens in the sandbox of a user of this machine, "
                         "and this link acts for none (an admin here chooses one on the Users page)")

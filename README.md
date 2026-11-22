@@ -676,8 +676,16 @@ omniacli new-link-token omniasolutions --role developer
 ```yaml
 auth:
   links:
-    omniasolutions: {token: "sha256$...", role: developer}
+    omniasolutions: {token: "sha256$...", role: developer, user: anna}
 ```
+
+`user` (optional; **Acts as** on the Users page, `--user` of
+`new-link-token`) is the user of this machine the link acts as: it acts with
+at most that user's role too, and on a server its **Shell** opens in that
+user's sandbox (see Shell). A link with none, or whose user is disabled or
+deleted (deleting the user unbinds its links, and the page says so first),
+works as before but opens no Shell on a server; for several people, one
+link each.
 
 The linking instance sends the token as `Authorization: Bearer <token>`.
 It may also send `X-OmniaCLI-Prefix` (the path it serves these pages under,

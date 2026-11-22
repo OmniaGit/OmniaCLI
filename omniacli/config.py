@@ -297,10 +297,12 @@ def filter_servers(servers: list[Server], query: str = "") -> list[Server]:
 
 @dataclass
 class LinkAccess:
-    """A linked OmniaCLI instance allowed in: its token's hash and its role."""
+    """A linked OmniaCLI instance allowed in: its token's hash, its role and
+    the local user it acts as (its shell sandbox on a server), none: "" ."""
 
     token: str
     role: str
+    user: str = ""
 
 
 @dataclass
@@ -806,7 +808,10 @@ def parse_auth(auth: dict, where: str = "auth", need_user: bool = True) -> Acces
         token = str(value.get("token") or "")
         if not _TOKEN_HASH.fullmatch(token):
             raise ConfigError(f"{where}.links.{name}: token is not a token hash (omniacli new-link-token)")
-        links[name] = LinkAccess(token, _access_role(f"{where}.links.{name}", value.get("role")))
+        user = str(value.get("user") or "")
+        if user and not MEMBER_NAME.fullmatch(user):
+            raise ConfigError(f"{where}.links.{name}.user: {user!r} is not a user name")
+        links[name] = LinkAccess(token, _access_role(f"{where}.links.{name}", value.get("role")), user)
     return Access(users, roles, tokens, links, token_roles, disabled, sandbox_mb)
 
 
@@ -836,7 +841,8 @@ def save_access(path: Path, access: Access) -> None:
     """Write the users file atomically, readable by its owner only."""
     data = {
         "users": {n: _user_record(access, n, h) for n, h in access.users.items()},
-        "links": {n: {"token": link.token, "role": link.role} for n, link in access.links.items()},
+        "links": {n: {"token": link.token, "role": link.role, **({"user": link.user} if link.user else {})}
+                  for n, link in access.links.items()},
         "tokens": {n: {"token": h, "role": access.token_roles.get(n, TOKEN_DEFAULT_ROLE)}
                    for n, h in access.tokens.items()},
     }

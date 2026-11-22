@@ -56,7 +56,8 @@ def _new_link_token(args) -> int:
     print(f"Token for the linked instance {args.name} (enter it in its link, it is not shown again):")
     print(f"  {token}")
     print("Add to auth.links in the main configuration:")
-    print(f"  {args.name}: {{token: \"{hash_token(token)}\", role: {args.role}}}")
+    user = f", user: {args.user}" if args.user else ""
+    print(f"  {args.name}: {{token: \"{hash_token(token)}\", role: {args.role}{user}}}")
     return 0
 
 
@@ -216,6 +217,9 @@ def main(argv: list[str] | None = None) -> int:
     link.add_argument("name", help="who links in, e.g. omniasolutions")
     link.add_argument("--role", choices=ROLES, default="user",
                       help="user: monitors only; developer: acts on the servers; admin: everything")
+    link.add_argument("--user", default="",
+                      help="the user of this machine the link acts as: at most its role, and on a server "
+                           "the Shell opens in its sandbox")
     link.set_defaults(func=_new_link_token)
 
     key = sub.add_parser("package-key", help="create the key that signs published Debian packages")

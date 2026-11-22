@@ -67,6 +67,9 @@ class Principal:
     # role is then its role in the workspace of what the request reaches
     workspaces: tuple[tuple[str, str], ...] = ()
     scoped: bool = False
+    # a linked instance bound to a user of this machine: that user (whose
+    # shell sandbox it opens on a server), "" for none
+    acts_as: str = ""
 
     def can(self, role: str) -> bool:
         return ROLES.index(self.role) >= ROLES.index(role)

@@ -31,7 +31,7 @@
       <th title="The disk of its shell sandbox on a server ({{ sandbox_limits[0] }}-{{ sandbox_limits[1] }} MB): it grows, it is never made smaller">Sandbox (MB)</th>
       <th>New password</th><th></th></tr>
     {% for u in users %}
-    <tr data-user="{{ u.name }}" {{ item(u.name ~ " " ~ u.role ~ (" disabled" if u.disabled else "")) }} data-sandbox="{{ u.sandbox_mb }}">
+    <tr data-user="{{ u.name }}" {{ item(u.name ~ " " ~ u.role ~ (" disabled" if u.disabled else "")) }} data-sandbox="{{ u.sandbox_mb }}" data-links="{{ links_of[u.name] | join(", ") }}">
       <td><strong>{{ u.name }}</strong>{% if u.name == account %} <span class="muted">(you)</span>{% endif %}
         {% if u.fixed %}<br><span class="muted">main config</span>{% endif %}</td>
       {% if u.fixed %}
@@ -70,15 +70,18 @@
 <div class="panel">
   <div class="scroll">
   <table data-list="incoming">
-    <tr><th>Link</th><th>Role</th><th></th></tr>
+    <tr><th>Link</th><th>Role</th>
+      <th title="The user of this machine the link acts as: at most that user's role, and on a server the Shell opens in its sandbox; none: no Shell there">Acts as</th><th></th></tr>
     {% for l in links %}
-    <tr data-link="{{ l.name }}" {{ item(l.name ~ " " ~ l.role) }}>
+    <tr data-link="{{ l.name }}" {{ item(l.name ~ " " ~ l.role ~ " " ~ l.user) }}>
       <td><strong>{{ l.name }}</strong>{% if l.fixed %}<br><span class="muted">main config</span>{% endif %}</td>
       {% if l.fixed %}
-      <td>{{ l.role }}</td><td></td>
+      <td>{{ l.role }}</td><td>{{ l.user or "—" }}</td><td></td>
       {% else %}
       <td><select class="role" aria-label="Role of link {{ l.name }}">
         {% for r in roles %}<option {% if r == l.role %}selected{% endif %}>{{ r }}</option>{% endfor %}</select></td>
+      <td><select class="acts-as" aria-label="User link {{ l.name }} acts as"><option value="">none</option>
+        {% for u in link_users %}<option {% if u == l.user %}selected{% endif %}>{{ u }}</option>{% endfor %}</select></td>
       <td><div class="actions" style="margin: 0">
         <button type="button" data-save-link>Save</button>
         <button type="button" class="danger" data-delete="links">Revoke</button>
@@ -86,11 +89,13 @@
       {% endif %}
     </tr>
     {% else %}
-    <tr><td colspan="3" class="muted">No links.</td></tr>
+    <tr><td colspan="4" class="muted">No links.</td></tr>
     {% endfor %}
     <tr>
       <td><input type="text" id="new-link" placeholder="who links in, e.g. omniasolutions" aria-label="New link name"></td>
       <td><select id="new-link-role" aria-label="Role of the new link">{% for r in roles %}<option {% if r == "user" %}selected{% endif %}>{{ r }}</option>{% endfor %}</select></td>
+      <td><select id="new-link-user" aria-label="User the new link acts as"><option value="">none</option>
+        {% for u in link_users %}<option>{{ u }}</option>{% endfor %}</select></td>
       <td><button type="button" id="add-link">Create link token</button></td>
     </tr>
   </table>
@@ -171,7 +176,8 @@
   for (const button of document.querySelectorAll("[data-save-link]")) {
     button.onclick = async () => {
       const row = button.closest("tr");
-      if (await post("links/save", {name: row.dataset.link, role: row.querySelector(".role").value})) location.reload();
+      if (await post("links/save", {name: row.dataset.link, role: row.querySelector(".role").value,
+                                    user: row.querySelector(".acts-as").value})) location.reload();
     };
   }
   for (const button of document.querySelectorAll("[data-save-token]")) {
@@ -185,7 +191,8 @@
       const kind = button.dataset.delete, row = button.closest("tr");
       const name = row.dataset.user || row.dataset.link || row.dataset.token;
       const what = {users: "user", links: "link", tokens: "MCP token"}[kind];
-      const disk = kind === "users" ? ` Its shell sandbox, where it has one, is deleted too, with its disk (${row.dataset.sandbox} MB).` : "";
+      const disk = kind === "users" ? ` Its shell sandbox, where it has one, is deleted too, with its disk (${row.dataset.sandbox} MB).`
+        + (row.dataset.links ? ` The links ${row.dataset.links} act for nobody then: they open no Shell on a server.` : "") : "";
       if (!confirm(`${kind === "users" ? "Delete" : "Revoke"} ${what} ${name}? It stops working at once.${disk}`)) return;
       done(await post(kind + "/delete", {name}));
     };
@@ -198,7 +205,7 @@
   };
   document.getElementById("add-link").onclick = async () => {
     const name = value("new-link");
-    const data = await post("links/save", {name, role: value("new-link-role"), new: true});
+    const data = await post("links/save", {name, role: value("new-link-role"), user: value("new-link-user"), new: true});
     if (data) showSecret(`Token of link ${name}: enter it in the link of the other instance.`, data.token);
   };
   document.getElementById("add-token").onclick = async () => {
