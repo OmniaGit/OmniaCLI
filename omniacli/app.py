@@ -601,6 +601,40 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
     app.state.live_shells = live_shells
 
     @app.middleware("http")
+    async def error_pages(request: Request, call_next):
+        """An error a browser opens (a page, a link, a form's button) is a page
+        of its own, not JSON; the API (/api/, also a link's) and the pages'
+        scripts (fetch, which asks */*) keep the JSON they read."""
+        response = await call_next(request)
+        if (response.status_code < 400 or "text/html" not in request.headers.get("accept", "")
+                or "/api/" in request.url.path
+                # a script's call (a JSON body, an upload) reads JSON; a form's button or a page does not
+                or (request.method not in ("GET", "HEAD") and not request.headers.get("content-type", "").startswith(
+                    ("application/x-www-form-urlencoded", "multipart/form-data")) and request.headers.get("content-length", "0") != "0")
+                or not response.headers.get("content-type", "").startswith("application/json")):
+            return response
+        body = b"".join([chunk async for chunk in response.body_iterator])
+        try:
+            data = json.loads(body or b"{}")
+        except ValueError:
+            data = {}
+        message = data.get("error") or data.get("detail") if isinstance(data, dict) else None
+        if isinstance(message, list):
+            # FastAPI's check of a request: the fields it refused
+            message = "; ".join(f"{'.'.join(str(p) for p in m.get('loc', [])[1:])}: {m.get('msg', '')}"
+                                for m in message if isinstance(m, dict))
+        if not isinstance(message, str) or not message:
+            message = body.decode("utf-8", "replace")[:500] or "No more is known."
+        return error_page(request, response.status_code, message)
+
+    def error_page(request: Request, code: int, message: str, title: str = "", more: tuple = ()):
+        titles = {400: "Not done", 401: "Login required", 403: "Not allowed", 404: "Not found",
+                  409: "Not now", 413: "Too big", 502: "No answer", 507: "No room"}
+        return _TEMPLATES.TemplateResponse(request, "error.html", {
+            "title": title or titles.get(code, "Error"), "message": message, "code": code,
+            "path": request.url.path, "more": more}, status_code=code)
+
+    @app.middleware("http")
     async def security_headers(request: Request, call_next):
         response = await call_next(request)
         # no page of OmniaCLI inside another site's frame (clickjacking)
@@ -3221,8 +3255,9 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         """A link that cannot answer: JSON for the pages' scripts, a page otherwise."""
         if "text/html" not in request.headers.get("accept", ""):
             return JSONResponse({"error": f"link {link.name}: {message}"}, status_code=502)
-        return _TEMPLATES.TemplateResponse(
-            request, "link_error.html", {"link": link, "message": message}, status_code=502)
+        return error_page(request, 502, f"The linked instance at {link.url} did not answer: {message}.",
+                          title=f"Link {link.name}", more=(("Links", "/links"),) if (
+                              getattr(request.state, "user", None) and request.state.user.can("admin")) else ())
 
     @app.get("/links/{name}")
     async def link_root(name: str, me: Principal = Depends(current_user)):

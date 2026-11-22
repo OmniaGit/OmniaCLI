@@ -258,3 +258,20 @@ async def test_a_link_is_used_by_the_admins_and_its_users_only(mine):
     resp = await mine.post("/api/links/save", json={"name": "down", "url": "https://down.test", "token": "",
                                                      "users": ["a b"]}, headers=as_user("admin", post=True))
     assert resp.status_code == 400 and "a list of user names" in resp.json()["error"]
+
+
+async def test_an_error_a_browser_opens_is_a_page(mine):
+    """A page, a link, a form's button: the error is a page with the way back;
+    the API keeps its JSON."""
+    resp = await mine.get("/links/down/", headers=as_user("dev"))
+    assert resp.status_code == 403 and resp.headers["content-type"].startswith("text/html")
+    assert "<h1>Not allowed</h1>" in resp.text and "is not yours to use" in resp.text and ">Dashboard</a>" in resp.text
+    resp = await mine.get("/servers/nothere", headers=as_user("admin"))
+    assert resp.status_code == 404 and "<h1>Not found</h1>" in resp.text
+    resp = await mine.get("/api/servers/nothere/checks", headers=as_user("admin"))
+    assert resp.headers["content-type"].startswith("application/json")
+    resp = await mine.get("/links/down/", headers={"Authorization": as_user("dev")["Authorization"]})
+    assert resp.status_code == 403 and resp.json()["detail"].startswith("The link down is not yours")
+    # a form's button with no fields: a page too
+    resp = await mine.post("/servers/srv/test/pull", headers=as_user("viewer", post=True))
+    assert resp.headers["content-type"].startswith("text/html") and resp.status_code >= 400

@@ -1,0 +1,15 @@
+{# Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C · SPDX-License-Identifier: AGPL-3.0-or-later -#}
+{# The one page of every error a browser opens (error_pages in app.py): what
+   was refused or failed, and the way back. #}
+{% extends "base.html" %}
+{% block title %}{{ title }} · OmniaCLI{% endblock %}
+{% block content %}
+<h1>{{ title }}</h1>
+<div class="banner">{{ message }}</div>
+<p class="muted">HTTP {{ code }} · <span class="mono">{{ path }}</span></p>
+<div class="actions">
+  <button type="button" onclick="history.length > 1 ? history.back() : location.assign('{{ prefix }}/')">Back</button>
+  <a class="button" href="{{ prefix }}/">Dashboard</a>
+  {% for label, href in more %}<a class="button" href="{{ prefix }}{{ href }}">{{ label }}</a>{% endfor %}
+</div>
+{% endblock %}
