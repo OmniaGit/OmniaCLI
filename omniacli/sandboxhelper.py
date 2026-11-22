@@ -187,9 +187,14 @@ def ensure(name: str, mb: str) -> dict:
         grow = wh.image_to_size(image, size)
         wh.mount_folder(home)
         unit = wh.unit_name(home)
-        wh._write(wh.SYSTEMD / unit, _unit_text(image, home, name))
-        wh._run("systemctl", "daemon-reload")
-        wh._run("systemctl", "enable", "--now", unit)
+        text, path = _unit_text(image, home, name), wh.SYSTEMD / unit
+        if not path.exists() or path.read_text(encoding="utf-8") != text:
+            wh._write(path, text)
+            wh._run("systemctl", "daemon-reload")
+        # mounted already: not started again (a start job of a mounted unit
+        # waits for its loop device's unit, which a machine without udev, a
+        # container, never has)
+        wh._run("systemctl", "enable", *(() if wh.mounted(image, home) else ("--now",)), unit)
         if not wh.mounted(image, home):
             raise HelperError(f"{unit} did not mount {image} on {home}")
         wh._harden_mount(home)

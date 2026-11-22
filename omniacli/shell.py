@@ -53,6 +53,9 @@ CLAUDE_COMMAND = "claude"
 DROPS_DIR = ".omniacli-drops"
 DROP_DAYS = 7
 DROP_MAX = 100 << 20
+# what a shell sandbox runs (sandboxhelper.py): its sudoers line allows
+# exactly this, so the commands go on the shell's standard input
+SANDBOX_SHELL = ("/bin/bash", "--login")
 
 
 class DropRefused(ValueError):
@@ -134,10 +137,18 @@ class Shell:
 
     @classmethod
     async def start(cls, cwd: Path | None, cols: int = 80, rows: int = 24, command: str | None = None,
-                    env: dict | None = None, stay: bool = True) -> "Shell":
+                    env: dict | None = None, stay: bool = True, as_user: str = "") -> "Shell":
         """command: run first by the login shell (its profile sets PATH),
         which is then left interactive (stay) or ends with it; a cwd given
-        must exist. env: more variables for the shell and the command."""
+        must exist. env: more variables for the shell and the command.
+        as_user: the login shell of that user instead (a shell sandbox),
+        through sudo with exactly SANDBOX_SHELL, the one command its sudoers
+        line allows: no command, no cwd (its ~/.bash_profile starts it in
+        its home, which OmniaCLI's user cannot enter)."""
+        if as_user:
+            return await cls._spawn(["sudo", "-n", "-H", "-u", as_user, *SANDBOX_SHELL], Path("/"),
+                                    {"TERM": "xterm-256color", "LANG": os.environ.get("LANG", "C.UTF-8"),
+                                     "PATH": "/usr/local/bin:/usr/bin:/bin"}, cols, rows)
         shell, home = login_shell()
         user = pwd.getpwuid(os.getuid()).pw_name
         extra = env or {}
@@ -151,12 +162,16 @@ class Shell:
         folder = cwd if cwd is not None and cwd.is_dir() else Path(home)
         if not folder.is_dir():
             folder = Path("/")
+        args = [shell, "-l"]
+        if command:
+            args += ["-c", f"{command}; exec {shlex.quote(shell)} -l" if stay else f"exec {command}"]
+        return await cls._spawn(args, folder, env, cols, rows)
+
+    @classmethod
+    async def _spawn(cls, args: list[str], folder: Path, env: dict, cols: int, rows: int) -> "Shell":
         master, slave = os.openpty()
         try:
             _set_size(master, cols, rows)
-            args = [shell, "-l"]
-            if command:
-                args += ["-c", f"{command}; exec {shlex.quote(shell)} -l" if stay else f"exec {command}"]
             process = await asyncio.create_subprocess_exec(
                 "setsid", "-c", *args, stdin=slave, stdout=slave, stderr=slave,
                 cwd=str(folder), env=env)
@@ -245,10 +260,10 @@ class LiveShells:
 
 async def serve(websocket: WebSocket, cwd: Path | None, command: str | None = None,
                 env: dict | None = None, stay: bool = True,
-                live: LiveShells | None = None, owner: str = "") -> None:
+                live: LiveShells | None = None, owner: str = "", as_user: str = "") -> None:
     """Join an accepted WebSocket to a new shell until one of them ends, or
-    until live closes the shells of owner."""
-    shell = await Shell.start(cwd, command=command, env=env, stay=stay)
+    until live closes the shells of owner; as_user: a sandbox's shell."""
+    shell = await Shell.start(cwd, command=command, env=env, stay=stay, as_user=as_user)
     stop, why = live.open(owner) if live is not None and owner else (asyncio.Event(), [])
 
     async def output():

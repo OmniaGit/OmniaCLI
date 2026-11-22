@@ -1,7 +1,8 @@
 # Copyright (C) 2026 OmniaSolutions S.n.c di Boscolo Matteo & C
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """The kind of machine: on a server nobody opens a shell of OmniaCLI's own
-user, whatever the role, through the page, the WebSocket or a link."""
+user, whatever the role, through the page, the WebSocket or a link; its
+Shell opens in the user's sandbox."""
 
 import getpass
 import logging
@@ -69,9 +70,10 @@ def test_a_server_opens_no_shell_of_its_own_user(server, tmp_path, user):
     app = create_app(server)
     with TestClient(app) as c:
         page = c.get("/servers/srv?view=test", headers=browser(app, user)).text
-        # the instance is shown, without the buttons
-        assert "/servers/srv/test/restart" in page
-        for kind in ("shell", "claude", "psql"):
+        # the instance is shown, without the buttons; the Shell is the sandbox's
+        assert "/servers/srv/test/restart" in page and 'href="/servers/srv/test/shell"' in page
+        assert "A shell of your sandbox on this server" in page
+        for kind in ("claude", "psql"):
             assert f'/test/{kind}"' not in page
             resp = c.get(f"/servers/srv/test/{kind}", headers=browser(app, user))
             assert resp.status_code == 403 and REFUSED.format(kind) in resp.text
@@ -82,6 +84,81 @@ def test_a_server_opens_no_shell_of_its_own_user(server, tmp_path, user):
             assert resp.status_code == 403 and REFUSED.format(kind) in resp.text
     assert not [e for e in app.state.access_log.recent() if e["event"] == "shell"]
     assert not (tmp_path / "drops").exists()
+
+
+@pytest.fixture
+def sandbox(monkeypatch):
+    """The root helper and sudo faked: ensure answers a sandbox user, and the
+    shell started as that user is an ordinary one, which records it."""
+    from omniacli import sandboxops, shell as shell_module
+
+    calls, real_start = {"ensure": [], "as_user": []}, shell_module.Shell.start.__func__
+
+    async def ensure(user, mb):
+        calls["ensure"].append((user, mb))
+        if calls.get("fail"):
+            raise sandboxops.SandboxError(calls["fail"])
+        return {"user": "omniacli-sb-1", "home": "/var/lib/omniacli-sandbox/home/1", "mb": mb}
+
+    async def start(cls, cwd, cols=80, rows=24, command=None, env=None, stay=True, as_user=""):
+        calls["as_user"].append(as_user)
+        return await real_start(cls, cwd, cols, rows, command, env, stay)
+    monkeypatch.setattr(sandboxops, "ensure", ensure)
+    monkeypatch.setattr(shell_module.Shell, "start", classmethod(start))
+    return calls
+
+
+def test_the_shell_of_a_server_opens_in_the_users_sandbox(server, tmp_path, sandbox):
+    from .test_shell import run
+
+    app = create_app(server)
+    with TestClient(app) as c:
+        page = c.get("/servers/srv/test/shell", headers=browser(app, "dev"))
+        assert page.status_code == 200 and "sandbox of dev" in page.text and "a disk of 100 MB" in page.text
+        assert "Files cannot be dropped on the shell of a sandbox" in page.text and "{upload:" not in page.text
+        assert c.get("/servers/srv/test/shell", headers=browser(app, "viewer")).status_code == 403
+        with c.websocket_connect("/servers/srv/test/shell/ws", headers=browser(app, "dev")) as ws:
+            assert "READY" in run(ws, "echo READY\n", "READY")
+        assert sandbox["ensure"] == [("dev", 100)] and sandbox["as_user"] == ["omniacli-sb-1"]
+        opened = [e["detail"] for e in app.state.access_log.recent() if e["event"] == "shell"]
+        assert any("in the sandbox omniacli-sb-1 of dev (100 MB) opened" in d for d in opened), opened
+        # no file dropped: OmniaCLI's user cannot write in the sandbox's home
+        resp = c.post("/servers/srv/test/shell/upload?name=a.txt", content=b"x", headers=browser(app, "dev"))
+        assert resp.status_code == 403 and "Files cannot be dropped" in resp.text
+        # a helper that fails: said to the page, no shell
+        sandbox["fail"] = "a sandbox of 100 MB needs 100 MB more"
+        with c.websocket_connect("/servers/srv/test/shell/ws", headers=browser(app, "dev")) as ws:
+            assert closed(ws) == (1011, "The sandbox of dev: a sandbox of 100 MB needs 100 MB more")
+        assert sandbox["as_user"] == ["omniacli-sb-1"]
+
+
+def test_a_disabled_user_opens_no_sandbox(server, sandbox):
+    from omniacli.config import Access
+
+    server.set_web_access(Access(users={"anna": USER_HASH}, roles={"anna": "developer"}))
+    app = create_app(server)
+    with TestClient(app) as c:
+        headers = browser(app, "anna")
+        server.set_web_access(Access(users={"anna": USER_HASH}, roles={"anna": "developer"}, disabled={"anna"}))
+        # its session ends; and the sandbox is refused by itself too (sudo runs an expired account)
+        assert c.get("/servers/srv/test/shell", headers=headers).status_code == 401
+    assert sandbox["ensure"] == []
+
+
+async def test_a_sandbox_shell_runs_its_one_sudoers_command(monkeypatch):
+    """The command is exactly what the sudoers line allows, from /."""
+    from omniacli import shell as shell_module
+
+    seen = {}
+
+    async def spawn(*args, **kwargs):
+        seen.update(args=args, cwd=kwargs["cwd"], env=kwargs["env"])
+        raise OSError("not started in the test")
+    monkeypatch.setattr(shell_module.asyncio, "create_subprocess_exec", spawn)
+    with pytest.raises(OSError):
+        await shell_module.Shell.start(None, as_user="omniacli-sb-3")
+    assert seen["args"] == ("setsid", "-c", "sudo", "-n", "-H", "-u", "omniacli-sb-3", "/bin/bash", "--login")
+    assert seen["cwd"] == "/" and "HOME" not in seen["env"]
 
 
 def test_a_server_keeps_psql_as_another_user(server, monkeypatch):
@@ -96,9 +173,9 @@ def test_a_server_keeps_psql_as_another_user(server, monkeypatch):
     with TestClient(app) as c:
         page = c.get("/servers/srv?view=test", headers=browser(app, "dev")).text
         assert 'href="/servers/srv/test/psql"' in page
-        assert '/test/shell"' not in page and '/test/claude"' not in page
+        assert '/test/claude"' not in page
         assert c.get("/servers/srv/test/psql", headers=browser(app, "dev")).status_code == 200
-        assert c.get("/servers/srv/test/shell", headers=browser(app, "dev")).status_code == 403
+        assert c.get("/servers/srv/test/claude", headers=browser(app, "dev")).status_code == 403
         out = ""
         with c.websocket_connect("/servers/srv/test/psql/ws", headers=browser(app, "dev")) as ws:
             while True:
@@ -131,8 +208,10 @@ def test_through_a_link_the_server_decides(env, tmp_path, customer_server):  # n
     with TestClient(mine) as c:
         headers = browser(mine, "admin")
         page = c.get("/links/cliente/servers/srv?view=test", headers=headers).text
-        assert "/test/restart" in page and '/test/shell"' not in page
-        assert c.get("/links/cliente/servers/srv/test/shell", headers=headers).status_code == 403
+        assert "/test/restart" in page and '/test/claude"' not in page
+        # its Shell is a sandbox of a user there, and this link acts for none
+        resp = c.get("/links/cliente/servers/srv/test/shell", headers=headers)
+        assert resp.status_code == 403 and "this link acts for none" in resp.text
         with c.websocket_connect("/links/cliente/servers/srv/test/shell/ws", headers=headers) as ws:
             code, reason = closed(ws)
             assert code in (1008, 1011) and "This machine is a server" in reason, (code, reason)

@@ -203,3 +203,71 @@ def test_an_open_shell_closes_when_its_user_is_disabled(env):
             assert resp.status_code == 200, resp.text
             assert closed(ws) == (1000, "the user is disabled")
         assert app.state.live_shells.count("anna") == 0
+
+
+async def test_on_a_server_the_sandbox_follows_its_user(client, monkeypatch):
+    """Disabled, enabled again, deleted: its sandbox too, through the root
+    helper; a helper that fails keeps the user (but sudo refusing it: an
+    installation without the sudoers line, told)."""
+    from omniacli import sandboxops
+
+    settings = client.app.state.settings
+    settings.machine = "server"
+    calls, state = [], {"error": None}
+
+    def fake(action):
+        async def call(user):
+            calls.append((action, user))
+            if state["error"]:
+                raise state["error"]
+            return {}
+        return call
+    for action in ("disable", "enable", "delete"):
+        monkeypatch.setattr(sandboxops, action, fake(action))
+    await new_user(client, "anna")
+    await access(client, "users/save", {"name": "anna", "role": "developer", "disabled": True})
+    await access(client, "users/save", {"name": "anna", "role": "developer", "disabled": False})
+    # a save that changes nothing of it does not call it
+    await access(client, "users/save", {"name": "anna", "role": "user"})
+    assert calls == [("disable", "anna"), ("enable", "anna")]
+
+    state["error"] = sandboxops.SandboxError("pkill: no")
+    resp = await access(client, "users/save", {"name": "anna", "role": "user", "disabled": True})
+    assert resp.status_code == 200 and resp.json()["warning"] == "The sandbox of anna was not disabled: pkill: no"
+    assert settings.user_disabled("anna")
+    resp = await access(client, "users/delete", {"name": "anna"})
+    assert resp.status_code == 500 and "is not deleted, nor is the user: pkill: no" in resp.json()["error"]
+    assert "anna" in settings.users
+    state["error"] = sandboxops.SandboxError("sudo: a password is required (hint)", refused=True)
+    resp = await access(client, "users/delete", {"name": "anna"})
+    assert resp.status_code == 200 and "is not deleted: sudo: a password is required" in resp.json()["warning"]
+    assert "anna" not in settings.users
+
+
+async def test_on_a_development_machine_no_helper_is_called(client, monkeypatch):
+    from omniacli import sandboxops
+
+    async def never(user):
+        raise AssertionError("called")
+    for action in ("disable", "enable", "delete"):
+        monkeypatch.setattr(sandboxops, action, never)
+    await new_user(client, "anna")
+    assert (await access(client, "users/save", {"name": "anna", "role": "user", "disabled": True})).status_code == 200
+    assert (await access(client, "users/delete", {"name": "anna"})).status_code == 200
+
+
+async def test_the_helper_is_called_through_sudo(monkeypatch):
+    from omniacli import sandboxops
+
+    seen = []
+
+    async def capture(cmd, timeout=None):
+        seen.append(cmd)
+        return (0, '{"user": "omniacli-sb-1", "home": "/h", "mb": 100}') if cmd[4] == "ensure" else \
+            (1, "sudo: a password is required")
+    monkeypatch.setattr(sandboxops, "capture", capture)
+    assert (await sandboxops.ensure("anna", 100))["user"] == "omniacli-sb-1"
+    assert seen[0][:2] == ["sudo", "-n"] and seen[0][2:] == [seen[0][2], "sandbox-helper", "ensure", "anna", "100"]
+    with pytest.raises(sandboxops.SandboxError) as error:
+        await sandboxops.delete("anna")
+    assert error.value.refused and "dpkg-reconfigure omniacli" in str(error.value)

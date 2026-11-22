@@ -131,10 +131,13 @@
       {% if can_act and not scoped %}
       {# a login shell on the server, in a new tab (not for a user of
          workspaces: a shell of this machine); on a server nothing that runs
-         as OmniaCLI's own user #}
+         as OmniaCLI's own user: its Shell opens in the user's sandbox #}
       {% set show_psql = inst.plugin.db_shell(inst) and (own_user_shells or not inst.plugin.db_shell_as_service(inst)) %}
-      {% if own_user_shells or show_psql %}
+      {% if own_user_shells or sandbox_shells or show_psql %}
       <div class="action-group">
+      {% if sandbox_shells %}
+      <a class="button" href="{{ base }}/shell" target="_blank" rel="noopener" title="A shell of your sandbox on this server: a user of its own, without privileges, with a small disk; su - with a password to become root">{{ icon("terminal") }}Shell</a>
+      {% endif %}
       {% if own_user_shells %}
       <a class="button" href="{{ base }}/shell" target="_blank" rel="noopener" title="A shell of the user running OmniaCLI, in {{ inst.repositories[0].path if inst.repositories else 'its home' }}">{{ icon("terminal") }}Shell</a>
       {% if inst.claude_dir %}

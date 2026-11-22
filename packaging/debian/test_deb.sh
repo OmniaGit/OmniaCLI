@@ -419,13 +419,51 @@ wait_up || fail "service not up as omniacli again"
 [ "$(service_user)" = omniacli ] || fail "service runs as $(service_user), not omniacli again"
 [ "$(owners)" = omniacli:omniacli ] || fail "data owned by $(owners), not omniacli again"
 [ ! -e "$DROPIN" ] || fail "drop-in left without OMNIACLI_USER"
-# without it, a server: the shell page refused, also to an admin
+# without it, a server: the shell page is the user's sandbox, Claude is refused, also to an admin
 login admin "$PW"
 curl -s -b /tmp/cookies-admin localhost:8090/options | has 'id="machine">server<' || fail "without OMNIACLI_USER not a server"
-[ "$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/cookies-admin localhost:8090/servers/demo/production/shell)" = 403 ] \
-    || fail "the shell page opens on a server"
+curl -s -b /tmp/cookies-admin localhost:8090/servers/demo/production/shell | has 'sandbox of admin' \
+    || fail "the shell page of a server is not the sandbox's"
 chown -R omniacli:omniacli /srv/odoo /srv/remote.git
 login admin "$PW"
+
+step "the shell sandbox of a user on a server: the root helper and the one sudoers line, as user omniacli"
+# a container's /dev is made at its start: loop devices the kernel adds later get their nodes here
+for i in $(seq 0 255); do [ -e "/dev/loop$i" ] || mknod "/dev/loop$i" b 7 "$i" 2>/dev/null || true; done
+as_omniacli() { su omniacli -s /bin/sh -c "$1"; }
+as_omniacli "sudo -n /opt/omniacli/venv/bin/omniacli sandbox-helper ensure tester@x 60" > /tmp/sb.json 2>&1 \
+    || { cat /tmp/sb.json; journalctl --no-pager -n 20 -o cat; fail "sandbox-helper ensure"; }
+SB_USER=$(/opt/omniacli/venv/bin/python -c 'import json; print(json.load(open("/tmp/sb.json"))["user"])')
+SB_HOME=$(getent passwd "$SB_USER" | cut -d: -f6)
+[ "$SB_USER" = omniacli-sb-1 ] || fail "sandbox user $SB_USER"
+findmnt -no OPTIONS "$SB_HOME" | has 'nosuid' && findmnt -no OPTIONS "$SB_HOME" | has 'nodev' || fail "sandbox disk not nosuid,nodev"
+[ "$(stat -c '%U %a' "$SB_HOME")" = "$SB_USER 700" ] || fail "sandbox home owner or mode"
+# its shell as OmniaCLI opens it: the commands on the input, it starts in its home
+out=$(echo 'echo "WHO=$(id -un) AT=$(pwd)"' | as_omniacli "sudo -n -H -u $SB_USER /bin/bash --login" 2>&1)
+echo "$out" | has "WHO=$SB_USER AT=$SB_HOME" || fail "sandbox shell: $out"
+# nothing else as it, nor as root
+as_omniacli "sudo -n -u $SB_USER /bin/sh -c id" >/dev/null 2>&1 && fail "another command ran as the sandbox"
+as_omniacli "sudo -n -u root /bin/bash --login -c id" >/dev/null 2>&1 && fail "the service user became root"
+as_omniacli "cat /var/lib/omniacli-sandbox/sandboxes.json" >/dev/null 2>&1 && fail "the service user reads the sandboxes' table"
+out=$(echo 'head -c 40 /etc/omniacli/omniacli.yaml; echo " RC=$?"; id' | as_omniacli "sudo -n -H -u $SB_USER /bin/bash --login" 2>&1)
+echo "$out" | has 'RC=1' || { echo "$out"; ls -l /etc/omniacli; fail "the sandbox reads the main configuration"; }
+# larger: grown, mounted
+as_omniacli "sudo -n /opt/omniacli/venv/bin/omniacli sandbox-helper ensure tester@x 120" > /tmp/sb.json 2>&1 || true
+has '"mb": 120' /tmp/sb.json || { cat /tmp/sb.json; unit=$(systemd-escape -p --suffix=mount "$SB_HOME")
+    systemctl status "$unit" --no-pager -l | tail -15; systemctl list-dependencies "$unit" --no-pager | head -20
+    journalctl --no-pager -n 40 -o short-precise | tail -40; losetup -a; fail "sandbox not grown"; }
+[ "$(df -m --output=size "$SB_HOME" | tail -1 | tr -d ' ')" -gt 100 ] || fail "the sandbox's file system did not grow"
+as_omniacli "sudo -n /opt/omniacli/venv/bin/omniacli sandbox-helper disable tester@x" | has '"disabled": true' || fail "sandbox disable"
+# refused with exit 2 (pipefail: its output read from a file)
+as_omniacli "sudo -n /opt/omniacli/venv/bin/omniacli sandbox-helper ensure tester@x 120" > /tmp/sb.json 2>&1 \
+    && fail "a disabled sandbox was opened"
+has 'is disabled' /tmp/sb.json || { cat /tmp/sb.json; fail "a disabled sandbox: not refused as disabled"; }
+as_omniacli "sudo -n /opt/omniacli/venv/bin/omniacli sandbox-helper enable tester@x" | has '"enabled": true' || fail "sandbox enable"
+as_omniacli "sudo -n /opt/omniacli/venv/bin/omniacli sandbox-helper delete tester@x" | has '"deleted": true' || fail "sandbox delete"
+getent passwd "$SB_USER" >/dev/null && fail "sandbox user left"
+findmnt -n "$SB_HOME" >/dev/null && fail "sandbox disk left mounted"
+[ ! -e /var/lib/omniacli-sandbox/disks/1.img ] || fail "sandbox image left"
+echo "sandbox: made, its shell as omniacli opens it, grown, disabled, enabled, deleted"
 
 step "OMNIACLI_WORKSPACES: the storages bound on root's paths, their sudoers lines, the room of their disks"
 WS_DEFAULT=/srv/omniacli/default_workspace
@@ -615,8 +653,8 @@ EOF
         local rc=$?
         # the immutable folders of the storages' binds and of the workspaces'
         # disks: docker cannot remove a container that keeps them
-        docker exec "$cid" sh -c 'for m in $(findmnt -rn -o TARGET | grep "^/var/lib/omniacli-storage/" | sort -r); do umount "$m"; done
-            for d in /var/lib/omniacli-storage/* /srv/*/*/workspaces/* /srv/*/*/workspaces /srv/omniacli/default_workspace/* /srv/newdisk/omniacli/*; do
+        docker exec "$cid" sh -c 'for m in $(findmnt -rn -o TARGET | grep -E "^/var/lib/omniacli-(storage|sandbox)/" | sort -r); do umount "$m"; done
+            for d in /var/lib/omniacli-storage/* /srv/*/*/workspaces/* /srv/*/*/workspaces /srv/omniacli/default_workspace/* /srv/newdisk/omniacli/* /var/lib/omniacli-sandbox/home/*; do
                 [ -d "$d" ] && chattr -i "$d" 2>/dev/null; done; true' >/dev/null 2>&1 || true
         docker rm -f "$cid" >/dev/null
         return $rc

@@ -35,7 +35,7 @@ from starlette.background import BackgroundTask
 from starlette.requests import ClientDisconnect, HTTPConnection
 
 from . import (backupchoices, checks, private, restoreroom, consumer, disks, gitcredentials, linkcopy, listgroups, ops, packages, plugins, pluginstore, puller, publisher,
-               schedules, selflog, sqldump, sshlinks, shell, stacktemplates, templatestore, tunnel, workspacehelper, workspaceops)
+               sandboxops, schedules, selflog, sqldump, sshlinks, shell, stacktemplates, templatestore, tunnel, workspacehelper, workspaceops)
 from .accesslog import AccessLog
 from .diskhistory import DiskHistory, DiskRecorder
 from .auth import ROLES as ACCESS_ROLES
@@ -107,8 +107,10 @@ def _page_context(request: Request) -> dict:
         "console_font": settings.options.shell_font_size if settings else SHELL_FONT_SIZE,
         "console_font_sizes": SHELL_FONT_SIZES,
         "can_act": bool(user and user.can("developer")),
-        # a shell of OmniaCLI's own user: not on a server
+        # a shell of OmniaCLI's own user: not on a server, where the Shell
+        # opens in the user's sandbox (sandboxhelper.py) and Claude not at all
         "own_user_shells": bool(settings and settings.machine == MACHINE_DEVELOPMENT),
+        "sandbox_shells": bool(settings and settings.machine != MACHINE_DEVELOPMENT),
         # restart, start and stop: every role; an MCP token only reads
         "can_restart": bool(user and user.kind != "token"),
         "is_admin": bool(user and user.can("admin")),
@@ -2958,6 +2960,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
                 if size is not None and size < settings.user_sandbox_mb(name):
                     return refuse(f"The sandbox of {name} is {settings.user_sandbox_mb(name)} MB: "
                                   "a disk is not made smaller")
+            was_disabled = settings.user_disabled(name)
             if password:
                 web.users[name] = await asyncio.to_thread(hash_password, password)
             web.roles[name] = role
@@ -2974,7 +2977,16 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
                 return refused
             if disabled:
                 live_shells.close(name, "the user is disabled")
-            return {"ok": True}
+            warning = ""
+            if not new and disabled != was_disabled and settings.machine != MACHINE_DEVELOPMENT:
+                # its sandbox's account too (no login, its processes killed);
+                # OmniaCLI refuses a disabled user's shell by itself anyway
+                try:
+                    await (sandboxops.disable(name) if disabled else sandboxops.enable(name))
+                except sandboxops.SandboxError as exc:
+                    warning = f"The sandbox of {name} was not {'disabled' if disabled else 'enabled'}: {exc}"
+                    _logger.warning("%s", warning)
+            return {"ok": True, **({"warning": warning} if warning else {})}
 
     @app.post("/api/access/users/delete")
     async def user_delete(payload: dict = Body(...), me: Principal = Depends(admin)):
@@ -2987,6 +2999,17 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
                 return refuse("You cannot delete yourself")
             if settings.user_role(name) == "admin" and not other_admins(name):
                 return refuse(f"{name} is the last admin")
+            warning = ""
+            if settings.machine != MACHINE_DEVELOPMENT:
+                # its sandbox and disk first: one that cannot be deleted keeps the user
+                try:
+                    await sandboxops.delete(name)
+                except sandboxops.SandboxError as exc:
+                    if not exc.refused:
+                        return refuse(f"The sandbox of {name} is not deleted, nor is the user: {exc}", 500)
+                    warning = f"The sandbox of {name}, if it has one, is not deleted: {exc}"
+                    _logger.warning("%s", warning)
+            live_shells.close(name, "the user is deleted")
             web = web_copy()
             del web.users[name]
             web.roles.pop(name, None)
@@ -2995,8 +3018,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             refused = await store_access(web)
             if refused:
                 return refused
-            live_shells.close(name, "the user is deleted")
-            return {"ok": True}
+            return {"ok": True, **({"warning": warning} if warning else {})}
 
     @app.post("/api/access/links/save", dependencies=[Depends(admin)])
     async def link_save(payload: dict = Body(...)):
@@ -3226,12 +3248,30 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
 
     def shell_refused(instance: Instance, kind: str) -> str | None:
         """Why this machine does not open that shell: on a server nobody gets
-        a shell of OmniaCLI's own user, whatever the role, also through a link."""
-        if settings.machine == MACHINE_DEVELOPMENT:
+        a shell of OmniaCLI's own user, whatever the role, also through a
+        link; its Shell opens in the user's sandbox (sandboxed)."""
+        if settings.machine == MACHINE_DEVELOPMENT or sandboxed(kind):
             return None
         if kind == "psql" and not instance.plugin.db_shell_as_service(instance):
             return None
         return f"This machine is a server: no {kind} as OmniaCLI's own user"
+
+    def sandboxed(kind: str) -> bool:
+        """The Shell of a server: the login shell of the user's sandbox."""
+        return kind == "shell" and settings.machine != MACHINE_DEVELOPMENT
+
+    def sandbox_owner(me: Principal) -> tuple[str, str | None]:
+        """(the local user whose sandbox me opens, why none), refused when
+        that user is disabled or there is none (a link acting for nobody here)."""
+        owner = me.name if me.kind == "user" else (getattr(me, "acts_as", "") if me.kind == "link" else "")
+        if not owner:
+            return "", ("This machine is a server: its Shell opens in the sandbox of a user of this machine, "
+                        "and this link acts for none (an admin here chooses one on the Users page)")
+        if owner not in settings.users:
+            return owner, f"No user {owner} on this machine"
+        if settings.user_disabled(owner):
+            return owner, f"The user {owner} is disabled"
+        return owner, None
 
     def shell_instance(server: str, role: str, kind: str) -> Instance:
         active_server(server)
@@ -3244,15 +3284,22 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             raise HTTPException(status.HTTP_404_NOT_FOUND, run)
         return instance
 
-    async def shell_page(request: Request, server: str, role: str, kind: str):
+    async def shell_page(request: Request, server: str, role: str, kind: str, me: Principal):
         instance = shell_instance(server, role, kind)
         folder, run = shell_kinds[kind]
         command, _, stay = run(instance)
-        return _TEMPLATES.TemplateResponse(request, "shell.html", {
+        context = {
             "instance": instance, "folder": folder(instance), "kind": kind, "command": command, "stay": stay,
             "system_user": pwd.getpwuid(os.getuid()).pw_name, "shell": shell.login_shell()[0],
             "drops": shell.drops_folder(instance.server, instance.role), "drop_days": shell.DROP_DAYS,
-            "drop_max": shell.DROP_MAX})
+            "drop_max": shell.DROP_MAX, "sandbox": None}
+        if sandboxed(kind):
+            owner, refused = sandbox_owner(me)
+            if refused:
+                raise HTTPException(status.HTTP_403_FORBIDDEN, refused)
+            context.update(sandbox={"owner": owner, "mb": settings.user_sandbox_mb(owner)}, folder=None,
+                           shell=shell.SANDBOX_SHELL[0])
+        return _TEMPLATES.TemplateResponse(request, "shell.html", context)
 
     async def shell_socket(websocket: WebSocket, server: str, role: str, kind: str, me: Principal):
         """A login shell of the user running OmniaCLI, in the instance's first
@@ -3280,11 +3327,26 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         ip = websocket.client.host if websocket.client else ""
         who = f", acting for {me.on_behalf}" if me.on_behalf else ""
         what = f"{instance.key} {kind}" if command else instance.key
+        owner, as_user = me.name if me.kind == "user" else "", ""
+        if sandboxed(kind):
+            owner, refused = sandbox_owner(me)
+            if refused:
+                await websocket.close(1008, refused[:120])
+                return
+            try:
+                made = await sandboxops.ensure(owner, settings.user_sandbox_mb(owner))
+            except sandboxops.SandboxError as exc:
+                _logger.warning("sandbox of %s: %s", owner, exc)
+                with contextlib.suppress(RuntimeError):
+                    await websocket.close(1011, f"The sandbox of {owner}: {exc}"[:120])
+                return
+            as_user = made["user"]
+            what = f"{what} in the sandbox {as_user} of {owner} ({made['mb']} MB)"
         access_log.record("shell", me.kind, me.name, ip, f"{what} opened{who}")
         opened = time.monotonic()
         try:
             await shell.serve(websocket, folder(instance), command, env, stay,
-                              live=live_shells, owner=me.name if me.kind == "user" else "")
+                              live=live_shells, owner=owner, as_user=as_user)
         except OSError as exc:
             _logger.warning("shell of %s: %s", instance.key, exc)
             with contextlib.suppress(RuntimeError):
@@ -3298,6 +3360,9 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         instance's drops folder: the page types the path it answers. Allowed
         where that shell opens, for whom may open it (a link too)."""
         instance = shell_instance(server, role, kind)
+        if sandboxed(kind):
+            # OmniaCLI's user cannot write in a sandbox's home
+            return refuse("Files cannot be dropped on the shell of a sandbox", status.HTTP_403_FORBIDDEN)
         name = shell.drop_name(name)
         length = request.headers.get("content-length", "")
         if length.isdigit() and int(length) > shell.DROP_MAX:
@@ -3339,7 +3404,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         /servers/{server}/{role}/{kind} would catch the plugins' routes)."""
         @app.get(f"/servers/{{server}}/{{role}}/{kind}", name=f"{kind}_page")
         async def page(request: Request, server: str, role: str, me: Principal = Depends(developer)):
-            return await shell_page(request, server, role, kind)
+            return await shell_page(request, server, role, kind, me)
 
         @app.post(f"/servers/{{server}}/{{role}}/{kind}/upload", name=f"{kind}_upload")
         async def upload(request: Request, server: str, role: str, name: str = "",

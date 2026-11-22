@@ -384,8 +384,10 @@ its <span class="mono">PG*</span> variables. Check a sudoers file with
 user: <span class="mono">OMNIACLI_USER=&lt;user&gt;</span> in <span class="mono">/etc/default/omniacli</span>, then
 <span class="mono">sudo dpkg-reconfigure omniacli</span>. The sudoers lines then name that user, and the machine counts
 as a development one.</p>
-<p><strong>Kind of machine.</strong> On a <em>server</em> nobody opens a shell of OmniaCLI's own user: no Shell, no
-Claude, and psql only where it runs as another user (Run as, Docker). On a <em>development</em> machine nothing is
+<p><strong>Kind of machine.</strong> On a <em>server</em> nobody opens a shell of OmniaCLI's own user: the Shell
+opens in the user's sandbox (a Linux user of its own, without privileges, with a small disk set on the Users page;
+<span class="mono">su -</span> with a password from there), no Claude, and psql only where it runs as another user
+(Run as, Docker). On a <em>development</em> machine nothing is
 restricted. Root sets it with <span class="mono">machine: server</span> or <span class="mono">machine: development</span>
 in the main configuration, then restarts OmniaCLI. Without that line a machine with
 <span class="mono">OMNIACLI_USER</span> is a development one, any other a server. The Options page shows it.</p>

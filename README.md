@@ -214,7 +214,8 @@ prepared before Test & activate. The job's log opens in a new tab.
   a server; upgrades do not add the line, so an installation upgraded from an
   earlier version without `OMNIACLI_USER` becomes a server and loses Shell and
   Claude until root adds `machine: development`. On a server nobody, admins
-  included, opens a shell of OmniaCLI's own user: no **Shell**, no **Claude**,
+  included, opens a shell of OmniaCLI's own user: the **Shell** opens in the
+  user's sandbox (below), no **Claude**,
   and **psql** only where it runs as another user (`run_as`, Docker). The page
   and the WebSocket refuse them too, also through a link: the machine the
   shell would run on decides. The kind is on the Options page and in
@@ -237,6 +238,26 @@ prepared before Test & activate. The job's log opens in a new tab.
   lower of the link's role and the user's. Every shell opened and closed is
   in the access log, with who and for how long. It is the access of that
   system user, as SSH would give it: give the developer role accordingly.
+  **On a server** the Shell opens in the user's **sandbox** instead: a Linux
+  user of its own, `omniacli-sb-<n>`, without privileges and without a
+  password, made by the root helper `omniacli sandbox-helper` at the user's
+  first shell. Its home is a disk of its own (an ext4 image in
+  `/var/lib/omniacli-sandbox`, mounted `nosuid,nodev`, of the user's size
+  on the Users page, 100 MB by default), 700; the shell starts there. From it
+  `su -` with a password becomes another user, root included: that is the
+  way to act on the server. A sandbox does not read OmniaCLI's files nor
+  another sandbox, but it reads what every user of the machine may read (an
+  Odoo configuration of mode 644, say), and `/tmp`, `/var/tmp` and `/dev/shm`
+  are outside its disk's limit. OmniaCLI's user runs it with the two lines
+  of `/etc/sudoers.d/omniacli-sandbox`, written by the package: the helper,
+  and `/bin/bash --login` as a user of group `omniacli-sandbox` (the
+  commands go on the shell's input; any argument more is refused). A
+  disabled user opens none (OmniaCLI refuses it, and its account expires:
+  sudo would still run an expired account), its processes are killed, what
+  was `su`'d to root is root's and stays; deleting the user deletes its
+  sandbox, disk and Linux user. Files cannot be dropped on a sandbox's
+  shell. Through a link the sandbox is that of the local user the link acts
+  as (an incoming link with none opens no Shell there).
   **A−** and **A+** change the text size for that page, **Full screen**
   fills the screen with the terminal (Esc leaves it); the size it opens
   with is on the Options page.

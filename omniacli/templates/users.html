@@ -153,6 +153,8 @@
     window.scrollTo(0, 0);
   }
   const value = (id) => document.getElementById(id).value.trim();
+  // saved: what the sandbox's helper could not do is told before the page reloads
+  const done = (data) => { if (!data) return; if (data.warning) alert(data.warning); location.reload(); };
 
   for (const button of document.querySelectorAll("[data-save-user]")) {
     button.onclick = async () => {
@@ -163,7 +165,7 @@
                     sandbox_mb: Number(row.querySelector(".sandbox").value)};
       if (body.disabled && row.querySelector(".active").defaultChecked
           && !confirm(`Disable ${body.name}? It cannot log in any more, its open shells close at once; its sandbox disk is kept.`)) return;
-      if (await post("users/save", body)) location.reload();
+      done(await post("users/save", body));
     };
   }
   for (const button of document.querySelectorAll("[data-save-link]")) {
@@ -185,7 +187,7 @@
       const what = {users: "user", links: "link", tokens: "MCP token"}[kind];
       const disk = kind === "users" ? ` Its shell sandbox, where it has one, is deleted too, with its disk (${row.dataset.sandbox} MB).` : "";
       if (!confirm(`${kind === "users" ? "Delete" : "Revoke"} ${what} ${name}? It stops working at once.${disk}`)) return;
-      if (await post(kind + "/delete", {name})) location.reload();
+      done(await post(kind + "/delete", {name}));
     };
   }
   document.getElementById("add-user").onclick = async () => {

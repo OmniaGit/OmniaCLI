@@ -9,16 +9,25 @@
 {% endblock %}
 {% block content %}
 {% from "_console.html" import terminal, console_script with context %}
+{% if sandbox %}
+<h1>{{ name }} {{ instance.key }} <span class="muted mono" style="font-size: 14px">sandbox of {{ sandbox.owner }}</span></h1>
+<div class="panel">
+  <div id="shell">{{ terminal(kind) }}</div>
+  <p class="muted" style="margin: 8px 0 0">A login shell ({{ shell }}) of the sandbox of {{ sandbox.owner }} on this server: a Linux user of its own, without privileges, whose home is a disk of {{ sandbox.mb }} MB. It reads what every user of this machine may read, it writes only in its home and in the shared temporary folders; <span class="mono">su -</span> with a password becomes another user (root). It ends when this page closes.</p>
+  <p class="muted" style="margin: 4px 0 0">Files cannot be dropped on the shell of a sandbox.</p>
+</div>
+{% else %}
 <h1>{{ name }} {{ instance.key }} <span class="muted mono" style="font-size: 14px">{{ system_user }}@{{ folder or "~" }}</span></h1>
 <div class="panel">
   <div id="shell">{{ terminal(kind) }}</div>
   <p class="muted" style="margin: 8px 0 0">A login shell ({{ shell }}) of the user running OmniaCLI, on this server{% if command and stay %}, that runs <span class="mono">{{ command }}</span> first and stays open after it{% elif command %}, that runs <span class="mono">{{ command }}</span> on the instance's database with the connection settings of its configuration, and ends with it{% endif %}: it ends when this page closes.</p>
   <p class="muted" style="margin: 4px 0 0">Drop files on the terminal (a mail saved as .eml, a spreadsheet…, up to {{ drop_max // 1048576 }} MiB each): they are uploaded into <span class="mono">{{ drops }}</span> and their path is typed, as a local terminal does; they are kept {{ drop_days }} days.</p>
 </div>
+{% endif %}
 {{ console_script() }}
 <script>
 OmniaConsole.terminal(document.querySelector("#shell .console-box"), (location.protocol === "https:" ? "wss://" : "ws://")
   + location.host + "{{ prefix }}/servers/{{ instance.server }}/{{ instance.role }}/{{ kind }}/ws",
-  {upload: "{{ prefix }}/servers/{{ instance.server }}/{{ instance.role }}/{{ kind }}/upload", max: {{ drop_max }}});
+  {% if sandbox %}null{% else %}{upload: "{{ prefix }}/servers/{{ instance.server }}/{{ instance.role }}/{{ kind }}/upload", max: {{ drop_max }}}{% endif %});
 </script>
 {% endblock %}

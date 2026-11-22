@@ -254,6 +254,10 @@ SANDBOX_SUDOERS=/etc/sudoers.d/omniacli-sandbox
 SANDBOX_ROOT=/var/lib/omniacli-sandbox
 apply_sandbox() {
     user="$1"
+    if ! command -v visudo >/dev/null; then
+        echo "omniacli: sudo is not installed: no shell sandboxes (the Shell of a server does not open)"
+        return 0
+    fi
     getent group omniacli-sandbox >/dev/null || addgroup --quiet --system omniacli-sandbox
     [ -d "$SANDBOX_ROOT" ] || install -d -o root -g root -m 711 "$SANDBOX_ROOT"
     tmp="$SANDBOX_SUDOERS.tmp"
