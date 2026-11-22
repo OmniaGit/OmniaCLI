@@ -27,16 +27,22 @@
 <div class="panel">
   <div class="scroll">
   <table data-list="users">
-    <tr><th>User</th><th>Role</th><th>New password</th><th></th></tr>
+    <tr><th>User</th><th>Role</th><th title="A disabled user cannot log in; its shells close at once and its sandbox disk is kept">Active</th>
+      <th title="The disk of its shell sandbox on a server ({{ sandbox_limits[0] }}-{{ sandbox_limits[1] }} MB): it grows, it is never made smaller">Sandbox (MB)</th>
+      <th>New password</th><th></th></tr>
     {% for u in users %}
-    <tr data-user="{{ u.name }}" {{ item(u.name ~ " " ~ u.role) }}>
+    <tr data-user="{{ u.name }}" {{ item(u.name ~ " " ~ u.role ~ (" disabled" if u.disabled else "")) }} data-sandbox="{{ u.sandbox_mb }}">
       <td><strong>{{ u.name }}</strong>{% if u.name == account %} <span class="muted">(you)</span>{% endif %}
         {% if u.fixed %}<br><span class="muted">main config</span>{% endif %}</td>
       {% if u.fixed %}
-      <td>{{ u.role }}</td><td></td><td></td>
+      <td>{{ u.role }}</td><td>{{ "no" if u.disabled else "yes" }}</td><td class="mono">{{ u.sandbox_mb }}</td><td></td><td></td>
       {% else %}
       <td><select class="role" aria-label="Role of {{ u.name }}" {% if u.name == account %}disabled title="You cannot change your own role"{% endif %}>
         {% for r in user_roles %}<option {% if r == u.role %}selected{% endif %}>{{ r }}</option>{% endfor %}</select></td>
+      <td><input type="checkbox" class="active" aria-label="{{ u.name }} is active" {% if not u.disabled %}checked{% endif %}
+        {% if u.name == account %}disabled title="You cannot disable yourself"{% endif %}></td>
+      <td><input type="number" class="sandbox mono" style="width: 7em" aria-label="Sandbox of {{ u.name }} (MB)"
+        min="{{ u.sandbox_mb }}" max="{{ sandbox_limits[1] }}" step="1" value="{{ u.sandbox_mb }}"></td>
       <td><input type="password" class="password" autocomplete="new-password" placeholder="unchanged" aria-label="New password of {{ u.name }}"></td>
       <td><div class="actions" style="margin: 0">
         <button type="button" data-save-user>Save</button>
@@ -48,6 +54,9 @@
     <tr>
       <td><input type="text" id="new-user" placeholder="new user" aria-label="New user name"></td>
       <td><select id="new-user-role" aria-label="Role of the new user">{% for r in user_roles %}<option {% if r == "user" %}selected{% endif %}>{{ r }}</option>{% endfor %}</select></td>
+      <td></td>
+      <td><input type="number" id="new-user-sandbox" class="mono" style="width: 7em" aria-label="Sandbox of the new user (MB)"
+        min="{{ sandbox_limits[0] }}" max="{{ sandbox_limits[1] }}" step="1" placeholder="default"></td>
       <td><input type="password" id="new-user-password" autocomplete="new-password" placeholder="password" aria-label="Password of the new user"></td>
       <td><button type="button" id="add-user">Add user</button></td>
     </tr>
@@ -149,7 +158,11 @@
     button.onclick = async () => {
       const row = button.closest("tr");
       const body = {name: row.dataset.user, role: row.querySelector(".role").value,
-                    password: row.querySelector(".password").value};
+                    password: row.querySelector(".password").value,
+                    disabled: !row.querySelector(".active").checked,
+                    sandbox_mb: Number(row.querySelector(".sandbox").value)};
+      if (body.disabled && row.querySelector(".active").defaultChecked
+          && !confirm(`Disable ${body.name}? It cannot log in any more, its open shells close at once; its sandbox disk is kept.`)) return;
       if (await post("users/save", body)) location.reload();
     };
   }
@@ -170,13 +183,15 @@
       const kind = button.dataset.delete, row = button.closest("tr");
       const name = row.dataset.user || row.dataset.link || row.dataset.token;
       const what = {users: "user", links: "link", tokens: "MCP token"}[kind];
-      if (!confirm(`${kind === "users" ? "Delete" : "Revoke"} ${what} ${name}? It stops working at once.`)) return;
+      const disk = kind === "users" ? ` Its shell sandbox, where it has one, is deleted too, with its disk (${row.dataset.sandbox} MB).` : "";
+      if (!confirm(`${kind === "users" ? "Delete" : "Revoke"} ${what} ${name}? It stops working at once.${disk}`)) return;
       if (await post(kind + "/delete", {name})) location.reload();
     };
   }
   document.getElementById("add-user").onclick = async () => {
     const body = {name: value("new-user"), role: value("new-user-role"),
                   password: document.getElementById("new-user-password").value, new: true};
+    if (value("new-user-sandbox")) body.sandbox_mb = Number(value("new-user-sandbox"));
     if (await post("users/save", body)) location.reload();
   };
   document.getElementById("add-link").onclick = async () => {

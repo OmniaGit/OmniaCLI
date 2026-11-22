@@ -312,6 +312,10 @@ class Access:
     tokens: dict[str, str] = field(default_factory=dict)  # MCP clients: {name: token hash}
     links: dict[str, LinkAccess] = field(default_factory=dict)
     token_roles: dict[str, str] = field(default_factory=dict)  # {MCP token name: role}
+    # the users who may not log in (their sandbox kept), and the size in MB of
+    # a user's shell sandbox when it is not the default of the Options page
+    disabled: set[str] = field(default_factory=set)
+    sandbox_mb: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -367,6 +371,8 @@ class Settings:
     storage_error: str = ""
     machine: str = MACHINE_SERVER
     token_roles: dict[str, str] = field(default_factory=dict)
+    disabled: set[str] = field(default_factory=set)
+    sandbox_mb: dict[str, int] = field(default_factory=dict)
     fixed: Access = field(default_factory=Access)
     web: Access = field(default_factory=Access)
 
@@ -388,6 +394,17 @@ class Settings:
         self.tokens = {**web.tokens, **self.fixed.tokens}
         self.links = {**web.links, **self.fixed.links}
         self.token_roles = {**web.token_roles, **self.fixed.token_roles}
+        # each user's own: a name of the main config takes its values there
+        self.disabled = {n for n in web.disabled if n not in self.fixed.users} | self.fixed.disabled
+        self.sandbox_mb = {**{n: mb for n, mb in web.sandbox_mb.items() if n not in self.fixed.users},
+                           **self.fixed.sandbox_mb}
+
+    def user_disabled(self, name: str) -> bool:
+        return name in self.disabled
+
+    def user_sandbox_mb(self, name: str) -> int:
+        """The size of name's shell sandbox: its own, else the Options page's."""
+        return self.sandbox_mb.get(name, self.options.sandbox_default_mb)
 
     def user_role(self, name: str) -> str:
         return self.user_roles.get(name, "admin")
@@ -753,12 +770,18 @@ def _access_role(where: str, value, roles: tuple[str, ...] = ACCESS_ROLES) -> st
 def parse_auth(auth: dict, where: str = "auth", need_user: bool = True) -> Access:
     """users (a hash, admin, or {password, role}), tokens and links ({token,
     role}) of the main config's auth section or of the users file."""
-    users, roles = {}, {}
+    users, roles, disabled, sandbox_mb = {}, {}, set(), {}
     for name, value in (auth.get("users") or {}).items():
         name = str(name)
         if isinstance(value, dict):
             users[name] = str(value.get("password") or "")
             roles[name] = _access_role(f"{where}.users.{name}", value.get("role"), USER_ROLES)
+            if value.get("disabled", False) not in (True, False):
+                raise ConfigError(f"{where}.users.{name}.disabled must be true or false")
+            if value.get("disabled"):
+                disabled.add(name)
+            if "sandbox_mb" in value:
+                sandbox_mb[name] = _whole(value["sandbox_mb"], f"{where}.users.{name}.sandbox_mb", SANDBOX_MB_LIMITS)
         else:
             # the format before roles: such a user is an admin
             users[name], roles[name] = str(value), "admin"
@@ -784,7 +807,7 @@ def parse_auth(auth: dict, where: str = "auth", need_user: bool = True) -> Acces
         if not _TOKEN_HASH.fullmatch(token):
             raise ConfigError(f"{where}.links.{name}: token is not a token hash (omniacli new-link-token)")
         links[name] = LinkAccess(token, _access_role(f"{where}.links.{name}", value.get("role")))
-    return Access(users, roles, tokens, links, token_roles)
+    return Access(users, roles, tokens, links, token_roles, disabled, sandbox_mb)
 
 
 def load_access(path: Path) -> Access:
@@ -798,10 +821,21 @@ def load_access(path: Path) -> Access:
     return parse_auth(data, where=path.name, need_user=False)
 
 
+def _user_record(access: Access, name: str, password: str) -> dict:
+    """A user of the users file: what is not the default is left out, so a
+    file of before is written again as it was."""
+    record = {"password": password, "role": access.roles.get(name, "admin")}
+    if name in access.disabled:
+        record["disabled"] = True
+    if name in access.sandbox_mb:
+        record["sandbox_mb"] = access.sandbox_mb[name]
+    return record
+
+
 def save_access(path: Path, access: Access) -> None:
     """Write the users file atomically, readable by its owner only."""
     data = {
-        "users": {n: {"password": h, "role": access.roles.get(n, "admin")} for n, h in access.users.items()},
+        "users": {n: _user_record(access, n, h) for n, h in access.users.items()},
         "links": {n: {"token": link.token, "role": link.role} for n, link in access.links.items()},
         "tokens": {n: {"token": h, "role": access.token_roles.get(n, TOKEN_DEFAULT_ROLE)}
                    for n, h in access.tokens.items()},
@@ -1243,6 +1277,10 @@ TUNNEL_IDLE = 4
 TUNNEL_IDLE_HOURS = (1, 720)
 TUNNEL_BIND = "127.0.0.1"
 TUNNEL_PORTS = "18000-18099"
+# the shell sandbox of a user on a server (sandboxhelper.py): the size in MB
+# of its disk when the user has none of its own, and the limits of a size
+SANDBOX_MB = 100
+SANDBOX_MB_LIMITS = (50, 102400)
 
 
 @dataclass
@@ -1253,6 +1291,7 @@ class Options:
     tunnel_idle_hours: int = TUNNEL_IDLE
     tunnel_bind: str = TUNNEL_BIND
     tunnel_ports: str = TUNNEL_PORTS
+    sandbox_default_mb: int = SANDBOX_MB
 
 
 def _whole(value, where: str, limits: tuple[int, int]) -> int:
@@ -1266,8 +1305,10 @@ def parse_options(data) -> Options:
     data = data if isinstance(data, dict) else {}
     shell = data.get("shell") or {}
     tunnel = data.get("tunnel") or {}
-    if not isinstance(shell, dict) or not isinstance(tunnel, dict):
-        raise ConfigError("shell and tunnel must be mappings")
+    sandbox = data.get("sandbox") or {}
+    if not isinstance(shell, dict) or not isinstance(tunnel, dict) or not isinstance(sandbox, dict):
+        raise ConfigError("shell, tunnel and sandbox must be mappings")
+    sandbox_mb = _whole(sandbox.get("default_mb", SANDBOX_MB), "sandbox.default_mb", SANDBOX_MB_LIMITS)
     size = _whole(shell.get("font_size", SHELL_FONT_SIZE), "shell.font_size", SHELL_FONT_SIZES)
     idle = _whole(tunnel.get("idle_hours", TUNNEL_IDLE), "tunnel.idle_hours", TUNNEL_IDLE_HOURS)
     bind = str(tunnel.get("bind", TUNNEL_BIND)).strip()
@@ -1280,7 +1321,8 @@ def parse_options(data) -> Options:
     low, high = (int(match[1]), int(match[2] or match[1])) if match else (0, 0)
     if not 1024 <= low <= high <= 65535:
         raise ConfigError(f"tunnel.ports: {ports!r} must be a port or a range low-high, from 1024 to 65535")
-    return Options(shell_font_size=size, tunnel_idle_hours=idle, tunnel_bind=bind, tunnel_ports=ports)
+    return Options(shell_font_size=size, tunnel_idle_hours=idle, tunnel_bind=bind, tunnel_ports=ports,
+                   sandbox_default_mb=sandbox_mb)
 
 
 def load_options(path: Path) -> Options:
@@ -1300,7 +1342,8 @@ def load_options(path: Path) -> Options:
 def save_options(path: Path, options: Options) -> None:
     text = yaml.safe_dump({"shell": {"font_size": options.shell_font_size},
                            "tunnel": {"idle_hours": options.tunnel_idle_hours, "bind": options.tunnel_bind,
-                                      "ports": options.tunnel_ports}}, sort_keys=False)
+                                      "ports": options.tunnel_ports},
+                           "sandbox": {"default_mb": options.sandbox_default_mb}}, sort_keys=False)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(text, encoding="utf-8")

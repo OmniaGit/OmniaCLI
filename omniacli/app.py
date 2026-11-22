@@ -45,6 +45,7 @@ from .config import (
     PULLER_FILE_MIB,
     PULLER_KEEP_HOURS,
     ROLES,
+    SANDBOX_MB_LIMITS,
     SERVER_NAME,
     MACHINE_DEVELOPMENT,
     SHELL_FONT_SIZE,
@@ -365,6 +366,8 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
     own_log_file = settings.logs_dir / "omniacli.log"
     # the browsers' logins: next to the jobs, like the access log
     sessions = SessionStore(settings.jobs_dir.parent / "sessions.json")
+    # the shells open now, by user: closed when the user is disabled or deleted
+    live_shells = shell.LiveShells()
     tunnels = tunnel.TunnelManager(
         lambda: settings.options, link_headers,
         lambda user, detail: access_log.record("tunnel", "user", user, "", detail))
@@ -414,7 +417,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             return Principal(name, role, "link", on_behalf if _ON_BEHALF.fullmatch(on_behalf) else "")
         # a browser: the session of the login form
         name = sessions.user(request.cookies.get(COOKIE), settings.users)
-        if name is None:
+        if name is None or settings.user_disabled(name):
             # marked, so the pages' scripts tell it from a link's or a token's 401
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Login required", headers={_LOGIN_HEADER: "required"})
         if method not in ("GET", "HEAD") and not _same_origin(request):
@@ -582,6 +585,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
     app.state.ssh_tunnels = ssh_tunnels
     app.state.pullers, app.state.publications, app.state.consumers = pullers, publications, consumers
     app.state.sessions, app.state.authenticator = sessions, authenticator
+    app.state.live_shells = live_shells
 
     @app.middleware("http")
     async def security_headers(request: Request, call_next):
@@ -639,7 +643,8 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         LIFETIME, failed tries limited per address and user name."""
         if request.method == "GET":
             next_path = _next_path(request.query_params.get("next", "/"))
-            if sessions.user(request.cookies.get(COOKIE), settings.users):
+            known = sessions.user(request.cookies.get(COOKIE), settings.users)
+            if known and not settings.user_disabled(known):
                 return RedirectResponse(next_path, status.HTTP_303_SEE_OTHER)
             return login_page(request, next_path)
         if not _same_origin(request):
@@ -657,6 +662,9 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             limiter.failed(ip, name)
             access_log.record("failed", "user", name, ip, "login form")
             return login_page(request, next_path, "Wrong user name or password.", 401)
+        if settings.user_disabled(name):
+            access_log.record("failed", "user", name, ip, "login form: the user is disabled")
+            return login_page(request, next_path, "This user is disabled.", 403)
         limiter.succeeded(ip, name)
         access_log.record("login", "user", name, ip, "login form")
         response = RedirectResponse(next_path, status.HTTP_303_SEE_OTHER)
@@ -2768,7 +2776,8 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
 
     def web_copy() -> Access:
         web = settings.web
-        return Access(dict(web.users), dict(web.roles), dict(web.tokens), dict(web.links), dict(web.token_roles))
+        return Access(dict(web.users), dict(web.roles), dict(web.tokens), dict(web.links), dict(web.token_roles),
+                      set(web.disabled), dict(web.sandbox_mb))
 
     async def store_access(web: Access):
         """Write the users file and make it current; a response on error."""
@@ -2781,7 +2790,9 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         return None
 
     def other_admins(name: str) -> int:
-        return sum(1 for n in settings.users if n != name and settings.user_role(n) == "admin")
+        """The admins besides name who can log in (a disabled one cannot)."""
+        return sum(1 for n in settings.users
+                   if n != name and settings.user_role(n) == "admin" and not settings.user_disabled(n))
 
     def check_name(kind: str, name: str, fixed: dict, current: dict, new: bool):
         """None when name may be created (new) or edited, a response otherwise."""
@@ -2805,8 +2816,11 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             request,
             "users.html",
             {
-                "users": [{"name": n, "role": settings.user_role(n), "fixed": n in fixed.users}
+                "users": [{"name": n, "role": settings.user_role(n), "fixed": n in fixed.users,
+                           "disabled": settings.user_disabled(n), "sandbox_mb": settings.user_sandbox_mb(n),
+                           "shells": live_shells.count(n)}
                           for n in sorted(settings.users)],
+                "sandbox_limits": SANDBOX_MB_LIMITS,
                 "links": [{"name": n, "role": link.role, "fixed": n in fixed.links}
                           for n, link in sorted(settings.links.items())],
                 "tokens": [{"name": n, "role": settings.token_role(n), "fixed": n in fixed.tokens}
@@ -2910,9 +2924,20 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
     @app.post("/api/access/users/save")
     async def user_save(payload: dict = Body(...), me: Principal = Depends(admin)):
         """Create a user (new: true, with a password) or change its role and,
-        when given, its password."""
+        when given, its password, whether it is disabled and the size of its
+        shell sandbox (MB: never smaller than it is; a new user gets the
+        default of the Options page when none is given)."""
         name, role = str(payload.get("name") or "").strip(), str(payload.get("role") or "")
         password, new = str(payload.get("password") or ""), bool(payload.get("new"))
+        disabled = payload.get("disabled", False)
+        size = payload.get("sandbox_mb")
+        if disabled not in (True, False):
+            return refuse("disabled must be true or false")
+        if size in (None, ""):
+            size = None
+        elif isinstance(size, bool) or not isinstance(size, int) or not (
+                SANDBOX_MB_LIMITS[0] <= size <= SANDBOX_MB_LIMITS[1]):
+            return refuse(f"The sandbox is {SANDBOX_MB_LIMITS[0]} to {SANDBOX_MB_LIMITS[1]} MB")
         async with access_lock:
             web = web_copy()
             refused = (check_name("User", name, settings.fixed.users, settings.users, new)
@@ -2926,10 +2951,30 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
                     return refuse("You cannot change your own role")
                 if role != "admin" and settings.user_role(name) == "admin" and not other_admins(name):
                     return refuse(f"{name} is the last admin")
+                if disabled and me.kind == "user" and name == me.name:
+                    return refuse("You cannot disable yourself")
+                if disabled and settings.user_role(name) == "admin" and not other_admins(name):
+                    return refuse(f"{name} is the last admin")
+                if size is not None and size < settings.user_sandbox_mb(name):
+                    return refuse(f"The sandbox of {name} is {settings.user_sandbox_mb(name)} MB: "
+                                  "a disk is not made smaller")
             if password:
                 web.users[name] = await asyncio.to_thread(hash_password, password)
             web.roles[name] = role
-            return await store_access(web) or {"ok": True}
+            if new and size is None:
+                size = settings.options.sandbox_default_mb
+            if size is not None:
+                web.sandbox_mb[name] = size
+            if disabled:
+                web.disabled.add(name)
+            else:
+                web.disabled.discard(name)
+            refused = await store_access(web)
+            if refused:
+                return refused
+            if disabled:
+                live_shells.close(name, "the user is disabled")
+            return {"ok": True}
 
     @app.post("/api/access/users/delete")
     async def user_delete(payload: dict = Body(...), me: Principal = Depends(admin)):
@@ -2945,7 +2990,13 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             web = web_copy()
             del web.users[name]
             web.roles.pop(name, None)
-            return await store_access(web) or {"ok": True}
+            web.disabled.discard(name)
+            web.sandbox_mb.pop(name, None)
+            refused = await store_access(web)
+            if refused:
+                return refused
+            live_shells.close(name, "the user is deleted")
+            return {"ok": True}
 
     @app.post("/api/access/links/save", dependencies=[Depends(admin)])
     async def link_save(payload: dict = Body(...)):
@@ -3232,7 +3283,8 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         access_log.record("shell", me.kind, me.name, ip, f"{what} opened{who}")
         opened = time.monotonic()
         try:
-            await shell.serve(websocket, folder(instance), command, env, stay)
+            await shell.serve(websocket, folder(instance), command, env, stay,
+                              live=live_shells, owner=me.name if me.kind == "user" else "")
         except OSError as exc:
             _logger.warning("shell of %s: %s", instance.key, exc)
             with contextlib.suppress(RuntimeError):
@@ -3790,7 +3842,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
     async def options_page(request: Request):
         return _TEMPLATES.TemplateResponse(request, "options.html", {
             "options": settings.options, "options_file": settings.options_file, "machine": settings.machine,
-            "font_sizes": SHELL_FONT_SIZES, "idle_hours": TUNNEL_IDLE_HOURS})
+            "font_sizes": SHELL_FONT_SIZES, "idle_hours": TUNNEL_IDLE_HOURS, "sandbox_limits": SANDBOX_MB_LIMITS})
 
     @app.post("/api/options/save", dependencies=[Depends(admin)])
     async def options_save(payload: dict = Body(...)):

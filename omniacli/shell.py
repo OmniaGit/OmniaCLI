@@ -212,10 +212,44 @@ class Shell:
             os.close(self.master)
 
 
+class LiveShells:
+    """The shells open now, by the local user they belong to, so that they
+    are closed at once when that user is disabled or deleted."""
+
+    def __init__(self):
+        self._open: dict[str, dict[asyncio.Event, list[str]]] = {}
+
+    def open(self, owner: str) -> tuple[asyncio.Event, list[str]]:
+        """A stop event for a new shell of owner, and where the reason goes."""
+        stop, why = asyncio.Event(), []
+        self._open.setdefault(owner, {})[stop] = why
+        return stop, why
+
+    def ended(self, owner: str, stop: asyncio.Event) -> None:
+        shells = self._open.get(owner, {})
+        shells.pop(stop, None)
+        if not shells:
+            self._open.pop(owner, None)
+
+    def count(self, owner: str) -> int:
+        return len(self._open.get(owner, {}))
+
+    def close(self, owner: str, why: str) -> int:
+        """Close every shell of owner; how many there were."""
+        shells = self._open.get(owner, {})
+        for stop, reason in shells.items():
+            reason.append(why)
+            stop.set()
+        return len(shells)
+
+
 async def serve(websocket: WebSocket, cwd: Path | None, command: str | None = None,
-                env: dict | None = None, stay: bool = True) -> None:
-    """Join an accepted WebSocket to a new shell until one of them ends."""
+                env: dict | None = None, stay: bool = True,
+                live: LiveShells | None = None, owner: str = "") -> None:
+    """Join an accepted WebSocket to a new shell until one of them ends, or
+    until live closes the shells of owner."""
     shell = await Shell.start(cwd, command=command, env=env, stay=stay)
+    stop, why = live.open(owner) if live is not None and owner else (asyncio.Event(), [])
 
     async def output():
         while True:
@@ -238,7 +272,7 @@ async def serve(websocket: WebSocket, cwd: Path | None, command: str | None = No
             except (ValueError, KeyError, TypeError, AttributeError, OSError):
                 continue
 
-    tasks = [asyncio.ensure_future(output()), asyncio.ensure_future(typed())]
+    tasks = [asyncio.ensure_future(output()), asyncio.ensure_future(typed()), asyncio.ensure_future(stop.wait())]
     try:
         done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         for task in done:
@@ -250,5 +284,7 @@ async def serve(websocket: WebSocket, cwd: Path | None, command: str | None = No
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         await shell.close()
+        if live is not None and owner:
+            live.ended(owner, stop)
         with contextlib.suppress(RuntimeError, WebSocketDisconnect):
-            await websocket.close(SHELL_EXITED, "the shell ended")
+            await websocket.close(SHELL_EXITED, why[0] if why else "the shell ended")

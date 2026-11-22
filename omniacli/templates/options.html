@@ -36,6 +36,15 @@ Root sets it with <span class="mono">machine:</span> in the main configuration.<
              title="A port or a range low-high (1024-65535): every tunnel takes the first free one">
     </div>
   </fieldset>
+  <fieldset>
+    <legend>Shell sandboxes (servers)</legend>
+    <div class="form-grid">
+      <label for="sandbox-default-mb">Disk of a new user (MB)</label>
+      <input type="number" id="sandbox-default-mb" class="mono" required
+             min="{{ sandbox_limits[0] }}" max="{{ sandbox_limits[1] }}" step="1" value="{{ options.sandbox_default_mb }}"
+             title="The size a new user's sandbox disk gets ({{ sandbox_limits[0] }}-{{ sandbox_limits[1] }} MB); each user's own is on the Users page">
+    </div>
+  </fieldset>
   <div class="actions">
     <button type="submit">Save</button>
     <a class="button" href="{{ prefix }}/">Cancel</a>
@@ -54,6 +63,7 @@ document.getElementById("form").addEventListener("submit", async (ev) => {
       tunnel: {idle_hours: Number(document.getElementById("tunnel-idle").value),
                bind: document.getElementById("tunnel-bind").value.trim(),
                ports: document.getElementById("tunnel-ports").value.trim()},
+      sandbox: {default_mb: Number(document.getElementById("sandbox-default-mb").value)},
     }),
   }).catch(() => null);
   const data = resp ? await resp.json().catch(() => ({})) : {};

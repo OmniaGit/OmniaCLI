@@ -601,6 +601,16 @@ the last admin cannot be demoted or deleted. Every user who logs in with a
 password changes it from their own page (their name, top right), unless it is
 set in the main config.
 
+A user can be **disabled** (Active unticked): it cannot log in, its sessions
+end and its open shells close at once, and its shell sandbox is kept; ticked
+again, everything comes back. Nobody disables themselves, and the last admin
+who can log in is not disabled. Each user also has the size of its **shell
+sandbox** (Sandbox (MB), see Shell): a new user gets the default of the
+Options page (100 MB), and the size only grows, a disk is never made smaller.
+Deleting a user deletes its sandbox and its disk too, and the page says so
+before. In the main config the same keys are `disabled: true` and
+`sandbox_mb: <MB>` of a user.
+
 The **Help** page (menu Help, developers and admins) explains step by step
 how to create a link, how to connect an MCP client and every field of the
 server form, with example data only.
