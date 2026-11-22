@@ -790,7 +790,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
                 })
             return rows
 
-        found = await asyncio.gather(*(one(link) for link in settings.link_targets.values()))
+        found = await asyncio.gather(*(one(link) for link in usable_links(me).values()))
         return [row for rows in found for row in rows]
 
     async def server_sections(request: Request, q: str, me: Principal) -> dict:
@@ -835,7 +835,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         admins), the machine of each link (Linked), this machine, the jobs."""
         shown = visible_servers(me)
         context = await server_sections(request, q, me)
-        links = sorted(settings.link_targets) if me.kind == "user" and shown is None else []
+        links = sorted(usable_links(me)) if me.kind == "user" and shown is None else []
         linked = [{"name": n, "url": settings.link_targets[n].url} for n in links]
         context.update({
             # the load and disks of this machine: not for a user of
@@ -896,7 +896,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
                                    "in the server's form (Edit)"))
                 from_link[i.key] = {"disabled": missing}
                 continue
-            known = src.link in (settings.connections if src.is_puller else settings.link_targets)
+            known = src.link in (settings.connections if src.is_puller else usable_links(me))
             from_link[i.key] = {
                 "url": f"{base}/{i.role}/from-link", "link": src.link, "server": src.server,
                 "role": src.role, "label": src.label, "puller": src.is_puller, "known": known,
@@ -1302,6 +1302,9 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             raise HTTPException(status.HTTP_403_FORBIDDEN,
                                 f"The {from_link_role(instance)} role is required for a production")
         link = None if src.is_puller else settings.link_targets.get(src.link)
+        if link is not None and not may_use(link, user):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, f"The link {src.link} is not yours to use: "
+                                "an admin adds you to its users (Links page)")
         if src.is_puller and src.link not in settings.connections:
             return refuse(f"No puller connection {src.link}: add it on the Pullers page, or change the server")
         if not src.is_puller and link is None:
@@ -3102,6 +3105,24 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             raise HTTPException(status.HTTP_404_NOT_FOUND, f"No link {name}")
         return link
 
+    def may_use(link: LinkTarget, me: Principal) -> bool:
+        """The one rule of the links' users: an admin here uses every link,
+        another user one that lists it (Links page)."""
+        return me.kind == "user" and link.usable_by(me.name, me.can("admin"))
+
+    def usable_links(me: Principal) -> dict[str, LinkTarget]:
+        return {n: link for n, link in settings.link_targets.items() if may_use(link, me)}
+
+    def a_usable_link(name: str, me: Principal) -> LinkTarget:
+        """A link me may use: 404 none, 403 not for me."""
+        if me.kind != "user":
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Only a user who logs in here may use a link")
+        link = a_link(name)
+        if not may_use(link, me):
+            raise HTTPException(status.HTTP_403_FORBIDDEN,
+                                f"The link {name} is not yours to use: an admin adds you to its users (Links page)")
+        return link
+
     async def store_links(links: dict[str, LinkTarget]):
         try:
             await asyncio.to_thread(save_links, settings.links_file, links)
@@ -3123,7 +3144,9 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
         return _TEMPLATES.TemplateResponse(
             request, "links.html",
             {"links": list(settings.link_targets.values()), "links_file": settings.links_file,
-             "public_key": public, "ssh": ssh},
+             "public_key": public, "ssh": ssh,
+             # who may be given a link: the users who log in here and are no admins (they use every link)
+             "link_users": sorted(n for n in settings.users if settings.user_role(n) in ("user", "developer"))},
         )
 
     @app.post("/api/links/ssh/key", dependencies=[Depends(admin)])
@@ -3155,7 +3178,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
                 return refuse(f"A link named {name} already exists")
             if not new and name not in settings.link_targets:
                 return refuse(f"No link {name}", status.HTTP_404_NOT_FOUND)
-            data = {k: payload.get(k) for k in ("url", "token", "ca_file", "ssh")}
+            data = {k: payload.get(k) for k in ("url", "token", "ca_file", "ssh", "users")}
             if not new and not str(data["token"] or "").strip():
                 data["token"] = settings.link_targets[name].token
             try:
@@ -3202,16 +3225,14 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
             request, "link_error.html", {"link": link, "message": message}, status_code=502)
 
     @app.get("/links/{name}")
-    async def link_root(name: str):
-        a_link(name)
+    async def link_root(name: str, me: Principal = Depends(current_user)):
+        a_usable_link(name, me)
         return RedirectResponse(f"/links/{name}/", status.HTTP_307_TEMPORARY_REDIRECT)
 
     @app.api_route("/links/{name}/{path:path}", methods=["GET", "HEAD", "POST"])
     async def link_proxy(request: Request, name: str, path: str, me: Principal = Depends(current_user)):
         """The other instance's page or API, as the link, with at most our role."""
-        if me.kind != "user":
-            raise HTTPException(status.HTTP_403_FORBIDDEN, "Only a user who logs in here may use a link")
-        link = a_link(name)
+        link = a_usable_link(name, me)
         client = link_clients.client(link)
         headers = {k: request.headers[k] for k in _LINK_REQUEST_HEADERS if k in request.headers}
         # the body is passed on raw: ask only the encodings the browser accepts
@@ -3410,9 +3431,10 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
                                 me: Principal):
         """The shell of a linked instance's server, as the link, with at most our role."""
         await websocket.accept()
-        link = settings.link_targets.get(name)
-        if me.kind != "user" or link is None:
-            await websocket.close(1008, "Only a user who logs in here may use a link" if link else f"No link {name}")
+        try:
+            link = a_usable_link(name, me)
+        except HTTPException as exc:
+            await websocket.close(1008, str(exc.detail)[:120])
             return
         try:
             await proxy_websocket(websocket, link, f"servers/{server}/{role}/{kind}/ws",
@@ -3509,7 +3531,7 @@ def create_app(settings: Settings, link_transport: httpx.AsyncBaseTransport | No
     @app.post("/api/tunnels/open")
     async def tunnels_open(request: Request, payload: dict = Body(...), me: Principal = Depends(current_user)):
         tunnel_user(me)
-        link = settings.link_targets.get(str(payload.get("link") or ""))
+        link = usable_links(me).get(str(payload.get("link") or ""))
         server, role = str(payload.get("server") or ""), str(payload.get("role") or "")
         if link is None:
             return refuse(f"No link {payload.get('link')}")

@@ -95,7 +95,7 @@ def customer(env):
 def my_app(tmp_path, url, ports):
     conf = tmp_path / "mine"
     conf.mkdir(parents=True, exist_ok=True)
-    (conf / "links.yaml").write_text(yaml.safe_dump({"links": {"cliente": {"url": url, "token": LINK_TOKEN}}}))
+    (conf / "links.yaml").write_text(yaml.safe_dump({"links": {"cliente": {"url": url, "token": LINK_TOKEN, "users": ["dev", "viewer", "other", "anna", "luca"]}}}))
     (conf / "options.yaml").write_text(yaml.safe_dump({"tunnel": {"ports": ports}}))
     settings = parse_settings({
         "auth": {"users": {"admin": USER_HASH, "viewer": {"password": USER_HASH, "role": "user"},

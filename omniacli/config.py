@@ -886,6 +886,13 @@ class LinkTarget:
     ssh: SshRoute | None = None
     # with ssh: the port of this machine its tunnel listens on (sshlinks.py)
     local_port: int = field(default=0, compare=False, repr=False)
+    # the users here who may use it besides the admins (who use every link);
+    # not compared: a change of them is no new client (links.py)
+    users: tuple[str, ...] = field(default=(), compare=False)
+
+    def usable_by(self, name: str, admin: bool) -> bool:
+        """An admin uses every link; another user one that lists it."""
+        return admin or name in self.users
 
     @property
     def address(self) -> str:
@@ -907,6 +914,8 @@ class LinkTarget:
             data["ca_file"] = self.ca_file
         if self.ssh is not None:
             data["ssh"] = self.ssh.to_dict()
+        if self.users:
+            data["users"] = list(self.users)
         return data
 
 
@@ -966,7 +975,10 @@ def parse_link(name: str, data: dict) -> LinkTarget:
         # the tunnel ends on this machine: a certificate would not match it
         raise ConfigError(f"links.{name}: through SSH the url is http://, as the SSH server reaches OmniaCLI "
                           "(http://127.0.0.1:8090); SSH encrypts it")
-    return LinkTarget(name, url, token, ca_file, ssh)
+    users = data.get("users") or []
+    if not isinstance(users, list) or not all(isinstance(u, str) and MEMBER_NAME.fullmatch(u) for u in users):
+        raise ConfigError(f"links.{name}.users: a list of user names")
+    return LinkTarget(name, url, token, ca_file, ssh, users=tuple(sorted(set(users))))
 
 
 def load_links(path: Path) -> dict[str, LinkTarget]:

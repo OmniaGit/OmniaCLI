@@ -712,6 +712,12 @@ Users page, and a CA file when its certificate is from the customer's own CA.
   `manual: link <its name for you> (<your user>)`;
 - you act there with the lower of your role here and the link's role there.
   Only users who log in here use links, not tokens;
+- an admin here uses every link; another user only a link that lists it
+  (**Users** of the link on the Links page, `users:` in `links.yaml`): the
+  others do not see it on the Dashboard nor among the tunnels, and get 403 on
+  its pages, its shell and Copy from link. A link of before lists nobody: admins
+  only, until an admin adds its users. Schedules and pullers are the
+  machine's, not a user's: they use their links as before;
 - an instance here may take its database from an instance there: in the
   server form, **Database from link** names the link, the server there and
   its role. *Copy from link* on the instance's page then backs it up there,

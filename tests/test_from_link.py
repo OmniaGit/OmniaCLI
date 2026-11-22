@@ -35,7 +35,7 @@ async def here(env, tmp_path, monkeypatch):
     servers["servers"]["srv"]["production"]["from_link"] = {"link": "cliente", "server": "srv", "role": "production"}
     (conf / "servers.yaml").write_text(yaml.safe_dump(servers))
     (conf / "links.yaml").write_text(yaml.safe_dump({"links": {
-        "cliente": {"url": "http://customer.test", "token": LINK_TOKEN}}}))
+        "cliente": {"url": "http://customer.test", "token": LINK_TOKEN, "users": ["dev", "viewer", "other", "anna", "luca"]}}}))
     settings = parse_settings({
         "auth": {"users": {"admin": USER_HASH, "dev": {"password": USER_HASH, "role": "developer"},
                            "viewer": {"password": USER_HASH, "role": "user"}}},

@@ -151,7 +151,7 @@ def test_shell_through_a_link(env, tmp_path, customer_server):
     customer, url = customer_server
     conf = tmp_path / "mine"
     conf.mkdir()
-    (conf / "links.yaml").write_text(yaml.safe_dump({"links": {"cliente": {"url": url, "token": LINK_TOKEN}}}))
+    (conf / "links.yaml").write_text(yaml.safe_dump({"links": {"cliente": {"url": url, "token": LINK_TOKEN, "users": ["dev", "viewer", "other", "anna", "luca"]}}}))
     settings = parse_settings({
         "auth": {"users": {"admin": USER_HASH, "viewer": {"password": USER_HASH, "role": "user"}}},
         "backup_dir": str(tmp_path / "my-backups"), "jobs_dir": str(tmp_path / "my-jobs"),
@@ -389,7 +389,7 @@ def test_a_file_dropped_through_a_link(env, tmp_path, drops, customer_server):
     customer, url = customer_server
     conf = tmp_path / "mine"
     conf.mkdir()
-    (conf / "links.yaml").write_text(yaml.safe_dump({"links": {"cliente": {"url": url, "token": LINK_TOKEN}}}))
+    (conf / "links.yaml").write_text(yaml.safe_dump({"links": {"cliente": {"url": url, "token": LINK_TOKEN, "users": ["dev", "viewer", "other", "anna", "luca"]}}}))
     settings = parse_settings({
         "auth": {"users": {"admin": USER_HASH, "viewer": {"password": USER_HASH, "role": "user"}}},
         "backup_dir": str(tmp_path / "my-backups"), "jobs_dir": str(tmp_path / "my-jobs"),

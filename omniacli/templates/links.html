@@ -48,7 +48,8 @@ link through it; the URL is then <span class="mono">http://</span> as that serve
   <div class="scroll">
   {{ list_search("links", "Search link, address, SSH host…", request.query_params.get("q", "")) }}
   <table data-list="links">
-    <thead><tr><th>Link</th><th>URL</th><th>Token</th><th>CA file</th><th>SSH</th><th></th></tr></thead>
+    <thead><tr><th>Link</th><th>URL</th><th>Token</th><th>CA file</th><th>SSH</th>
+      <th title="Who may use it besides the admins (who use every link): the others do not see it">Users</th><th></th></tr></thead>
     {% for link in links %}
     {% set s = ssh.get(link.name) %}
     {# the link and its SSH fields: one item of the list widget #}
@@ -64,6 +65,10 @@ link through it; the URL is then <span class="mono">http://</span> as that serve
           title="{{ s.status.detail }}">{{ s.status.state }}</span> <span class="muted">{{ s.status.detail }}</span>{% endif %}
         {% else %}<span class="muted">no</span>{% endif %}
         <br><button type="button" data-ssh-toggle>SSH…</button></td>
+      <td><select class="users" multiple size="{{ [link_users | length, 4] | min if link_users else 1 }}" aria-label="Users of {{ link.name }}">
+        {% for u in link_users %}<option {% if u in link.users %}selected{% endif %}>{{ u }}</option>{% endfor %}
+        {% for u in link.users if u not in link_users %}<option selected>{{ u }}</option>{% endfor %}</select>
+        <br><span class="muted">{{ "admins, and " ~ (link.users | join(", ")) if link.users else "admins only" }}</span></td>
       <td><div class="actions" style="margin: 0">
         <button type="button" data-test>Test link</button>
         <button type="button" data-save>Save</button>
@@ -73,7 +78,7 @@ link through it; the URL is then <span class="mono">http://</span> as that serve
     </tr>
     <tr data-ssh-for="{{ link.name }}" {% if not s %}hidden{% endif %}>
       <td></td>
-      <td colspan="5">
+      <td colspan="6">
         {{ ssh_fields(link, "ssh-" ~ loop.index) }}
         {% if s %}
         <p class="muted">On that server, as root: the user <span class="mono">{{ link.ssh.user }}</span>, and in its
@@ -87,7 +92,7 @@ link through it; the URL is then <span class="mono">http://</span> as that serve
     </tr>
     </tbody>
     {% else %}
-    <tr><td colspan="6" class="muted">No links yet.</td></tr>
+    <tr><td colspan="7" class="muted">No links yet.</td></tr>
     {% endfor %}
     <tbody>
     <tr id="new-row">
@@ -96,11 +101,13 @@ link through it; the URL is then <span class="mono">http://</span> as that serve
       <td><input type="password" id="new-token" autocomplete="off" placeholder="token from its Users page" aria-label="New link token"></td>
       <td><input type="text" id="new-ca" class="mono" placeholder="system CAs" aria-label="New link CA file"></td>
       <td><button type="button" data-ssh-toggle>SSH…</button></td>
+      <td><select id="new-users" multiple size="{{ [link_users | length, 4] | min if link_users else 1 }}" aria-label="Users of the new link">
+        {% for u in link_users %}<option>{{ u }}</option>{% endfor %}</select></td>
       <td><button type="button" id="add">Add link</button></td>
     </tr>
     <tr data-ssh-for="" hidden>
       <td></td>
-      <td colspan="5">{{ ssh_fields(None, "ssh-new") }}</td>
+      <td colspan="6">{{ ssh_fields(None, "ssh-new") }}</td>
     </tr>
     </tbody>
   </table>
@@ -146,7 +153,8 @@ link through it; the URL is then <span class="mono">http://</span> as that serve
     const name = row.dataset.link, result = row.querySelector(".result");
     row.querySelector("[data-save]").onclick = async () => {
       const body = {name, url: row.querySelector(".url").value, token: row.querySelector(".token").value,
-                    ca_file: row.querySelector(".ca").value, ssh: sshOf(name)};
+                    ca_file: row.querySelector(".ca").value, ssh: sshOf(name),
+                    users: [...row.querySelector(".users").selectedOptions].map((o) => o.value)};
       if (await post("save", body)) location.reload();
     };
     row.querySelector("[data-delete]").onclick = async () => {
@@ -166,7 +174,8 @@ link through it; the URL is then <span class="mono">http://</span> as that serve
   document.getElementById("add").onclick = async () => {
     const value = (id) => document.getElementById(id).value.trim();
     const body = {name: value("new-name"), url: value("new-url"), token: value("new-token"),
-                  ca_file: value("new-ca"), ssh: sshOf(""), new: true};
+                  ca_file: value("new-ca"), ssh: sshOf(""), new: true,
+                  users: [...document.getElementById("new-users").selectedOptions].map((o) => o.value)};
     if (await post("save", body)) location.reload();
   };
 })();

@@ -42,7 +42,7 @@ async def mine(env, tmp_path):
     conf = tmp_path / "mine"
     conf.mkdir()
     (conf / "links.yaml").write_text(yaml.safe_dump({"links": {
-        "cliente": {"url": "http://customer.test", "token": LINK_TOKEN},
+        "cliente": {"url": "http://customer.test", "token": LINK_TOKEN, "users": ["dev", "viewer", "other", "anna", "luca"]},
         "down": {"url": "https://down.test", "token": "whatever"},
     }}))
     settings = parse_settings({
@@ -230,3 +230,31 @@ def test_describe_websocket_refusals():
     assert refused(502) == "WebSocket refused (502)"
     # the close reason of a link's shell keeps the whole message
     assert len(f"link customer-x: {refused(404)}".encode()) <= 120
+
+
+async def test_a_link_is_used_by_the_admins_and_its_users_only(mine):
+    """"down" lists no user: admins only. dev is on "cliente" only: it sees
+    and opens that one, not "down", by every way a user uses a link."""
+    settings = mine.app.state.settings
+    assert settings.link_targets["down"].users == () and "dev" in settings.link_targets["cliente"].users
+    page = (await mine.get("/", headers=as_user("dev"))).text
+    assert 'data-link="cliente"' in page and 'data-link="down"' not in page
+    assert 'data-link="down"' in (await mine.get("/", headers=as_user("admin"))).text
+    resp = await mine.get("/links/down/", headers=as_user("dev"))
+    assert resp.status_code == 403 and "is not yours to use" in resp.text
+    assert (await mine.get("/links/down", headers=as_user("dev"))).status_code == 403
+    assert (await mine.get("/links/cliente/api/info", headers=as_user("dev"))).status_code == 200
+    resp = await mine.post("/api/tunnels/open", json={"link": "down", "server": "srv", "role": "test"},
+                           headers=as_user("dev", post=True))
+    assert resp.status_code == 400 and "No link down" in resp.text
+    # the Links page keeps who may use it
+    resp = await mine.post("/api/links/save", json={"name": "down", "url": "https://down.test", "token": "",
+                                                     "users": ["viewer", "viewer"]}, headers=as_user("admin", post=True))
+    assert resp.status_code == 200, resp.text
+    assert settings.link_targets["down"].users == ("viewer",)
+    assert yaml.safe_load(settings.links_file.read_text())["links"]["down"]["users"] == ["viewer"]
+    page = (await mine.get("/links", headers=as_user("admin"))).text
+    assert 'aria-label="Users of down"' in page and "admins, and viewer" in page
+    resp = await mine.post("/api/links/save", json={"name": "down", "url": "https://down.test", "token": "",
+                                                     "users": ["a b"]}, headers=as_user("admin", post=True))
+    assert resp.status_code == 400 and "a list of user names" in resp.json()["error"]
