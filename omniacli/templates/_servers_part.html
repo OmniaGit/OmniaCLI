@@ -11,7 +11,14 @@
   <div class="scroll">
   <table class="server-rows">
     <tr><th>Server</th><th>Workspace</th><th>Odoo, CPU of the last 15 minutes</th></tr>
-    {% for row in rows %}
+    {# running first (an instance of it running), then the others, each
+       alphabetical, under a light separator naming the group #}
+    {% set ordered = rows | sort(attribute="label", case_sensitive=false) %}
+    {% set running = ordered | selectattr("state", "running_any") | list %}
+    {% set available = ordered | rejectattr("state", "running_any") | list %}
+    {% for row in running + available %}
+    {% if loop.index0 == 0 and running %}<tr class="list-sep" data-list-sep><td colspan="3"><span>running</span></td></tr>{% endif %}
+    {% if loop.index0 == running | length %}<tr class="list-sep" data-list-sep><td colspan="3"><span>available</span></td></tr>{% endif %}
     <tr {{ item(row.text) }} data-server="{{ row.name }}">
       <td><div class="server-name"><a href="{{ row.base }}/servers/{{ row.name }}"><strong>{{ row.label }}</strong></a>
         <span class="view-buttons">

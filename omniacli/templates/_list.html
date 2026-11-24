@@ -79,6 +79,12 @@ const OmniaList = (function () {
       if (wanted.length && left && !group.open) { group.dataset.revealed = "1"; group.open = true; }
       else if ((!wanted.length || !left) && group.dataset.revealed) { delete group.dataset.revealed; group.open = false; }
     }
+    // a separator row (data-list-sep) with no shown item before the next one
+    for (const sep of root.querySelectorAll("[data-list-sep]")) {
+      let next = sep.nextElementSibling, any = false;
+      while (next && !next.hasAttribute("data-list-sep")) { if (next.hasAttribute("data-list-item") && !next.hidden) { any = true; break; } next = next.nextElementSibling; }
+      sep.hidden = !any;
+    }
     // a table (or its box: data-list-box) with nothing left to show
     for (const table of root.querySelectorAll("table")) {
       const own = table.querySelectorAll("[data-list-item]");

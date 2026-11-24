@@ -147,6 +147,8 @@ _TEMPLATES = Jinja2Templates(
     env=jinja2.Environment(loader=_TemplateLoader(Path(__file__).parent / "templates"),
                            autoescape=jinja2.select_autoescape()),
     context_processors=[_page_context])
+# a server row whose state ({role: run_state}) has an instance running
+_TEMPLATES.env.tests["running_any"] = lambda state: "running" in (state or {}).values()
 # The OmniaSolutions "O" (Client2019 Setup/dist/images/omnia.ico, 355x280,
 # centred on a transparent square); served without login, like any favicon.
 _STATIC = Path(__file__).parent / "static"
