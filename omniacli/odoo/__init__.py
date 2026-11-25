@@ -50,6 +50,14 @@ from . import checks, discover, odooconf, ops
 _PRIVATE = re.compile(r"passw|secret|token|key|^(db_host|db_port|db_user|data_dir|logfile|pidfile"
                       r"|addons_path|upgrade_path|pre_upgrade_scripts)$")
 
+# the dialog of Renew expiration
+_RENEW_PARAMS = (
+    Field("days", "Days until it expires", kind="number", default=30, required=True,
+          help="The new database.expiration_date: this many days from now"),
+    Field("restart", "Restart after", kind="checkbox", default=True,
+          help="A running Odoo reads the new values only after a restart"),
+)
+
 # a backup the copy of production may load: a zip of the production's folder
 _BACKUP_NAME = re.compile(r"[A-Za-z0-9._-]+\.zip")
 
@@ -420,6 +428,7 @@ class OdooPlugin(ServicePlugin):
                    confirm=lambda inst: f"pip install {ops.CLI_PACKAGE} in "
                                         f"{inst.options.venv_bin}{as_whom(inst)}?",
                    title=lambda inst, params: f"pip install {ops.CLI_PACKAGE} {inst.key}"),
+            *_renew_actions(self._renew_expiration),
             Action("copy-production", "Copy production to test", self._copy_production, scope="server",
                    icon="backup", dialog="copy_dialog.html", prepare=self._copy_params,
                    available=lambda srv: srv.production is not None and srv.test is not None,
@@ -585,6 +594,12 @@ class OdooPlugin(ServicePlugin):
         if params["restart"]:
             await restart(job, instance)
 
+    async def _renew_expiration(self, job: Job, instance: Instance, params: dict) -> None:
+        await ops.renew_expiration(job, instance, params["days"])
+        # a running Odoo keeps the old values in its cache
+        if params["restart"]:
+            await restart(job, instance)
+
     async def _pip_requirements(self, job: Job, instance: Instance, params: dict) -> None:
         await ops.install_requirements(job, instance.options.venv_bin, instance.options.odoo_bin,
                                        [r.path for r in instance.repositories], instance.run_as)
@@ -696,6 +711,32 @@ class OdooPlugin(ServicePlugin):
             "addons_path": addons,
             "odoo_conf_options": {k: v for k, v in options.items() if not _PRIVATE.search(k)},
         }
+
+
+def _renew_actions(run) -> list[Action]:
+    """Renew expiration: the same button on test (a developer's) and on
+    production, where it is an admin's and warns: a production's uuid is the
+    one its Odoo subscription knows."""
+    def action(suffix: str, role: str, production: bool, warning: str) -> Action:
+        return Action(
+            f"renew-expiration{suffix}", "Renew expiration", run, group="backup", icon="restart", role=role,
+            params=_RENEW_PARAMS, prepare=_renew_params,
+            available=lambda inst: (inst.role == "production") == production,
+            tooltip="A new database.uuid and an expiration date of Odoo Enterprise days from now "
+                    "(a development database whose subscription banner expired)",
+            confirm=lambda inst: f"{warning}A new database.uuid and expiration date "
+                                 f"for database {inst.options.database} of {inst.key}?",
+            title=lambda inst, params: f"Renew expiration {inst.key} ({params['days']} days)")
+
+    return [action("", "developer", False, ""),
+            action("-production", "admin", True,
+                   "This is a production database: a new uuid detaches it from its Odoo subscription. ")]
+
+
+def _renew_params(instance: Instance, params: dict) -> dict:
+    if not 1 <= params["days"] <= 3650:
+        raise ActionRefused("Days until it expires: from 1 to 3650")
+    return params
 
 
 def _update_params(instance: Instance, params: dict) -> dict:

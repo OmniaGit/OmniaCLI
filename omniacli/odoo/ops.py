@@ -34,6 +34,8 @@ CLI_PACKAGE = "click-odoo-contrib"
 LINK_SCRIPT = Path(__file__).with_name("link_filestore.py")
 # what click-odoo runs to set every user's password to admin
 PASSWORDS_SCRIPT = Path(__file__).with_name("reset_passwords.py")
+# what click-odoo runs to give the database a new uuid and expiration date
+RENEW_SCRIPT = Path(__file__).with_name("renew_expiration.py")
 # what the venv's python runs to load a plain SQL dump (the database dropped
 # and made again, the filestore left as it is)
 LOAD_SQL_SCRIPT = Path(__file__).with_name("load_sql.py")
@@ -608,6 +610,18 @@ async def reset_passwords(job: Job, instance: Instance, major: int) -> None:
         await run(job, as_user(instance.run_as, cmd, env), env=env)
     finally:
         shutil.rmtree(staging, ignore_errors=True)
+
+
+async def renew_expiration(job: Job, instance: Instance, days: int) -> None:
+    """click-odoo runs renew_expiration.py on the instance's database, as the
+    user the instance runs as: a new database.uuid and create_date, and an
+    expiration date days from now."""
+    opts = instance.options
+    job.log(f"--- database {opts.database}: a new database.uuid, expiration in {days} days")
+    env = odoo_env(instance)
+    with _staged_script(RENEW_SCRIPT, "omniacli-renew-") as script:
+        cmd = [opts.venv_bin / "click-odoo", "-c", opts.odoo_config, "-d", opts.database, script, str(days)]
+        await run(job, as_user(instance.run_as, cmd, env), env=env)
 
 
 async def share_filestore(job: Job, instance: Instance, src: Path, dst: Path, check: bool = False) -> None:
